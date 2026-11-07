@@ -135,6 +135,13 @@ jobs:
         run: cargo clippy --locked --no-default-features --features semantic-knowledge --all-targets -- -D warnings
       - name: Test local asset validation and embedding contract
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra inference::tests
+      - name: Test knowledge vector lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--locked --no-default-features --features semantic-knowledge --bin riltra)
+          cargo test "${args[@]}" knowledge_vector::tests -- --list | tr -d '\r' | grep -Fx 'knowledge_vector::tests::builds_only_active_heads_without_changing_canonical_data: test'
+          cargo test "${args[@]}" knowledge_vector::tests
       - name: Test deterministic MCP JSON with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra mcp_structured_json_is_recursively_sorted_for_core_byte_compatibility
       - name: Test deterministic JSON key ordering with optional feature graph

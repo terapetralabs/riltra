@@ -59,7 +59,9 @@ Use Petgraph 0.8.3 for one bounded graph-context operation over evidence read fr
 
 **Status as of 2026-11-07:** implementation is on open PR #45 and is pending merge and acceptance.
 
-**R2b — Derived index lifecycle:** provide explicit build, status and clear operations under the existing Riltra home. Build from one consistent active-knowledge snapshot; bind rows to repository identity, record revision, content digest and model fingerprint. Publish complete immutable generations atomically; changed source, interrupted builds or invalid paths must not replace the current generation or modify canonical knowledge. Readers and clear must be safe on Windows as well as Unix.
+**R2b — Derived index lifecycle:** provide explicit build, status and clear operations under the existing Riltra home. Build from one consistent active-knowledge snapshot; bind rows to repository identity, record revision, content digest and model fingerprint. Publish complete immutable generations atomically; changed source, interrupted builds or invalid paths must not replace the current generation or modify canonical knowledge. Readers and clear must be safe on Windows as well as Unix. SQLite writers are serialized through build publication, but `knowledge restore` requires a quiescent store and is not supported concurrently with vector build or status. Clear operates only on the derived vector store.
+
+Build and status validate canonical stores with the existing SQLite integrity check and stream ordered active rows for the corpus fingerprint. This reads the full canonical database on each snapshot; status does not materialize the active corpus, while build retains it for embedding.
 
 **R2c — Query and fallback:** add opt-in semantic knowledge search and preserve existing lexical behavior when it is absent. Validate candidates against current active revisions, digests, scope and evidence in one knowledge snapshot. Missing or unusable optional components fall back to FTS5 with an explicit reason. Bounded retrieval reports inexact totals honestly and does not invent pagination guarantees. Similarity never creates factual links.
 

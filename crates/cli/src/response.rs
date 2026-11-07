@@ -698,6 +698,13 @@ pub(crate) fn pagination_json(
     )
 }
 
+#[cfg(feature = "semantic-knowledge")]
+pub(crate) fn semantic_pagination_json(limit: usize) -> String {
+    format!(
+        "{{\"limit\":{limit},\"offset\":0,\"total\":null,\"truncated\":null,\"next_offset\":null,\"total_exact\":false}}"
+    )
+}
+
 /// Knowledge envelope: one shape for every operation, with an embedded
 /// newline (callers do not add another).
 pub(crate) fn knowledge_envelope(
@@ -739,6 +746,16 @@ pub(crate) fn knowledge_search_result_json(
     root: &Path,
 ) -> String {
     let hits: Vec<String> = hits.iter().map(|r| record_json(r, root)).collect();
+    knowledge_search_result_rendered_json(query, path, kind, include_archived, &hits)
+}
+
+fn knowledge_search_result_rendered_json(
+    query: Option<&str>,
+    path: Option<&str>,
+    kind: Option<&str>,
+    include_archived: bool,
+    hits: &[String],
+) -> String {
     let path = path
         .map(|p| format!(",\"path\":\"{}\"", json::escape(p)))
         .unwrap_or_default();
@@ -749,6 +766,101 @@ pub(crate) fn knowledge_search_result_json(
         include_archived,
         hits.join(",")
     )
+}
+
+#[cfg(feature = "semantic-knowledge")]
+fn semantic_record_hit_json(hit: &crate::knowledge_vector::SemanticHit, root: &Path) -> String {
+    let mut record = record_json(&hit.record, root);
+    record.pop();
+    format!(
+        "{record},\"embedding_truncated\":{}}}",
+        hit.embedding_truncated
+    )
+}
+
+#[cfg(feature = "semantic-knowledge")]
+pub(crate) fn knowledge_semantic_hits_result_json(
+    query: Option<&str>,
+    path: Option<&str>,
+    kind: Option<&str>,
+    hits: &[crate::knowledge_vector::SemanticHit],
+    root: &Path,
+    candidates_returned: usize,
+) -> String {
+    let hits = hits
+        .iter()
+        .map(|hit| semantic_record_hit_json(hit, root))
+        .collect::<Vec<_>>();
+    let mut result = knowledge_search_result_rendered_json(query, path, kind, false, &hits);
+    result.pop();
+    format!(
+        "{result},\"semantic\":{{\"status\":\"semantic\",\"reason\":null,\"candidate_limit\":1000,\"candidates_returned\":{candidates_returned}}}}}"
+    )
+}
+
+pub(crate) fn knowledge_semantic_search_result_json(
+    query: Option<&str>,
+    path: Option<&str>,
+    kind: Option<&str>,
+    hits: &[knowledge::RecordVersion],
+    root: &Path,
+    reason: Option<&str>,
+) -> String {
+    let mut result = knowledge_search_result_json(query, path, kind, false, hits, root);
+    result.pop();
+    format!(
+        "{result},\"semantic\":{{\"status\":\"fallback\",\"reason\":{},\"candidate_limit\":1000,\"candidates_returned\":null}}}}",
+        opt_str(&reason.map(str::to_string))
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn knowledge_search_output(
+    search: crate::knowledge_search::SearchOutcome,
+    query: Option<&str>,
+    path: Option<&str>,
+    kind: Option<&str>,
+    include_archived: bool,
+    limit: usize,
+    offset: usize,
+    root: &Path,
+) -> (String, u64, String) {
+    match search {
+        crate::knowledge_search::SearchOutcome::Lexical(page) => (
+            knowledge_search_result_json(query, path, kind, include_archived, &page.hits, root),
+            page.generation,
+            pagination_json(limit, offset, page.total, page.truncated, page.next_offset),
+        ),
+        #[cfg(feature = "semantic-knowledge")]
+        crate::knowledge_search::SearchOutcome::Semantic {
+            hits,
+            generation,
+            candidates_returned,
+        } => (
+            knowledge_semantic_hits_result_json(
+                query,
+                path,
+                kind,
+                &hits,
+                root,
+                candidates_returned,
+            ),
+            generation,
+            semantic_pagination_json(limit),
+        ),
+        crate::knowledge_search::SearchOutcome::Fallback { page, reason } => (
+            knowledge_semantic_search_result_json(
+                query,
+                path,
+                kind,
+                &page.hits,
+                root,
+                Some(reason),
+            ),
+            page.generation,
+            pagination_json(limit, offset, page.total, page.truncated, page.next_offset),
+        ),
+    }
 }
 
 pub(crate) fn knowledge_related_result_json(
@@ -1284,6 +1396,41 @@ mod tests {
         assert_eq!(
             record_json(&record, Path::new(".")),
             r#"{"id":"d1","revision":1,"kind":"decision","title":"First","body":"alpha","status":"active","author":"a","created_unix":100,"measurement":null,"evidence":[],"verification":"Unverified","support":"unknown"}"#
+        );
+    }
+
+    #[cfg(feature = "semantic-knowledge")]
+    #[test]
+    fn semantic_search_reports_passage_embedding_truncation_per_hit() {
+        let hit = crate::knowledge_vector::SemanticHit {
+            record: knowledge::RecordVersion {
+                id: "d1".to_string(),
+                revision: 1,
+                kind: "decision".to_string(),
+                title: "First".to_string(),
+                body: "alpha".to_string(),
+                status: "active".to_string(),
+                author: "a".to_string(),
+                created_unix: 100,
+                superseded_by: None,
+                retracted_reason: None,
+                retracted_author: None,
+                confirm_state: None,
+                measurement: None,
+                evidence: Vec::new(),
+            },
+            embedding_truncated: true,
+        };
+        assert_eq!(
+            knowledge_semantic_hits_result_json(
+                Some("q"),
+                None,
+                None,
+                &[hit],
+                Path::new("."),
+                1,
+            ),
+            "{\"query\":\"q\",\"kind\":null,\"include_archived\":false,\"hits\":[{\"id\":\"d1\",\"revision\":1,\"kind\":\"decision\",\"title\":\"First\",\"body\":\"alpha\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":100,\"measurement\":null,\"evidence\":[],\"verification\":\"Unverified\",\"support\":\"unknown\",\"embedding_truncated\":true}],\"semantic\":{\"status\":\"semantic\",\"reason\":null,\"candidate_limit\":1000,\"candidates_returned\":1}}"
         );
     }
 

@@ -45,6 +45,86 @@ fn run(home: &Path, args: &[&str]) -> (i32, String, String) {
     )
 }
 
+#[test]
+fn semantic_search_explicitly_falls_back_to_lexical_without_local_model() {
+    let h = home("semantic-search-fallback");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    create(&h, "krepo", "d1", "database choice", "use sqlite locally");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riltra"))
+        .args([
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "sqlite",
+            "--semantic",
+        ])
+        .env("RILTRA_HOME", &h)
+        .env_remove("RILTRA_MODEL_DIR")
+        .output()
+        .expect("spawn riltra");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["result"]["hits"][0]["id"], json!("d1"));
+    assert_eq!(result["result"]["semantic"]["status"], json!("fallback"));
+    assert_eq!(
+        result["result"]["semantic"]["reason"],
+        json!(if cfg!(feature = "semantic-knowledge") {
+            "model-unavailable"
+        } else {
+            "feature-unavailable"
+        })
+    );
+    assert_eq!(result["pagination"]["total"], json!(1));
+
+    for invalid in [
+        vec![
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/a.rs",
+            "--semantic",
+        ],
+        vec![
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "sqlite",
+            "--semantic",
+            "--offset",
+            "1",
+        ],
+        vec![
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "sqlite",
+            "--semantic",
+            "--include-archived",
+        ],
+    ] {
+        let (code, _, _) = run(&h, &invalid);
+        assert_eq!(
+            code, 2,
+            "semantic restrictions should be usage errors: {invalid:?}"
+        );
+    }
+}
+
 fn run_stdin(home: &Path, args: &[&str], input: &[u8]) -> (i32, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
         .args(args)

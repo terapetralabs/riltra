@@ -65,6 +65,8 @@ Build and status validate canonical stores with the existing SQLite integrity ch
 
 **R2c — Query and fallback:** add opt-in semantic knowledge search and preserve existing lexical behavior when it is absent. Validate candidates against current active revisions, digests, scope and evidence in one knowledge snapshot. Missing or unusable optional components fall back to FTS5 with an explicit reason. Bounded retrieval reports inexact totals honestly and does not invent pagination guarantees. Similarity never creates factual links.
 
+Semantic queries read provisioned model and runtime assets from `RILTRA_MODEL_DIR`; this path is configuration only and is not stored in the vector manifest. Query and fallback paths do not download or provision assets. Queries truncated by the model token window fall back to FTS5 with `query-truncated`; semantic hits report each stored passage's `embedding_truncated` state.
+
 Acceptance covers missing, corrupt or mismatched assets and indexes, stale/retracted revisions, restore with a repeated generation number but different content, cross-repository isolation, filtering, explicit fallback, offline/read-only behavior, and CLI/MCP parity.
 
 ### R3 — What / Impact / Why context

@@ -140,8 +140,40 @@ jobs:
         run: |
           set -euo pipefail
           args=(--locked --no-default-features --features semantic-knowledge --bin riltra)
-          cargo test "${args[@]}" knowledge_vector::tests -- --list | tr -d '\r' | grep -Fx 'knowledge_vector::tests::builds_only_active_heads_without_changing_canonical_data: test'
+          listed="$(cargo test "${args[@]}" knowledge_vector::tests -- --list | tr -d '\r')"
+          for name in \
+            knowledge_vector::tests::builds_only_active_heads_without_changing_canonical_data \
+            knowledge_vector::tests::semantic_vector_query_returns_ranked_candidates_without_writing \
+            knowledge_vector::tests::semantic_query_falls_back_when_the_model_truncates_the_input \
+            knowledge_vector::tests::semantic_search_reports_missing_lock_in_existing_cache_as_unavailable \
+            knowledge_vector::tests::model_fingerprint_revalidation_distinguishes_unavailable_from_changed; do
+            if ! printf '%s\n' "$listed" | grep -Fx "$name: test"; then
+              echo "required knowledge vector regression test is missing or ignored: $name" >&2
+              exit 1
+            fi
+          done
           cargo test "${args[@]}" knowledge_vector::tests
+      - name: Test R2c semantic search and CLI/MCP parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--locked --no-default-features --features semantic-knowledge)
+          run_exact() {
+            local test_name="$1"
+            shift
+            local listed
+            listed="$(cargo test "${args[@]}" "$@" "$test_name" -- --list | tr -d '\r')"
+            if ! printf '%s\n' "$listed" | grep -Fx "$test_name: test"; then
+              echo "required R2c regression test is missing or ignored: $test_name" >&2
+              exit 1
+            fi
+            cargo test "${args[@]}" "$@" "$test_name" -- --exact
+          }
+          run_exact knowledge_store::tests::semantic_candidates_revalidate_active_heads_kind_and_exact_evidence_path --bin riltra
+          run_exact knowledge_search::tests::semantic_request_validation_matches_lexical_bounds --bin riltra
+          run_exact response::tests::semantic_search_reports_passage_embedding_truncation_per_hit --bin riltra
+          run_exact semantic_search_explicitly_falls_back_to_lexical_without_local_model --test knowledge
+          run_exact t2_knowledge_search_matches_cli_missing_empty_populated_paging_and_escaping --test mcp
       - name: Test deterministic MCP JSON with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra mcp_structured_json_is_recursively_sorted_for_core_byte_compatibility
       - name: Test deterministic JSON key ordering with optional feature graph

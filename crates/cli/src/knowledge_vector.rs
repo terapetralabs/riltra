@@ -21,6 +21,7 @@ use lancedb::arrow::{
     arrow_schema::{DataType, Field, Schema},
 };
 use lancedb::query::{ColumnOrdering, ExecutableQuery, QueryBase, Select};
+use lancedb::DistanceType;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -28,6 +29,7 @@ const VECTOR_HOME: &str = "v";
 const LOCK_FILE: &str = "LOCK";
 const TABLE_NAME: &str = "v";
 const VECTOR_DIMENSIONS: usize = 384;
+const SEMANTIC_CANDIDATE_LIMIT: usize = 1000;
 const MANIFEST_VERSION: u32 = 1;
 // LanceDB creates 56-character data filenames below <table>.lance/data. Keep
 // a conservative budget below the observed failing paths in this backend;
@@ -873,6 +875,335 @@ fn validate_vector_table(path: &Path, manifest: &Manifest) -> Result<(usize, Str
     })
 }
 
+pub(crate) struct SemanticPage {
+    pub hits: Vec<SemanticHit>,
+    pub generation: u64,
+    pub candidates_returned: usize,
+}
+
+pub(crate) struct SemanticHit {
+    pub record: crate::knowledge::RecordVersion,
+    pub embedding_truncated: bool,
+}
+
+#[derive(Debug)]
+struct VectorCandidate {
+    repo: String,
+    root: String,
+    id: String,
+    revision: u64,
+    kind: String,
+    content_digest: String,
+    model_fingerprint: String,
+    embedding_truncated: bool,
+    distance: f32,
+}
+
+fn query_vector_table(path: &Path, vector: &[f32]) -> Result<Vec<VectorCandidate>, String> {
+    let uri = path
+        .to_str()
+        .ok_or_else(|| "vector path is not valid UTF-8".to_string())?;
+    let runtime =
+        tokio::runtime::Runtime::new().map_err(|e| format!("cannot create vector runtime: {e}"))?;
+    runtime.block_on(async {
+        let db = lancedb::connect(uri)
+            .execute()
+            .await
+            .map_err(|e| format!("cannot open vector generation: {e}"))?;
+        let table = db
+            .open_table(TABLE_NAME)
+            .execute()
+            .await
+            .map_err(|e| format!("cannot open vector table: {e}"))?;
+        let mut stream = table
+            .vector_search(vector.to_vec())
+            .map_err(|e| format!("cannot prepare vector query: {e}"))?
+            .distance_type(DistanceType::L2)
+            .select(Select::columns(&[
+                "repo",
+                "root",
+                "id",
+                "revision",
+                "kind",
+                "content_digest",
+                "model_fingerprint",
+                "embedding_truncated",
+                "_distance",
+            ]))
+            // This bounds returned candidates; LanceDB may still scan the full table without an index.
+            .limit(SEMANTIC_CANDIDATE_LIMIT)
+            .execute()
+            .await
+            .map_err(|e| format!("cannot execute vector query: {e}"))?;
+        let mut candidates = Vec::new();
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .map_err(|e| format!("cannot read vector query results: {e}"))?
+        {
+            let repo = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| "vector query repo column has the wrong type".to_string())?;
+            let root = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| "vector query root column has the wrong type".to_string())?;
+            let ids = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| "vector query id column has the wrong type".to_string())?;
+            let revisions = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| "vector query revision column has the wrong type".to_string())?;
+            let kinds = batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| "vector query kind column has the wrong type".to_string())?;
+            let digests = batch
+                .column(5)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| "vector query digest column has the wrong type".to_string())?;
+            let models = batch
+                .column(6)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| "vector query model column has the wrong type".to_string())?;
+            let embedding_truncated = batch
+                .column(7)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| "vector query truncation column has the wrong type".to_string())?;
+            let distances = batch
+                .column(8)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| "vector query distance column has the wrong type".to_string())?;
+            for row in 0..batch.num_rows() {
+                if [
+                    repo.is_null(row),
+                    root.is_null(row),
+                    ids.is_null(row),
+                    revisions.is_null(row),
+                    kinds.is_null(row),
+                    digests.is_null(row),
+                    models.is_null(row),
+                    embedding_truncated.is_null(row),
+                    distances.is_null(row),
+                ]
+                .into_iter()
+                .any(|null| null)
+                {
+                    return Err("vector query returned a null required value".into());
+                }
+                let distance = distances.value(row);
+                if !distance.is_finite() {
+                    return Err("vector query returned an invalid distance".into());
+                }
+                candidates.push(VectorCandidate {
+                    repo: repo.value(row).to_string(),
+                    root: root.value(row).to_string(),
+                    id: ids.value(row).to_string(),
+                    revision: revisions.value(row),
+                    kind: kinds.value(row).to_string(),
+                    content_digest: digests.value(row).to_string(),
+                    model_fingerprint: models.value(row).to_string(),
+                    embedding_truncated: embedding_truncated.value(row),
+                    distance,
+                });
+            }
+        }
+        if candidates.len() > SEMANTIC_CANDIDATE_LIMIT {
+            return Err("vector query exceeded the candidate limit".into());
+        }
+        candidates.sort_by(|a, b| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(candidates)
+    })
+}
+
+fn semantic_query_vector(
+    embedded: crate::inference::EmbeddedText,
+) -> Result<Vec<f32>, &'static str> {
+    if embedded.embedding_truncated {
+        Err("query-truncated")
+    } else {
+        Ok(embedded.vector)
+    }
+}
+
+fn validate_model_fingerprint(
+    current: Result<String, String>,
+    expected: &str,
+) -> Result<(), &'static str> {
+    match current {
+        Ok(current) if current == expected => Ok(()),
+        Ok(_) => Err("model-changed"),
+        Err(_) => Err("model-unavailable"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn semantic_search(
+    conn: &mut rusqlite::Connection,
+    home: &Path,
+    repo: &crate::registry::RepoEntry,
+    query: &str,
+    path_filter: Option<&str>,
+    kind_filter: Option<&str>,
+    limit: usize,
+    expected_generation: Option<u64>,
+    model_dir: Option<&Path>,
+) -> Result<Result<SemanticPage, &'static str>, String> {
+    let Some(model_dir) = model_dir else {
+        return Ok(Err("model-unavailable"));
+    };
+    let root = checked_root(repo)?;
+    let paths = match vector_paths(home, repo) {
+        Ok(paths) => paths,
+        Err(_) => return Ok(Err("index-unavailable")),
+    };
+    match check_dir(&paths.root) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Err("index-missing")),
+        Err(_) => return Ok(Err("index-unavailable")),
+    }
+    match check_dir(&paths.repo) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Err("index-missing")),
+        Err(_) => return Ok(Err("index-unavailable")),
+    }
+    let _lock = match open_lock(&paths, false, false) {
+        Ok(Some(lock)) => lock,
+        // The vector root and repo directory were already confirmed above.
+        // Missing lock state in an existing cache is an inconsistent index.
+        Ok(None) | Err(_) => return Ok(Err("index-unavailable")),
+    };
+    let manifest = match read_current_manifest(&paths.repo) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return Ok(Err("index-missing")),
+        Err(_) => return Ok(Err("index-unavailable")),
+    };
+    if manifest.repo != repo.name || manifest.root != root {
+        return Ok(Err("index-mismatch"));
+    }
+    let generation_dir = paths.repo.join(generation_name(manifest.sequence));
+    match check_dir(&generation_dir) {
+        Ok(true) if validate_tree(&generation_dir).is_ok() => {}
+        _ => return Ok(Err("index-unavailable")),
+    }
+    match validate_vector_table(&generation_dir, &manifest) {
+        Ok((rows, digest)) if rows == manifest.rows && digest == manifest.table_digest => {}
+        _ => return Ok(Err("index-unavailable")),
+    }
+    let model_fingerprint = match crate::inference::local_model_fingerprint(model_dir) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => return Ok(Err("model-unavailable")),
+    };
+    if model_fingerprint != manifest.model_fingerprint {
+        return Ok(Err("model-mismatch"));
+    }
+    let mut embeddings = match crate::inference::LocalEmbeddings::load_vector_model(model_dir) {
+        Ok(embeddings) => embeddings,
+        Err(_) => return Ok(Err("model-unavailable")),
+    };
+    let embedded = match embeddings.embed_query_vector(query) {
+        Ok(embedded) => embedded,
+        Err(_) => return Ok(Err("model-unavailable")),
+    };
+    let vector = match semantic_query_vector(embedded) {
+        Ok(vector) => vector,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    if let Err(reason) = validate_model_fingerprint(
+        crate::inference::local_model_fingerprint(model_dir),
+        &model_fingerprint,
+    ) {
+        return Ok(Err(reason));
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("cannot begin knowledge snapshot: {e}"))?;
+    let snapshot = read_corpus_tx(&tx, repo, Path::new(&root), false)?;
+    if let Some(expected) = expected_generation {
+        if snapshot.generation != expected {
+            return Err(format!(
+                "knowledge generation conflict: expected {expected} but store is at {}",
+                snapshot.generation
+            ));
+        }
+    }
+    if snapshot.generation != manifest.source_generation
+        || snapshot.fingerprint != manifest.corpus_fingerprint
+    {
+        return Ok(Err("index-stale"));
+    }
+    // The knowledge transaction remains open across candidate revalidation so
+    // generation, active heads, content digests, and evidence share one snapshot.
+    let candidates = match query_vector_table(&generation_dir, &vector) {
+        Ok(candidates) => candidates,
+        Err(_) => return Ok(Err("index-unavailable")),
+    };
+    if candidates.iter().any(|candidate| {
+        candidate.repo != repo.name
+            || candidate.root != root
+            || candidate.model_fingerprint != manifest.model_fingerprint
+            || candidate.content_digest.len() != 64
+            || !candidate
+                .content_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Ok(Err("index-unavailable"));
+    }
+    let ids = candidates
+        .iter()
+        .map(|candidate| candidate.id.clone())
+        .collect::<Vec<_>>();
+    let records =
+        crate::knowledge_store::active_candidates_tx(&tx, &ids, path_filter, kind_filter)?;
+    let mut records = records
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut hits = Vec::new();
+    for candidate in &candidates {
+        if let Some(record) = records.remove(&candidate.id) {
+            let digest = content_digest(&record.kind, &record.title, &record.body);
+            if candidate.revision != record.revision
+                || candidate.kind != record.kind
+                || candidate.content_digest != digest
+            {
+                return Ok(Err("index-unavailable"));
+            }
+            hits.push(SemanticHit {
+                record,
+                embedding_truncated: candidate.embedding_truncated,
+            });
+        }
+    }
+    let generation = snapshot.generation;
+    tx.commit()
+        .map_err(|e| format!("cannot finish knowledge snapshot: {e}"))?;
+    hits.truncate(limit);
+    Ok(Ok(SemanticPage {
+        hits,
+        generation,
+        candidates_returned: candidates.len(),
+    }))
+}
+
 #[cfg(test)]
 fn build_with<F>(
     home: &Path,
@@ -1591,6 +1922,113 @@ mod tests {
         let before = knowledge_store::read_generation(&conn).unwrap();
         assert_eq!(super::build_test(&home, &repo).unwrap(), 1);
         assert_eq!(knowledge_store::read_generation(&conn).unwrap(), before);
+    }
+
+    #[test]
+    fn semantic_vector_query_returns_ranked_candidates_without_writing() {
+        let (home, repo) = fixture();
+        let mut conn = knowledge_store::open_knowledge_at(&home, &repo, true).unwrap();
+        for id in ["b", "a"] {
+            knowledge_store::create_record(&mut conn, &record(id, "active")).unwrap();
+        }
+        let model = "1".repeat(64);
+        let embedding = vector();
+        let built =
+            super::build_with(&home, &repo, &model, |_, _| Ok((embedding.clone(), true))).unwrap();
+        let paths = super::vector_paths(&home, &repo).unwrap();
+        let generation = paths.repo.join(super::generation_name(built.sequence));
+        let files_before = std::fs::read_dir(&generation)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+
+        let candidates = super::query_vector_table(&generation, &vector()).unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(candidates.iter().all(|candidate| {
+            candidate.repo == repo.name
+                && candidate.root == repo.root
+                && candidate.model_fingerprint == model
+                && candidate.embedding_truncated
+                && candidate.distance.is_finite()
+        }));
+        let files_after = std::fs::read_dir(&generation)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files_after, files_before,
+            "query changed the vector generation"
+        );
+    }
+
+    #[test]
+    fn semantic_query_falls_back_when_the_model_truncates_the_input() {
+        let complete = crate::inference::EmbeddedText {
+            vector: vec![1.0, 2.0],
+            embedding_truncated: false,
+        };
+        assert_eq!(super::semantic_query_vector(complete).unwrap(), [1.0, 2.0]);
+
+        let truncated = crate::inference::EmbeddedText {
+            vector: vec![1.0, 2.0],
+            embedding_truncated: true,
+        };
+        assert_eq!(
+            super::semantic_query_vector(truncated),
+            Err("query-truncated")
+        );
+    }
+
+    #[test]
+    fn model_fingerprint_revalidation_distinguishes_unavailable_from_changed() {
+        assert_eq!(
+            super::validate_model_fingerprint(Ok("expected".into()), "expected"),
+            Ok(())
+        );
+        assert_eq!(
+            super::validate_model_fingerprint(Ok("other".into()), "expected"),
+            Err("model-changed")
+        );
+        assert_eq!(
+            super::validate_model_fingerprint(Err("permission denied".into()), "expected"),
+            Err("model-unavailable")
+        );
+    }
+
+    #[test]
+    fn semantic_search_reports_missing_lock_in_existing_cache_as_unavailable() {
+        let (home, repo) = fixture();
+        let mut conn = knowledge_store::open_knowledge_at(&home, &repo, true).unwrap();
+        knowledge_store::create_record(&mut conn, &record("a", "active")).unwrap();
+        let model = "1".repeat(64);
+        let _built = build_as(&home, &repo, &model);
+        let paths = super::vector_paths(&home, &repo).unwrap();
+        assert!(paths.repo.is_dir());
+        std::fs::remove_file(&paths.lock).unwrap();
+
+        let missing_model = home.join("missing-model");
+        match super::semantic_search(
+            &mut conn,
+            &home,
+            &repo,
+            "query",
+            None,
+            None,
+            10,
+            None,
+            Some(&missing_model),
+        )
+        .unwrap()
+        {
+            Err(reason) => assert_eq!(reason, "index-unavailable"),
+            Ok(_) => panic!("missing lock must disable semantic search"),
+        }
     }
 
     #[test]

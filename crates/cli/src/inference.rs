@@ -598,6 +598,10 @@ impl LocalEmbeddings {
         self.embed(&self.query_prefix.clone(), text)
     }
 
+    pub(crate) fn embed_query_vector(&mut self, text: &str) -> Result<EmbeddedText, String> {
+        self.embed_query(text).map_err(|error| error.to_string())
+    }
+
     pub(crate) fn embed_passage_vector(
         &mut self,
         title: &str,

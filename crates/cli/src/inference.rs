@@ -142,12 +142,12 @@ impl fmt::Display for InferenceError {
 impl std::error::Error for InferenceError {}
 
 #[derive(Debug)]
-struct EmbeddedText {
-    vector: Vec<f32>,
-    embedding_truncated: bool,
+pub(crate) struct EmbeddedText {
+    pub(crate) vector: Vec<f32>,
+    pub(crate) embedding_truncated: bool,
 }
 
-struct LocalEmbeddings {
+pub(crate) struct LocalEmbeddings {
     model: TextEmbedding,
     tokenizer: Tokenizer,
     _environment: ort::environment::Environment,
@@ -240,6 +240,65 @@ fn confined_file(root: &Path, relative: &str) -> Result<PathBuf, InferenceError>
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn hash_field(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+/// Fingerprint the verified local model and the approved runtime files.
+/// Asset contents are checked against their manifests before their declared
+/// digests contribute to the fingerprint.
+pub(crate) fn local_model_fingerprint(model_dir: &Path) -> Result<String, String> {
+    let manifest = model_manifest().map_err(|error| error.to_string())?;
+    let model_dir = model_dir.canonicalize().map_err(|error| {
+        format!(
+            "cannot resolve model directory '{}': {error}",
+            model_dir.display()
+        )
+    })?;
+    let model_assets =
+        read_model_assets(&model_dir, &manifest).map_err(|error| error.to_string())?;
+    let runtime_dir = confined_runtime_dir(&model_dir).map_err(|error| error.to_string())?;
+    verify_runtime_assets(&runtime_dir).map_err(|error| error.to_string())?;
+    let runtime_manifest =
+        read_runtime_manifest(&runtime_dir).map_err(|error| error.to_string())?;
+
+    let mut hash = Sha256::new();
+    hash_field(&mut hash, b"riltra-local-e5-model-v1");
+    hash_field(&mut hash, MODEL_MANIFEST.as_bytes());
+    let mut model_files = manifest.files.iter().collect::<Vec<_>>();
+    model_files.sort_by(|left, right| left.path.cmp(&right.path));
+    for file in model_files {
+        if !model_assets.contains_key(&file.path) {
+            return Err(format!(
+                "model asset missing after verification: {}",
+                file.path
+            ));
+        }
+        hash_field(&mut hash, file.path.as_bytes());
+        hash_field(&mut hash, file.sha256.to_ascii_lowercase().as_bytes());
+    }
+
+    let manifest_path =
+        confined_file(&runtime_dir, "runtime-manifest.json").map_err(|error| error.to_string())?;
+    let runtime_manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "cannot read runtime manifest '{}': {error}",
+            manifest_path.display()
+        )
+    })?;
+    hash_field(&mut hash, &runtime_manifest_bytes);
+    let mut runtime_files = std::iter::once(&runtime_manifest.main_library)
+        .chain(runtime_manifest.companion_libraries.iter())
+        .collect::<Vec<_>>();
+    runtime_files.sort_by(|left, right| left.path.cmp(&right.path));
+    for file in runtime_files {
+        hash_field(&mut hash, file.path.as_bytes());
+        hash_field(&mut hash, file.sha256.to_ascii_lowercase().as_bytes());
+    }
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn read_model_assets(
@@ -481,6 +540,10 @@ fn validate_embedding(vector: Vec<f32>) -> Result<Vec<f32>, InferenceError> {
 }
 
 impl LocalEmbeddings {
+    pub(crate) fn load_vector_model(model_dir: &Path) -> Result<Self, String> {
+        Self::load(model_dir).map_err(|error| error.to_string())
+    }
+
     fn load(model_dir: &Path) -> Result<Self, InferenceError> {
         let manifest = model_manifest()?;
         let runtime_dir = confined_runtime_dir(model_dir)?;
@@ -533,6 +596,15 @@ impl LocalEmbeddings {
 
     fn embed_query(&mut self, text: &str) -> Result<EmbeddedText, InferenceError> {
         self.embed(&self.query_prefix.clone(), text)
+    }
+
+    pub(crate) fn embed_passage_vector(
+        &mut self,
+        title: &str,
+        body: &str,
+    ) -> Result<EmbeddedText, String> {
+        self.embed_passage(title, body)
+            .map_err(|error| error.to_string())
     }
 
     fn embed_passage(&mut self, title: &str, body: &str) -> Result<EmbeddedText, InferenceError> {

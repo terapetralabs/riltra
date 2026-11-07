@@ -976,6 +976,10 @@ where
         }
     }
 
+    let sequence = latest_sequence(&paths.repo)?;
+    let generation_dir = paths.repo.join(generation_name(sequence));
+    check_lance_path_budget(&generation_dir)?;
+
     let mut vectors = Vec::with_capacity(snapshot.records.len());
     for record in &snapshot.records {
         vectors.push(embed(&record.title, &record.body)?);
@@ -983,7 +987,6 @@ where
     validate_vectors(&vectors)?;
     let table_digest =
         expected_table_digest(repo, &root, model_fingerprint, &snapshot.records, &vectors)?;
-    let sequence = latest_sequence(&paths.repo)?;
     while stage.exists() {
         stage = paths.repo.join(next_stage_name());
         check_lance_path_budget(&stage)?;
@@ -1039,7 +1042,6 @@ where
         return Err("knowledge changed during vector build; previous generation retained".into());
     }
 
-    let generation_dir = paths.repo.join(generation_name(sequence));
     if check_dir(&generation_dir)? {
         return Err("vector generation path already exists".into());
     }
@@ -2491,6 +2493,89 @@ mod tests {
         assert!(error.contains("supported Windows path budget"), "{error}");
         assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
         assert!(super::read_current_manifest(&paths.repo).unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn final_generation_path_budget_failure_preserves_the_previous_manifest() {
+        let short_home = tmpdir("");
+        let root = tmpdir("vector-root").canonicalize().unwrap();
+        let repo = RepoEntry {
+            name: "repo".into(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+        let mut conn = knowledge_store::open_knowledge_at(&short_home, &repo, true).unwrap();
+        knowledge_store::create_record(&mut conn, &record("active", "active")).unwrap();
+        drop(conn);
+        build_as(&short_home, &repo, &"4".repeat(64));
+
+        let base = tmpdir("").canonicalize().unwrap();
+        let long_stage_name = format!("s{:x}-{:08x}", std::process::id(), u32::MAX);
+        let mut selected_home = None;
+        for padding in 0..128 {
+            let candidate = base.join("a".repeat(padding)).join("home");
+            let repo_path = candidate
+                .join(super::VECTOR_HOME)
+                .join(super::hex_digest(repo.name.as_bytes()));
+            if super::check_lance_path_budget(&repo_path.join(&long_stage_name)).is_ok()
+                && super::check_lance_path_budget(&repo_path.join(super::generation_name(2)))
+                    .is_err()
+            {
+                selected_home = Some(candidate);
+                break;
+            }
+        }
+        let deep_home = selected_home.expect("a path where stage fits but generation does not");
+        std::fs::create_dir_all(&deep_home).unwrap();
+        std::fs::create_dir_all(
+            knowledge_store::knowledge_db_path(&deep_home, &repo.name)
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::copy(
+            knowledge_store::knowledge_db_path(&short_home, &repo.name),
+            knowledge_store::knowledge_db_path(&deep_home, &repo.name),
+        )
+        .unwrap();
+        std::fs::rename(
+            short_home.join(super::VECTOR_HOME),
+            deep_home.join(super::VECTOR_HOME),
+        )
+        .unwrap();
+
+        let paths = super::vector_paths(&deep_home, &repo).unwrap();
+        let staging_path = paths.repo.join(&long_stage_name);
+        let final_path = paths.repo.join(super::generation_name(2));
+        assert!(super::check_lance_path_budget(&staging_path).is_ok());
+        assert!(super::check_lance_path_budget(&final_path).is_err());
+        let manifest_path = paths.repo.join(super::manifest_name(1));
+        let before = std::fs::read(&manifest_path).unwrap();
+
+        let mut embed_called = false;
+        let vector = vector();
+        let error = super::build_with(&deep_home, &repo, &"5".repeat(64), |_, _| {
+            embed_called = true;
+            Ok((vector.clone(), false))
+        })
+        .unwrap_err();
+        assert!(error.contains("supported Windows path budget"), "{error}");
+        assert!(!embed_called, "reject before embedding records");
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+        assert!(super::read_current_manifest(&paths.repo).unwrap().is_some());
+        assert!(
+            std::fs::read_dir(&paths.repo).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with('s')),
+            "reject before creating a Lance staging directory"
+        );
+        assert!(
+            !final_path.exists(),
+            "reject before publishing an over-budget generation"
+        );
     }
 
     #[cfg(windows)]

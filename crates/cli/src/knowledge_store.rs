@@ -61,6 +61,65 @@ pub fn open_knowledge_at(
     open_inner(home, repo, create, false)
 }
 
+/// Open an existing canonical store read-write without creating it or
+/// changing its schema. Vector publication runs structural verification and
+/// its final freshness check inside `BEGIN IMMEDIATE` on this connection, so
+/// a canonical writer cannot commit between that snapshot and manifest
+/// publication, including in WAL mode.
+pub(crate) fn open_vector_build_guard_at(
+    home: &Path,
+    repo: &RepoEntry,
+) -> Result<Connection, String> {
+    if !paths::validate_name(&repo.name) {
+        return Err(format!("invalid repository name: '{}'", repo.name));
+    }
+    let chome = canonical_home(home, false)?;
+    let croot = paths::canonical_root(Path::new(&repo.root))
+        .map_err(|e| format!("cannot resolve repository root '{}': {e}", repo.root))?;
+    let cdir = ensure_knowledge_dir(&chome, false)?;
+    let db = cdir.join(format!("{}.db", repo.name));
+    let companions = companion_paths(&db);
+    for path in std::iter::once(&db).chain(companions.iter()) {
+        reject_link(path)?;
+    }
+    if !db.is_file() {
+        return Err(format!("no knowledge store for repository '{}'", repo.name));
+    }
+    let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| format!("cannot open knowledge store for '{}': {e}", repo.name))?;
+    let cdb = db
+        .canonicalize()
+        .map_err(|e| format!("knowledge store path escapes for '{}': {e}", repo.name))?;
+    if cdb != cdir.join(format!("{}.db", repo.name)) {
+        drop(conn);
+        return Err(format!(
+            "knowledge store path escapes via link for repository '{}'",
+            repo.name
+        ));
+    }
+    for path in companions.iter() {
+        reject_link(path)?;
+    }
+    conn.busy_timeout(Duration::from_millis(3000))
+        .map_err(|e| format!("cannot set knowledge store timeout: {e}"))?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map_err(|e| format!("not a readable knowledge database for '{}': {e}", repo.name))?;
+    let version: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| format!("cannot read knowledge schema version: {e}"))?;
+    if !matches!(version, 1..=KNOWLEDGE_SCHEMA_VERSION) {
+        return Err(format!(
+            "corrupt knowledge store for '{}': unexpected schema version {version}",
+            repo.name
+        ));
+    }
+    check_schema_complete(&conn, repo, version)?;
+    check_meta(&conn, repo, &croot, version)?;
+    Ok(conn)
+}
+
 /// Test-only init-failure injector: fails schema initialization after the DDL
 /// batch to prove the whole init rolls back atomically.
 #[cfg(test)]

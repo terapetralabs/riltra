@@ -829,6 +829,7 @@ Cargo metadata with `--all-features` resolves the complete locked graph. The row
 | Package | Version | License | Origin | Use and distribution |
 |---|---|---|---|---|
 | fastembed | 7.6.0 | Apache-2.0 | https://github.com/Anush008/fastembed-rs | Optional `semantic-knowledge` source build; not linked in official feature-off archives. Hub downloads disabled. |
+| futures-util | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs | Optional bounded streaming of LanceDB validation batches; not linked in official feature-off archives. |
 | lancedb | 0.41.0 | Apache-2.0 | https://github.com/lancedb/lancedb | Optional local vector-store source build; not linked in official feature-off archives. |
 | ort | 2.0.0-rc.15 | MIT OR Apache-2.0 | https://github.com/pykeio/ort | Optional runtime loader; dynamic library must be explicitly provisioned locally and hash-verified. |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes | Optional SHA-256 asset verification. |

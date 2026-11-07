@@ -17562,6 +17562,7 @@
     {
       "dependsOn": [
         "pkg:cargo/fastembed@7.6.0",
+        "pkg:cargo/futures-util@0.3.34",
         "pkg:cargo/lancedb@0.41.0",
         "pkg:cargo/ort@2.0.0-rc.15",
         "pkg:cargo/petgraph@0.8.3",

@@ -127,6 +127,16 @@ pub enum SemanticOp {
 /// exit code.
 #[derive(Debug, PartialEq)]
 pub enum KnowledgeOp {
+    VectorBuild {
+        repo: String,
+        model_dir: String,
+    },
+    VectorStatus {
+        repo: String,
+    },
+    VectorClear {
+        repo: String,
+    },
     Create {
         repo: String,
         input: String,
@@ -662,6 +672,28 @@ fn knowledge_value(
 
 fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String> {
     match sub {
+        "vector" => match args.get(2).map(String::as_str) {
+            Some("build") => {
+                let (v, _) = knowledge_flags(args, 3, &["--repo", "--model-dir"], &[])?;
+                Ok(KnowledgeOp::VectorBuild {
+                    repo: knowledge_value(&v, "--repo")?,
+                    model_dir: knowledge_value(&v, "--model-dir")?,
+                })
+            }
+            Some("status") => {
+                let (v, _) = knowledge_flags(args, 3, &["--repo"], &[])?;
+                Ok(KnowledgeOp::VectorStatus {
+                    repo: knowledge_value(&v, "--repo")?,
+                })
+            }
+            Some("clear") => {
+                let (v, _) = knowledge_flags(args, 3, &["--repo"], &[])?;
+                Ok(KnowledgeOp::VectorClear {
+                    repo: knowledge_value(&v, "--repo")?,
+                })
+            }
+            _ => Err(crate::usage()),
+        },
         "create" => {
             let (v, _) = knowledge_flags(args, 2, &["--repo", "--input"], &[])?;
             Ok(KnowledgeOp::Create {
@@ -1038,6 +1070,29 @@ mod tests {
         assert!(p(&["semantic", "query", "--repo", "r", "--path", "a.py"]).is_err());
         assert!(p(&["semantic", "frobnicate", "--repo", "r"]).is_err());
         assert!(p(&["semantic"]).is_err());
+    }
+
+    #[test]
+    fn parses_knowledge_vector_lifecycle_commands() {
+        assert!(matches!(
+            p(&[
+                "knowledge", "vector", "build", "--repo", "r", "--model-dir", "model"
+            ]),
+            Ok(Command::Knowledge {
+                op: KnowledgeOp::VectorBuild { repo, model_dir }
+            }) if repo == "r" && model_dir == "model"
+        ));
+        assert!(matches!(
+            p(&["knowledge", "vector", "status", "--repo", "r"]),
+            Ok(Command::Knowledge { op: KnowledgeOp::VectorStatus { repo } }) if repo == "r"
+        ));
+        assert!(matches!(
+            p(&["knowledge", "vector", "clear", "--repo", "r"]),
+            Ok(Command::Knowledge { op: KnowledgeOp::VectorClear { repo } }) if repo == "r"
+        ));
+        assert!(p(&["knowledge", "vector", "build", "--repo", "r"]).is_err());
+        assert!(p(&["knowledge", "vector", "status"]).is_err());
+        assert!(p(&["knowledge", "vector", "unknown", "--repo", "r"]).is_err());
     }
 
     #[test]

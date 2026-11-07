@@ -4684,6 +4684,7 @@ name = "riltra"
 version = "0.1.0"
 dependencies = [
  "fastembed",
+ "futures-util",
  "lancedb",
  "ort",
  "petgraph",

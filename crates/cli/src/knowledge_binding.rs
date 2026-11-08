@@ -615,6 +615,46 @@ fn resolve_code_anchor(
     })
 }
 
+pub(crate) fn anchor_from_trace(
+    conn: &Connection,
+    entry: &registry::RepoEntry,
+    root: &Path,
+    trace: &index::TraceQueryOut,
+) -> Result<CodeAnchor, String> {
+    let anchor = &trace.anchor;
+    let (byte_start, byte_end) = anchor
+        .span_bytes
+        .ok_or_else(|| "anchor unresolved: no source span".to_string())?;
+    if byte_start >= byte_end || trace.repo != entry.name || trace.snapshot.repo != entry.name {
+        return Err("anchor unresolved: code snapshot identity mismatch".to_string());
+    }
+    let root =
+        paths::canonical_root(root).map_err(|e| format!("cannot resolve repository root: {e}"))?;
+    if trace.snapshot.root != root.to_string_lossy() {
+        return Err("anchor unresolved: code snapshot root mismatch".to_string());
+    }
+    let path = semantic::validate_doc_path(&root, &anchor.path)?;
+    let (_, source_digest) = store::file_identity(conn, trace.snapshot.id, &path)?
+        .ok_or_else(|| "anchor unresolved: path is not in the pinned code snapshot".to_string())?;
+    Ok(CodeAnchor {
+        repo: entry.name.clone(),
+        repo_root_digest: store::content_digest(root.to_string_lossy().as_bytes()),
+        snapshot_id: trace.snapshot.id,
+        snapshot_nonce: trace.snapshot.nonce.clone(),
+        snapshot_digest: None,
+        source_digest,
+        path,
+        byte_start,
+        byte_end,
+        cursor_line: anchor.line1,
+        cursor_col: anchor.col1,
+        symbol_uri: anchor.symbol_uri.clone(),
+        display_name: anchor.display.clone(),
+        anchor_kind: anchor.kind.as_str().to_string(),
+        precision: anchor.precision.clone(),
+    })
+}
+
 fn validate_binding_input(input: &BindingInput) -> Result<(), String> {
     knowledge::validate_id(&input.record_id)?;
     if input.record_revision == 0 || input.record_revision > i64::MAX as u64 {
@@ -965,6 +1005,38 @@ fn freshness(
     }
 }
 
+fn pinned_anchor_unresolved_reason(
+    anchor: &CodeAnchor,
+    source: &Result<Vec<u8>, String>,
+) -> Option<String> {
+    let bytes = match source {
+        Ok(bytes) => bytes,
+        Err(reason) => return Some(reason.clone()),
+    };
+    if store::content_digest(bytes) != anchor.source_digest {
+        return Some("anchor unresolved: source changed since pinned code snapshot".to_string());
+    }
+    let Some(span) = bytes.get(anchor.byte_start..anchor.byte_end) else {
+        return Some("anchor unresolved: span is outside current source".to_string());
+    };
+    if std::str::from_utf8(span).is_err() {
+        return Some("anchor unresolved: span is not UTF-8 source text".to_string());
+    }
+    None
+}
+
+fn binding_matches_pinned_anchor(binding: &BindingView, anchor: &CodeAnchor) -> bool {
+    let same_span = binding.byte_start == anchor.byte_start && binding.byte_end == anchor.byte_end;
+    let same_cursor =
+        binding.cursor_line == anchor.cursor_line && binding.cursor_col == anchor.cursor_col;
+    binding.repo == anchor.repo
+        && binding.path == anchor.path
+        && binding.source_digest == anchor.source_digest
+        && (same_span || same_cursor)
+        && binding.symbol_uri == anchor.symbol_uri
+        && binding.anchor_kind == anchor.anchor_kind
+}
+
 fn binding_from_row(
     row: &rusqlite::Row<'_>,
     source: &Result<Vec<u8>, String>,
@@ -1222,6 +1294,163 @@ pub(crate) fn at(
         offset,
         truncated,
         next_offset,
+        generation: current_generation,
+        schema_version,
+    })
+}
+
+/// Read bindings for a code anchor already resolved from a pinned code snapshot.
+/// The first knowledge read pins this deferred transaction; the code snapshot is
+/// intentionally independent from this knowledge generation.
+pub(crate) fn at_pinned(
+    conn: &Connection,
+    entry: &registry::RepoEntry,
+    anchor: &CodeAnchor,
+    limit: usize,
+    generation: Option<u64>,
+) -> Result<AtPage, String> {
+    if anchor.repo != entry.name
+        || anchor.byte_start >= anchor.byte_end
+        || anchor.cursor_line == 0
+        || anchor.cursor_col == 0
+        || !(1..=knowledge::SEARCH_LIMIT_MAX).contains(&limit)
+    {
+        return Err("invalid pinned knowledge-at anchor or page bounds".to_string());
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("cannot begin knowledge-at read: {e}"))?;
+    let current_generation = knowledge_store::read_generation(&tx)?;
+    if let Some(expected) = generation {
+        if expected != current_generation {
+            return Err(format!(
+                "knowledge generation conflict: expected {expected} but store is at {current_generation}"
+            ));
+        }
+    }
+    let schema_version = read_schema_version(&tx)?;
+    if schema_version < 3 {
+        let mut page = empty_at(
+            &anchor.path,
+            anchor.cursor_line,
+            anchor.cursor_col,
+            current_generation,
+            schema_version,
+        );
+        page.status = "unavailable";
+        page.limit = limit;
+        return Ok(page);
+    }
+    let root = paths::canonical_root(Path::new(&entry.root))
+        .map_err(|e| format!("cannot resolve repository root: {e}"))?;
+    let root_digest = store::content_digest(root.to_string_lossy().as_bytes());
+    if anchor.repo_root_digest != root_digest
+        || semantic::validate_doc_path(&root, &anchor.path)? != anchor.path
+    {
+        return Err("pinned knowledge-at anchor is outside the registered repository".into());
+    }
+    let current_source = semantic::confined_read(&root, &anchor.path, crate::scan::MAX_FILE_BYTES)
+        .map_err(|e| format!("anchor source unavailable: {e}"));
+    let mut unresolved_reason = pinned_anchor_unresolved_reason(anchor, &current_source);
+    let selection = i64::try_from(anchor.byte_start)
+        .map_err(|_| "code anchor start is out of range".to_string())?;
+    let selection_end = i64::try_from(anchor.byte_end)
+        .map_err(|_| "code anchor end is out of range".to_string())?;
+    let total: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM code_bindings b WHERE b.repo=?1 AND b.repo_root_digest=?2 AND b.path=?3
+             AND ((b.byte_start=?4 AND b.byte_end=?5)
+                  OR (b.cursor_line=?6 AND b.cursor_col=?7))",
+            params![
+                entry.name,
+                anchor.repo_root_digest,
+                anchor.path,
+                selection,
+                selection_end,
+                anchor.cursor_line,
+                anchor.cursor_col
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot count code bindings: {e}"))?;
+    let limit_i64 =
+        i64::try_from(limit).map_err(|_| "knowledge-at limit out of range".to_string())?;
+    let mut stmt = tx
+        .prepare(
+            "SELECT b.binding_id,b.repo,b.snapshot_id,b.snapshot_nonce,b.snapshot_digest,b.source_digest,
+                    b.path,b.byte_start,b.byte_end,b.cursor_line,b.cursor_col,b.symbol_uri,b.display_name,
+                    b.anchor_kind,b.precision,b.record_id,b.record_revision,r.kind,r.title,r.body,r.status,
+                    b.relation,b.author,b.rationale,b.provenance,b.created_unix,
+                    t.author,t.reason,t.created_unix
+             FROM code_bindings b
+             JOIN records r ON r.id=b.record_id AND r.revision=b.record_revision
+             LEFT JOIN code_binding_retractions t USING(binding_id)
+             WHERE b.repo=?1 AND b.repo_root_digest=?2 AND b.path=?3
+               AND ((b.byte_start=?4 AND b.byte_end=?5)
+                    OR (b.cursor_line=?6 AND b.cursor_col=?7))
+             ORDER BY b.binding_id LIMIT ?8",
+        )
+        .map_err(|e| format!("cannot prepare code binding read: {e}"))?;
+    let mut rows = stmt
+        .query_map(
+            params![
+                entry.name,
+                anchor.repo_root_digest,
+                anchor.path,
+                selection,
+                selection_end,
+                anchor.cursor_line,
+                anchor.cursor_col,
+                limit_i64
+            ],
+            |row| binding_from_row(row, &current_source),
+        )
+        .map_err(|e| format!("cannot read code bindings: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot read code bindings: {e}"))?;
+    drop(stmt);
+    drop(tx);
+    let total = usize::try_from(total)
+        .map_err(|_| "corrupt knowledge store: negative binding count".to_string())?;
+    if rows.len() < total.min(limit) {
+        return Err("corrupt knowledge store: binding count does not match readable rows".into());
+    }
+    for binding in &mut rows {
+        if !binding_matches_pinned_anchor(binding, anchor) {
+            binding.freshness = "unresolved".to_string();
+            binding.freshness_reason =
+                Some("stored binding identity does not match pinned code anchor".to_string());
+            unresolved_reason.get_or_insert_with(|| {
+                "stored binding identity does not match pinned code anchor".to_string()
+            });
+        }
+    }
+    let truncated = rows.len() < total;
+    let status = if unresolved_reason.is_some()
+        || rows.iter().any(|binding| binding.freshness == "unresolved")
+    {
+        "unresolved"
+    } else if rows.is_empty() {
+        "no-link-proven"
+    } else if rows.iter().all(|binding| binding.retracted) {
+        "retracted"
+    } else if rows.iter().any(|binding| binding.freshness == "stale") {
+        "stale"
+    } else {
+        "linked"
+    };
+    Ok(AtPage {
+        status,
+        unresolved_reason,
+        path: anchor.path.clone(),
+        line: anchor.cursor_line,
+        col: anchor.cursor_col,
+        bindings: rows,
+        total,
+        limit,
+        offset: 0,
+        truncated,
+        next_offset: truncated.then_some(limit),
         generation: current_generation,
         schema_version,
     })
@@ -1553,6 +1782,63 @@ pub(crate) fn at_cli(
 
 #[cfg(test)]
 mod review_regressions {
+    fn anchor() -> super::CodeAnchor {
+        super::CodeAnchor {
+            repo: "r".to_string(),
+            repo_root_digest: "root".to_string(),
+            snapshot_id: 1,
+            snapshot_nonce: "old-snapshot".to_string(),
+            snapshot_digest: None,
+            source_digest: "same-source".to_string(),
+            path: "src/lib.rs".to_string(),
+            byte_start: 4,
+            byte_end: 7,
+            cursor_line: 1,
+            cursor_col: 5,
+            symbol_uri: Some("scip pkg 1.0.0 lib/f().".to_string()),
+            display_name: Some("f".to_string()),
+            anchor_kind: "semantic".to_string(),
+            precision: "Heuristic".to_string(),
+        }
+    }
+
+    fn binding() -> super::BindingView {
+        super::BindingView {
+            binding_id: 1,
+            repo: "r".to_string(),
+            snapshot_id: 2,
+            snapshot_nonce: "promoted-snapshot".to_string(),
+            snapshot_digest: "snapshot-digest".to_string(),
+            source_digest: "same-source".to_string(),
+            path: "src/lib.rs".to_string(),
+            byte_start: 4,
+            byte_end: 7,
+            cursor_line: 1,
+            cursor_col: 5,
+            symbol_uri: Some("scip pkg 1.0.0 lib/f().".to_string()),
+            display_name: Some("f".to_string()),
+            anchor_kind: "semantic".to_string(),
+            precision: "Heuristic".to_string(),
+            record_id: "decision".to_string(),
+            record_revision: 1,
+            record_kind: "decision".to_string(),
+            record_title: "Decision".to_string(),
+            record_body: "Body".to_string(),
+            record_status: "active".to_string(),
+            relation: "documents".to_string(),
+            author: "test".to_string(),
+            rationale: "rationale".to_string(),
+            provenance: "test".to_string(),
+            created_unix: 1,
+            retracted: false,
+            retraction_author: None,
+            retraction_reason: None,
+            retracted_unix: None,
+            freshness: "fresh".to_string(),
+            freshness_reason: None,
+        }
+    }
+
     #[test]
     fn empty_page_has_fixed_order_and_escaped_path() {
         let page = super::empty_at("a\"b\\c.rs", 1, 2, 0, 0);
@@ -1568,5 +1854,22 @@ mod review_regressions {
             super::write_error_code("code anchor span no longer binds source bytes"),
             3
         );
+    }
+
+    #[test]
+    fn pinned_identity_accepts_new_snapshot_with_same_source_and_symbol() {
+        let anchor = anchor();
+        let binding = binding();
+        assert_ne!(anchor.snapshot_id, binding.snapshot_id);
+        assert_ne!(anchor.snapshot_nonce, binding.snapshot_nonce);
+        assert!(super::binding_matches_pinned_anchor(&binding, &anchor));
+    }
+
+    #[test]
+    fn pinned_identity_rejects_different_symbol_at_same_span() {
+        let anchor = anchor();
+        let mut binding = binding();
+        binding.symbol_uri = Some("scip pkg 1.0.0 lib/g().".to_string());
+        assert!(!super::binding_matches_pinned_anchor(&binding, &anchor));
     }
 }

@@ -138,9 +138,9 @@ struct ContextInput {
     col: u32,
     /// Optional exact SCIP symbol identity to check against the position.
     symbol: Option<String>,
-    /// Reserved search text. The current operation reports it as not_run.
+    /// Optional literal query over active knowledge records.
     query: Option<String>,
-    /// Reserved semantic retrieval request. The current operation reports it as not_run.
+    /// Add opt-in local semantic candidates; requires `query` and reports lexical fallback when unavailable.
     semantic: Option<bool>,
     /// Maximum graph depth (default 3, range 1-6).
     depth: Option<usize>,
@@ -395,7 +395,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_context",
-        description = "Read bounded caller-to-anchor graph context from one pinned code-index snapshot. Distances are limited to the inspected subgraph. Optional query and semantic inputs are reported as not_run until their follow-up stages. When to call: to inspect nearby graph evidence with stable local distances.",
+        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. When to call: to inspect code impact and its recorded rationale together.",
         annotations(
             title = "Read graph context",
             read_only_hint = true,
@@ -1241,6 +1241,11 @@ fn context_doc(input: &ContextInput) -> CallToolResult {
         Ok(value) => value,
         Err(e) => return e,
     };
+    let entry = registry::RepoEntry {
+        name: input.repo.clone(),
+        root: canon.to_string_lossy().into_owned(),
+        added_unix: 0,
+    };
     let request = context::ContextRequest {
         path: &input.path,
         line: input.line,
@@ -1269,7 +1274,14 @@ fn context_doc(input: &ContextInput) -> CallToolResult {
         ),
         store::IndexRead::Error(message) => tool_error("store_error", &message),
         store::IndexRead::Ready(mut conn) => {
-            let result = match context::query_conn(&mut conn, &input.repo, &canon, &request) {
+            let result = match context::query_conn(
+                &mut conn,
+                &home,
+                &entry,
+                &input.repo,
+                &canon,
+                &request,
+            ) {
                 Ok(result) => result,
                 Err(e) => return context_query_error(e),
             };
@@ -1284,7 +1296,9 @@ fn context_doc(input: &ContextInput) -> CallToolResult {
 fn context_query_error(message: String) -> CallToolResult {
     if message.starts_with("invalid context bounds")
         || message.starts_with("context query")
+        || message.starts_with("context semantic")
         || message.starts_with("context response envelope")
+        || message.starts_with("context response metadata")
     {
         tool_error("invalid_input", &message)
     } else {

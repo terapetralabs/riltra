@@ -166,8 +166,10 @@ fourteen tools:
 
 - `riltra_repo_list`, `riltra_repo_status`, `riltra_health`
 - `riltra_code_search`, `riltra_code_callers`, `riltra_code_callees`,
-  `riltra_code_trace`, `riltra_code_impact`, `riltra_context` — bounded graph
-  context with caller-to-anchor distances
+  `riltra_code_trace`, `riltra_code_impact`, `riltra_context` — bounded code
+  graph and impact context, composed with explicit anchor bindings and optional
+  lexical or semantic knowledge matches. Bindings stay separate from unlinked
+  matches; a match does not establish a code-to-record relationship.
 - `riltra_knowledge_search` — literal text or exact evidence-path search by
   default; set `semantic: true` for optional local vector search, which reports
   an explicit FTS5 fallback reason when unavailable. See the [local inference

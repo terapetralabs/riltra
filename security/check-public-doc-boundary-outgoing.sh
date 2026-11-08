@@ -49,7 +49,7 @@ is_supported_remote_url() {
     esac
     path=${path%/}
     path=${path%.git}
-    path=${path,,}
+    path=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
     [[ "$path" == /terapetralabs/riltra || "$path" == /ryanaraaful/riltra ]]
 }
 

@@ -609,7 +609,7 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
                 "total": result.knowledge.semantic.total,
                 "total_exact": result.knowledge.semantic.total_exact,
                 "truncated": result.knowledge.semantic.truncated,
-                "candidate_limit": 1000,
+                "candidate_limit": crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT,
                 "candidates_returned": result.knowledge.semantic.candidates_returned,
                 "omitted_by_budget": omitted_semantic_hits,
             },
@@ -1027,7 +1027,8 @@ pub(crate) fn knowledge_semantic_hits_result_json(
     let mut result = knowledge_search_result_rendered_json(query, path, kind, false, &hits);
     result.pop();
     format!(
-        "{result},\"semantic\":{{\"status\":\"semantic\",\"reason\":null,\"candidate_limit\":1000,\"candidates_returned\":{candidates_returned}}}}}"
+        "{result},\"semantic\":{{\"status\":\"semantic\",\"reason\":null,\"candidate_limit\":{},\"candidates_returned\":{candidates_returned}}}}}",
+        crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT
     )
 }
 
@@ -1042,8 +1043,9 @@ pub(crate) fn knowledge_semantic_search_result_json(
     let mut result = knowledge_search_result_json(query, path, kind, false, hits, root);
     result.pop();
     format!(
-        "{result},\"semantic\":{{\"status\":\"fallback\",\"reason\":{},\"candidate_limit\":1000,\"candidates_returned\":null}}}}",
-        opt_str(&reason.map(str::to_string))
+        "{result},\"semantic\":{{\"status\":\"fallback\",\"reason\":{},\"candidate_limit\":{},\"candidates_returned\":null}}}}",
+        opt_str(&reason.map(str::to_string)),
+        crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT
     )
 }
 

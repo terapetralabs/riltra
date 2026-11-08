@@ -16,9 +16,10 @@ fi
 
 is_local_only() {
     local LC_ALL=C
-    local path=${1,,} segment rest local_doc
+    local path segment rest local_doc
+    path=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
     local -a local_docs=(
-        ROADMAP.md
+        roadmap.md
         docs/hybrid-architecture-roadmap.md
         docs/documentation-changelog.md
         docs/audits/2026-10-19-windows-wal-concurrency.md
@@ -105,7 +106,7 @@ is_local_only() {
     )
 
     for local_doc in "${local_docs[@]}"; do
-        [[ "$path" == "${local_doc,,}" ]] && return 0
+        [[ "$path" == "$local_doc" ]] && return 0
     done
 
     case "$path" in */open_source_code_intelligence_knowledge_blueprint.md) return 0 ;; esac

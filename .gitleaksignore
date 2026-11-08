@@ -2,7 +2,6 @@
 # superseded revision of security/testdata/allowed/drive-paths.txt introduced
 # in 2538e69 (rewritten by a0804fc). Each fingerprint pins the exact
 # commit/path/rule/line: the path, the rule and future content stay scanned.
-# Re-evaluate and remove these entries after the history rewrite
-# (security/history-rewrite-plan.md).
+# Re-evaluate these entries if the synthetic fixture findings are removed.
 2538e69c0708a66dca93e3b007b13f8d76424b99:security/testdata/allowed/drive-paths.txt:local-absolute-path:2
 2538e69c0708a66dca93e3b007b13f8d76424b99:security/testdata/allowed/drive-paths.txt:local-absolute-path:4

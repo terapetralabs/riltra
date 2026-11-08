@@ -27,8 +27,8 @@ use serde::Deserialize;
 use crate::json;
 use crate::knowledge_store_absent;
 use crate::{
-    context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_store, paths,
-    registry, response, store,
+    context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_search,
+    knowledge_store, paths, registry, response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -165,6 +165,8 @@ struct KnowledgeSearchInput {
     path: Option<String>,
     /// Optional record kind filter (CLI `--kind`).
     kind: Option<String>,
+    /// Use the local semantic index when available; otherwise report an FTS5 fallback.
+    semantic: Option<bool>,
     /// Include archived records (CLI `--include-archived`; default false).
     include_archived: Option<bool>,
     /// Include superseded records (CLI `--include-superseded`; default false).
@@ -407,7 +409,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_search",
-        description = "Search knowledge records by literal text and/or an exact stored evidence path (same document as CLI `knowledge search`). A missing store answers with an empty result and creates nothing. When to call: to look for recorded decisions or notes by text or by an evidence path.",
+        description = "Search knowledge records by literal text and/or an exact stored evidence path (same document as CLI `knowledge search`). Set semantic=true to use the local vector index; it requires provisioned assets at RILTRA_MODEL_DIR and falls back to FTS5 with an explicit reason when unavailable. A missing store answers with an empty result and creates nothing. When to call: to look for recorded decisions or notes by text or by an evidence path.",
         annotations(
             title = "Search knowledge records",
             read_only_hint = true,
@@ -1409,6 +1411,28 @@ fn knowledge_entry(repo: &str, root: &str) -> registry::RepoEntry {
 
 fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
     // Validation order and texts mirror `main.rs::knowledge_search`.
+    let semantic = input.semantic.unwrap_or(false);
+    if semantic
+        && input
+            .query
+            .as_deref()
+            .is_none_or(|query| query.trim().is_empty())
+    {
+        return tool_error(
+            "invalid_input",
+            "semantic search requires a nonempty text query",
+        );
+    }
+    if semantic
+        && (input.include_archived.unwrap_or(false)
+            || input.include_superseded.unwrap_or(false)
+            || input.include_retracted.unwrap_or(false))
+    {
+        return tool_error(
+            "invalid_input",
+            "semantic search only supports active records",
+        );
+    }
     if input.query.is_none() && input.path.is_none() {
         return tool_error(
             "invalid_input",
@@ -1449,6 +1473,12 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if semantic && offset != 0 {
+        return tool_error(
+            "invalid_input",
+            "semantic search does not support a nonzero offset",
+        );
+    }
     let (home, canon) = match repo_root(&input.repo) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1462,18 +1492,30 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
             if let Err(e) = knowledge_store::check_missing_store_generation(input.generation) {
                 return knowledge_query_error(e);
             }
-            return doc(&response::knowledge_envelope(
-                &input.repo,
-                0,
-                "search",
-                &response::knowledge_search_result_json(
+            let result = if semantic {
+                response::knowledge_semantic_search_result_json(
+                    echoed_query,
+                    input.path.as_deref(),
+                    input.kind.as_deref(),
+                    &[],
+                    &canon,
+                    Some("knowledge-store-missing"),
+                )
+            } else {
+                response::knowledge_search_result_json(
                     echoed_query,
                     input.path.as_deref(),
                     input.kind.as_deref(),
                     input.include_archived.unwrap_or(false),
                     &[],
                     &canon,
-                ),
+                )
+            };
+            return doc(&response::knowledge_envelope(
+                &input.repo,
+                0,
+                "search",
+                &result,
                 Some(response::pagination_json(limit, offset, 0, false, None)),
             ));
         }
@@ -1481,12 +1523,15 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
         Err(e) => return tool_error("store_error", &e),
     }
     let entry = knowledge_entry(&input.repo, &root);
-    let conn = match knowledge_store::open_knowledge(&entry, false) {
+    let mut conn = match knowledge_store::open_knowledge(&entry, false) {
         Ok(conn) => conn,
         Err(e) => return knowledge_query_error(e),
     };
-    let page = match knowledge_store::search(
-        &conn,
+    let model_dir = std::env::var_os("RILTRA_MODEL_DIR").map(PathBuf::from);
+    let search = match knowledge_search::search(
+        &mut conn,
+        &home,
+        &entry,
         query,
         input.path.as_deref(),
         input.kind.as_deref(),
@@ -1496,29 +1541,28 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
         limit,
         offset,
         input.generation,
+        semantic,
+        model_dir.as_deref(),
     ) {
-        Ok(page) => page,
+        Ok(search) => search,
         Err(e) => return knowledge_query_error(e),
     };
+    let (result, generation, pagination) = response::knowledge_search_output(
+        search,
+        echoed_query,
+        input.path.as_deref(),
+        input.kind.as_deref(),
+        input.include_archived.unwrap_or(false),
+        limit,
+        offset,
+        &canon,
+    );
     doc(&response::knowledge_envelope(
         &input.repo,
-        page.generation,
+        generation,
         "search",
-        &response::knowledge_search_result_json(
-            echoed_query,
-            input.path.as_deref(),
-            input.kind.as_deref(),
-            input.include_archived.unwrap_or(false),
-            &page.hits,
-            &canon,
-        ),
-        Some(response::pagination_json(
-            limit,
-            offset,
-            page.total,
-            page.truncated,
-            page.next_offset,
-        )),
+        &result,
+        Some(pagination),
     ))
 }
 

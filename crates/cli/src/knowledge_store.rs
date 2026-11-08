@@ -1939,6 +1939,77 @@ pub struct SearchPage {
     pub generation: u64,
 }
 
+pub(crate) fn active_candidates_tx(
+    tx: &Transaction<'_>,
+    ids: &[String],
+    path: Option<&str>,
+    kind: Option<&str>,
+) -> Result<Vec<RecordVersion>, String> {
+    if ids.len() > 1000 {
+        return Err("semantic candidate count exceeds 1000".into());
+    }
+    if let Some(path) = path {
+        crate::knowledge::validate_search_path(path)?;
+    }
+    if let Some(kind) = kind {
+        crate::knowledge::validate_kind(kind)?;
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = (1..=ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut sql = format!(
+        "SELECT {RECORD_COLS} FROM records r
+         WHERE r.id IN ({placeholders})
+           AND r.revision = (SELECT current_revision FROM heads WHERE id = r.id)
+           AND r.status = 'active'"
+    );
+    let mut args = ids
+        .iter()
+        .cloned()
+        .map(rusqlite::types::Value::Text)
+        .collect::<Vec<_>>();
+    if let Some(kind) = kind {
+        sql.push_str(&format!(" AND r.kind = ?{}", args.len() + 1));
+        args.push(rusqlite::types::Value::Text(kind.to_string()));
+    }
+    if let Some(path) = path {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM evidence e
+                         WHERE e.id = r.id AND e.revision = r.revision AND e.path = ?{})",
+            args.len() + 1
+        ));
+        args.push(rusqlite::types::Value::Text(path.to_string()));
+    }
+    sql.push_str(" ORDER BY r.id COLLATE BINARY");
+
+    let mut statement = tx
+        .prepare(&sql)
+        .map_err(|e| format!("cannot validate semantic candidates: {e}"))?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(args.iter()), record_from_row)
+        .map_err(|e| format!("cannot query semantic candidates: {e}"))?;
+    let records = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot read semantic candidate: {e}"))?;
+    drop(statement);
+    let has_lifecycle = lifecycle_present(tx)?;
+    let mut by_id = std::collections::HashMap::new();
+    for mut record in records {
+        let revision = i64::try_from(record.revision)
+            .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
+        record.measurement = read_measurement(tx, &record.id, revision)?;
+        record.evidence = read_evidence(tx, &record.id, revision)?;
+        load_record_lifecycle(tx, has_lifecycle, &mut record)?;
+        by_id.insert(record.id.clone(), record);
+    }
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
 /// Quote user tokens as FTS5 phrases: internal quotes double, each token
 /// stays one literal, and phrases join with spaces (implicit AND). Quoting
 /// neutralizes operators, column filters and SQL-looking text, but FTS5 still
@@ -6927,6 +6998,56 @@ mod tests {
 
     fn search_default(conn: &Connection, query: &str) -> Result<SearchPage, String> {
         search(conn, query, None, None, false, false, false, 50, 0, None)
+    }
+
+    #[test]
+    fn semantic_candidates_revalidate_active_heads_kind_and_exact_evidence_path() {
+        let (home, repo) = setup("semanticcandidates");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &kind_record("d1", "decision", "first")).unwrap();
+        create_record(&mut conn, &kind_record("d2", "decision", "second")).unwrap();
+        create_record(&mut conn, &kind_record("b1", "constraint", "constraint")).unwrap();
+        create_record(&mut conn, &kind_record("arc", "decision", "archive")).unwrap();
+        update_record(&mut conn, "d1", 1, &update_to("first v2", "active")).unwrap();
+        update_record(&mut conn, "arc", 1, &update_to("archived", "archived")).unwrap();
+        for (id, revision, path) in [
+            ("d1", 1, "old.rs"),
+            ("d1", 2, "src/decision.rs"),
+            ("d2", 1, "src/decision.rs"),
+            ("b1", 1, "src/decision.rs"),
+            ("arc", 2, "src/decision.rs"),
+        ] {
+            conn.execute(
+                "INSERT INTO evidence (id, revision, seq, path, digest) VALUES (?1, ?2, 0, ?3, ?4)",
+                rusqlite::params![id, revision, path, "0".repeat(64)],
+            )
+            .unwrap();
+        }
+        let ids = ["d2", "d1", "b1", "arc", "missing"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let tx = conn.transaction().unwrap();
+        let generation = read_generation(&tx).unwrap();
+        let mut writer = open_rw(&home, &repo);
+        update_record(
+            &mut writer,
+            "d2",
+            1,
+            &update_to("second archived", "archived"),
+        )
+        .unwrap();
+        let hits =
+            active_candidates_tx(&tx, &ids, Some("src/decision.rs"), Some("decision")).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            ["d2", "d1"]
+        );
+        assert_eq!(hits[1].revision, 2);
+        assert_eq!(hits[1].evidence[0].path, "src/decision.rs");
+        assert_eq!(read_generation(&tx).unwrap(), generation);
+        tx.commit().unwrap();
+        assert_eq!(show_record(&writer, "d2", None).unwrap().status, "archived");
     }
 
     #[test]

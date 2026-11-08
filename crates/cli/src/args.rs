@@ -164,6 +164,7 @@ pub enum KnowledgeOp {
         query: Option<String>,
         path: Option<String>,
         kind: Option<String>,
+        semantic: bool,
         include_archived: bool,
         include_superseded: bool,
         include_retracted: bool,
@@ -752,6 +753,7 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
                     "--generation",
                 ],
                 &[
+                    "--semantic",
                     "--include-archived",
                     "--include-superseded",
                     "--include-retracted",
@@ -762,6 +764,7 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
                 query: v.get("--query").cloned(),
                 path: v.get("--path").cloned(),
                 kind: v.get("--kind").cloned(),
+                semantic: flags.contains("--semantic"),
                 include_archived: flags.contains("--include-archived"),
                 include_superseded: flags.contains("--include-superseded"),
                 include_retracted: flags.contains("--include-retracted"),
@@ -1093,6 +1096,33 @@ mod tests {
         assert!(p(&["knowledge", "vector", "build", "--repo", "r"]).is_err());
         assert!(p(&["knowledge", "vector", "status"]).is_err());
         assert!(p(&["knowledge", "vector", "unknown", "--repo", "r"]).is_err());
+    }
+
+    #[test]
+    fn parses_knowledge_search_semantic_option() {
+        assert!(matches!(
+            p(&[
+                "knowledge",
+                "search",
+                "--repo",
+                "r",
+                "--query",
+                "q",
+                "--semantic"
+            ]),
+            Ok(Command::Knowledge {
+                op: KnowledgeOp::Search { semantic: true, .. }
+            })
+        ));
+        assert!(matches!(
+            p(&["knowledge", "search", "--repo", "r", "--query", "q"]),
+            Ok(Command::Knowledge {
+                op: KnowledgeOp::Search {
+                    semantic: false,
+                    ..
+                }
+            })
+        ));
     }
 
     #[test]

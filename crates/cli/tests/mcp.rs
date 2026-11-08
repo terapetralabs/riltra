@@ -48,6 +48,7 @@ fn spawn_with<F: FnOnce(&mut Command)>(home: &Path, configure: F) -> Session {
         // Hermetic by default: the operator's provider must not leak into a
         // test that means to have none. The semantic tests set it explicitly.
         .env_remove("RILTRA_LSP_SERVER")
+        .env_remove("RILTRA_MODEL_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -480,13 +481,18 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
             "offset",
             "path",
             "query",
-            "repo"
+            "repo",
+            "semantic"
         ],
         "{search_schema}"
     );
     assert_eq!(
         search_schema["additionalProperties"], false,
         "{search_schema}"
+    );
+    assert_eq!(
+        search_schema["properties"]["semantic"]["type"],
+        json!(["boolean", "null"])
     );
     let show_schema = &find("riltra_knowledge_show")["inputSchema"];
     let mut required: Vec<&str> = show_schema["required"]
@@ -1243,7 +1249,10 @@ fn run_cli(cfg: &Path, args: &[&str]) -> (i32, String, String) {
 /// The CLI with extra environment variables (the mock language server's).
 fn run_cli_with_env(cfg: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_riltra"));
-    command.args(args).env("RILTRA_HOME", cfg);
+    command
+        .args(args)
+        .env("RILTRA_HOME", cfg)
+        .env_remove("RILTRA_MODEL_DIR");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -3833,11 +3842,28 @@ fn t2_knowledge_search_matches_cli_missing_empty_populated_paging_and_escaping()
             json!({"repo": "krepo", "query": "kjson", "generation": 4}),
             vec!["--query", "kjson", "--generation", "4"],
         ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "semantic": true}),
+            vec!["--query", "kjson", "--semantic"],
+        ),
     ] {
         let got = kjson(&mut s, id, "riltra_knowledge_search", &mcp);
         let mut args = vec!["knowledge", "search", "--repo", "krepo"];
         args.extend(cli);
         kparity(&h, &got, &args);
+        if mcp["semantic"] == json!(true) {
+            assert_eq!(got["result"]["semantic"]["status"], json!("fallback"));
+            assert_eq!(
+                got["result"]["semantic"]["reason"],
+                json!(if cfg!(feature = "semantic-knowledge") {
+                    "model-unavailable"
+                } else {
+                    "feature-unavailable"
+                })
+            );
+            assert_eq!(got["result"]["hits"][0]["id"], json!("b1"));
+            assert_eq!(got["pagination"]["total"], json!(4));
+        }
         id += 1;
     }
 

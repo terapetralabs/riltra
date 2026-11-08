@@ -1,8 +1,0 @@
-# Probe: trace --repo mmsp-pin --path colmap/src/colmap/mvs/patch_match.cc --line 233 --col 28 --depth 2 --to README.md:1:1
-# Index: candidate index built at b311bb6 (byte copy of the pinned snapshot, digests identical to the G-SYN baseline)
-
-## before (binary at b311bb6), exit 3
-error: anchor unresolved: source-changed; reindex before syntax fallback
-
-## after (binary with the fix), exit 3
-error: anchor unresolved: unsupported-extension; files of this type are never parsed or indexed

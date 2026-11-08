@@ -1,2 +1,0 @@
-scan of the pinned snapshot with the HEAD binary, two runs
-run1 and run2 byte-identical: yes

@@ -1,5 +1,0 @@
-    Checking riltra v0.1.0 (<REPOSITORY_ROOT>\.codex-wiy-work\crates\cli)
-warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `\\?\<REPOSITORY_ROOT>\.codex-wiy-work\target\debug\incremental\knowledge-3tf7mib3m84bh\s-hnnhmo1uwe-086xph3-working`
-
-warning: `riltra` (test "knowledge") generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.94s

@@ -1,5 +1,0 @@
-You are testing the Riltra MCP server's structured domain-error handling. Use only the riltra_riltra_* tools; do not use read or shell.
-
-1. Call riltra_riltra_code_callers exactly once with repo="does-not-exist", path="crates/cli/src/knowledge.rs", line=89, col=1. Do this even though you expect an error.
-2. Then call riltra_riltra_health with no arguments.
-3. Report the exact error returned by the first call and whether the health tool still responds. Do not retry the first call with another repository.

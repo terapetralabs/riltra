@@ -1,3 +1,0 @@
-[ 40%] Built target geom
-[100%] Built target demo
-

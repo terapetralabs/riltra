@@ -1,7 +1,0 @@
-# Targeted GREEN run (cargo test --locked --test edges, filter: the three CUDA and source-changed tests)
-test changed_destination_still_reports_source_changed ... ok
-test cuda_destination_reports_its_unsupported_reason_not_source_changed ... ok
-test task4_syntax_fallback_rejects_changed_source ... ok
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 148 filtered out; finished in 0.21s
-# fmt --check exit (after cargo fmt --all)
-exit=0

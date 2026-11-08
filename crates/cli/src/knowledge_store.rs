@@ -245,9 +245,8 @@ fn companion_paths(db: &Path) -> [PathBuf; 3] {
 
 /// Total metadata inspections allowed at a store-controlled path. Windows
 /// retries a transient `PermissionDenied` (os error 5) that antivirus or
-/// filter drivers can raise while holding `-wal`/`-shm` during SQLite cleanup
-/// (see `docs/audits/2026-10-19-windows-wal-concurrency.md`); every other
-/// platform keeps the original single inspection.
+/// filter drivers can raise while holding `-wal`/`-shm` during SQLite cleanup;
+/// every other platform keeps the original single inspection.
 const INSPECT_ATTEMPTS: u32 = if cfg!(windows) { 3 } else { 1 };
 
 /// Fixed pause between retried inspections, mirroring SQLite's documented

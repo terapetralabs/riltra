@@ -1,1 +1,0 @@
-node v24.19.0 cargo cargo 1.99.1 (5f94df478 2026-08-27) rustc rustc 1.99.1 (58cf8f9c3 2026-10-13) pwsh 7.6.6 git git version 2.53.0.windows.2 os Windows 11 Pro 10.0.26300

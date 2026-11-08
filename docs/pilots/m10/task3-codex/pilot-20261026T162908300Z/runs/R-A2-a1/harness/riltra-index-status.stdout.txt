@@ -1,1 +1,0 @@
-{"repo":"m10","root":"\\\\?\\<TASK3_RUNSET>\\R-A2-a1\\snapshot","freshness":"fresh","reasons":[],"fts":true,"snapshot":{"id":1,"created_unix":1793034455,"head":null,"branch":null,"dirty":false,"status_at_write":"fresh","nonce":"22924-1793034455582639400-0"}}

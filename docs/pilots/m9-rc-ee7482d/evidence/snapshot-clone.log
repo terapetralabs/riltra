@@ -1,8 +1,0 @@
-origin HEAD before: fa5f74d940f29d04b0bb192a7c2fb7d31e3ac785
-origin porcelain before: 0
-snapshot HEAD: d62f06a576d8e76b705c8ecc57fc380f7ebc9c44
-snapshot tree: c5482ea00481675e0aa921538f560947b68dca12
-snapshot porcelain: 0
-later commit 2b1bf42 in snapshot: commit
-origin HEAD after: fa5f74d940f29d04b0bb192a7c2fb7d31e3ac785
-origin porcelain after: 0

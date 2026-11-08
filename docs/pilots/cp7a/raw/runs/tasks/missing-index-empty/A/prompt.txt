@@ -1,3 +1,0 @@
-Search symbols for `main` in repository `empty`. How many results are returned, what reason is reported, and did Riltra create an index?
-
-Access: use only the shell tool, running the read-only wrapper <CP7A_ROOT>\bin\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.

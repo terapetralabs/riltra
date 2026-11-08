@@ -1,4 +1,0 @@
-#META {"label":"smoke-version","wall_ms":429,"wall_s":0.43,"peak_working_set":80736256,"peak_rss_mib":77.0,"exit_code":0,"finished_at":"2026-10-20T13:59:37.8576806+08:00"}
-riltra 0.1.0
-
-#STDERR

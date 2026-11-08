@@ -1,2 +1,0 @@
-{"id":"item_0","type":"error","message":"Under-development features enabled: skip_host_skill_discovery. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in <CODEX_HOME_SHARED>\\config.toml."}
-{"id":"item_1","type":"agent_message","text":"I couldn’t access the repository: command execution failed because the native executor is unavailable. I can’t reliably list the call sites without reading the Rust source."}

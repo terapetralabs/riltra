@@ -1,6 +1,0 @@
-"Repository: the current working directory. Report the current value of the constant MAX_JSON_DEPTH in the Rust source under crates/cli/src. Then list the line of every statement in that source that reads the constant. Do not list the constant's definition. Do not modify any file.
-Output a first line in this form:
-value <literal as written in the source>
-Then one line per reading statement, in this form:
-reader <path>:<line>
-"

@@ -1,3 +1,0 @@
-PASS value-line
-FAIL reader-lines
-STATUS FAIL

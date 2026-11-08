@@ -1,8 +1,0 @@
-# Checks run after the fix (2026-10-26)
-cargo test --locked                                    : 786 passed, 0 failed (783 before + 3 new)
-cargo fmt --all -- --check                             : exit 0
-cargo clippy --locked --all-targets -- -D warnings     : exit 0
-node --test grade.test.cjs                             : 56 pass, 0 fail
-node --test fact-digest.test.cjs                       : 16 pass, 0 fail
-frozen queries (22) rerun on the candidate index       : 22 of 22 identical to the previous candidate outputs
-  (volatile metadata removed, bench root placeholder)  : CUDA refusal (d3-2) unchanged: cuda-experimental

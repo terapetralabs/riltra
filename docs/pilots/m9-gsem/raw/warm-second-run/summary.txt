@@ -1,7 +1,0 @@
-rust-analyzer: rust-analyzer 1.99.1 (58cf8f9c 2026-10-13)
-scip-typescript: 0.4.0
-rust-analyzer definition bytes=
-rust-analyzer references count=3
-rust-analyzer semantic status: null
-scip-typescript import: {"repo":"ts","snapshot":1,"import":2,"provider":"scip-typescript","provider_version":"0.4.0","documents":2,"definitions":4,"references":6,"skipped":[],"verification":"Unverified","fallback_reason":"none"}
-scip-typescript query symbols=2

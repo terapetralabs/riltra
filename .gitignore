@@ -10,9 +10,134 @@ CLAUDE.md
 # this directory). Never commit this file.
 OPEN_SOURCE_CODE_INTELLIGENCE_KNOWLEDGE_BLUEPRINT.md
 
-# Internal planning/specification documents: kept out of the public repo.
-# Private backup lives outside this directory. Never commit these.
+# Local-only plans and documentation of internal work. These specific files
+# are kept in the working tree and removed from the Git index separately.
+/ROADMAP.md
+/docs/hybrid-architecture-roadmap.md
+/docs/documentation-changelog.md
+/security/history-rewrite-plan.md
+/docs/audits/2026-10-19-windows-wal-concurrency.md
+/docs/codex/2026-11-05-codex-readiness-design.md
+/docs/codex/2026-11-05-codex-readiness-plan.md
 docs/superpowers/
+
+# Historical milestone gate, verification, and acceptance records. Product
+# behavior and limits are documented in the public README and release notes.
+/docs/m0-verification.md
+/docs/m1-verification.md
+/docs/m2-validation.md
+/docs/m3-validation.md
+/docs/m4-validation.md
+/docs/m5-validation.md
+/docs/m6-task4-validation.md
+/docs/m6-task5-validation.md
+/docs/m6-task6-validation.md
+/docs/m6-task7-correction-validation.md
+/docs/m6-task7-validation.md
+/docs/m6-validation.md
+/docs/m7-validation.md
+/docs/m8-design-gate.md
+/docs/m8-final-acceptance-review.md
+/docs/m8-opencode-first-amendment.md
+/docs/m8-owner-acceptance.md
+/docs/m9-clangd-mcp-implementation.md
+/docs/m9-clangd-mcp-integration-design.md
+/docs/m9-clangd-pilot.md
+/docs/m9-consolidation.md
+/docs/m9-cp1-pilot-spec.md
+/docs/m9-cp2-evidence.md
+/docs/m9-cp2-harness-correction.md
+/docs/m9-cp2-reevaluation.md
+/docs/m9-cp3-evidence.md
+/docs/m9-cp4-evidence.md
+/docs/m9-cpp-semantic-index-decision-2026-10-25.md
+/docs/m9-cpp-semantic-index-spike-2026-10-25.md
+/docs/m9-design-gate.md
+/docs/m9-e7-implementation.md
+/docs/m9-e7-reference-resolution-design.md
+/docs/m9-e7-slice1-implementation.md
+/docs/m9-e7-slice2-evidence-and-decision.md
+/docs/m9-e7-slice2-implementation-spec.md
+/docs/m9-gknw-amendment.md
+/docs/m9-grader-correction-amendment-2026-10-25.md
+/docs/m9-grf-transparency-amendment.md
+/docs/m9-gsem-amendment.md
+/docs/m9-gsyn-import-span-amendment.md
+/docs/m9-inl-amendment.md
+/docs/m9-lsp-hardening.md
+/docs/m9-preprelease-acceptance-amendment.md
+/docs/m9-release-candidate-gate-amendment-2026-10-26.md
+/docs/m9-task5-capability-gap-evaluation.md
+/docs/m9-task6-final-verification.md
+/docs/m10-consolidation.md
+/docs/m10-design-gate.md
+/docs/m10-phase-b-amendment-2026-11-04.md
+/docs/m10-task5-decision.md
+
+# Internal correctness and provider evaluation records. Keep the user-facing
+# binding and review procedures public.
+/docs/riltra-correctness-followup-2026-11-02.md
+/docs/riltra-e0s-semantic-reliability-2026-10-29.md
+/docs/riltra-impact-evidence-design-2026-10-31.md
+/docs/riltra-multilanguage-baseline-2026-11-03.md
+/docs/riltra-multilanguage-evaluation-plan-2026-11-03.md
+/docs/riltra-rust-alias-correctness-2026-11-03.md
+/docs/riltra-rust-semantic-feasibility-2026-10-31.md
+/docs/riltra-what-impact-why-implementation.md
+/docs/riltra-wiy-correctness-evaluation-2026-10-31.md
+/docs/riltra-wiy-correctness-plan-2026-10-31.md
+/docs/riltra-wiy-followup-2026-10-29.md
+/docs/riltra-wiy-full-project-recheck-2026-10-31.md
+/docs/riltra-wiy-research-2026-10-31.md
+
+# Reviewed internal pilot packages and reports. These contain benchmark
+# protocols, scripts, raw results, session data or owner-only remediation plans.
+# Exact package rules leave unrelated pilot examples and test fixtures alone.
+/docs/pilots/agent-kebenaran-2026-11-02/
+/docs/pilots/clangd/
+/docs/pilots/cp2/
+/docs/pilots/cp2-reeval/
+/docs/pilots/cp3/
+/docs/pilots/cp7a/
+/docs/pilots/e7-slice2-evidence/
+/docs/pilots/m6-measure.ps1
+/docs/pilots/m6-profile.cjs
+/docs/pilots/m6-real-providers.cjs
+/docs/pilots/m6-windows-evidence.json
+/docs/pilots/m9-gknw/
+/docs/pilots/m9-grf-transparency/
+/docs/pilots/m9-gsyn-fix/
+/docs/pilots/m9-rc/
+/docs/pilots/m9-rc-ee7482d/
+/docs/pilots/m9-task6/
+/docs/pilots/riltra-e0s-semantic-reliability-2026-10-29/
+/docs/pilots/wiy-correctness-2026-10-31/
+/docs/pilots/m10/task3-codex-sanitized-20261026T162908300Z.zip
+/docs/pilots/m10/task4-opencode-sanitized-20261027.zip
+/docs/pilots/wiy-caller-precision-2026-10-31/REPORT.md
+/docs/pilots/wiy-caller-precision-2026-10-31/results/
+# Keep the minimal source fixtures used by code tests from these two otherwise
+# local evaluation packages.
+/docs/pilots/riltra-rust-semantic-feasibility-2026-10-31/MANIFEST.sha256
+/docs/pilots/riltra-rust-semantic-feasibility-2026-10-31/results/
+/docs/pilots/riltra-rust-semantic-feasibility-2026-10-31/diagnosis/closure-fixture/callers.json
+
+# Raw captures and frozen benchmark subdirectories from remaining pilot sets.
+/docs/pilots/**/raw/
+/docs/pilots/**/raw-*/
+/docs/pilots/**/bench/
+/docs/pilots/m10/**/runs/
+/docs/pilots/m10/**/freeze/
+/docs/pilots/m10/task2-claude-code/
+/docs/pilots/m10/task3-codex/
+/docs/pilots/m10/task4-opencode/
+# The dated multilanguage evaluation package contains agent protocols,
+# session evaluations and per-case results. Keep the separate Rust fixture
+# used as a reproducible example in the worktree.
+/docs/pilots/multilanguage-correctness-2026-11-03/
+# These pilot indexes describe internal benchmark procedures and link only to
+# evidence or gate records kept local above.
+/docs/pilots/cp2-harness-fix/README.md
 
 # Release packaging output and the generated license bundle (regenerated into every archive).
 /dist/

@@ -1,7 +1,0 @@
-server pid=23000 port=29100
-server listening on http://127.0.0.1:29100
-[15:52:18.943] INFO (#675): spawning process {
-  command: "<ROOT>\\bin\\riltra.exe",
-  args: [ "mcp" ],
-  cwd: "<ROOT>\\sessions\\bench\\A1-R\\workspace",
-}

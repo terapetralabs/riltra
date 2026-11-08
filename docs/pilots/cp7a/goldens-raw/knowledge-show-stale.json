@@ -1,2 +1,0 @@
-{"schema_version":1,"repo":"other","generation":1,"operation":"show","result":{"id":"cp7a-other-stale","revision":1,"kind":"constraint","title":"Stale evidence fixture","body":"This record's evidence was captured before the fixture file changed.","status":"active","author":"cp7a","created_unix":1792343757,"measurement":null,"evidence":[{"path":"c/main.c","byte_start":null,"byte_end":null,"digest":"3f6445e46d4e7eed","git_head":null,"git_branch":null,"freshness":{"status":"stale","observed_digest":"b93b5ca83bc92eb4"}}],"verification":"Unverified","support":"unverified"}}
-

@@ -1,3 +1,0 @@
-Report Riltra's version, the number of registered repositories, and whether the environment doctor passes.
-
-Access: use only the direct Riltra MCP tools named riltra_riltra_*. Their input schemas describe the arguments. Do not use read, shell, or any other tool. Answer the question with the requested values and the evidence you observed.

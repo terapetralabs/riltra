@@ -1,5 +1,0 @@
-Command: Get-Command gitleaks -ErrorAction SilentlyContinue
-Result: not found
-Pinned scanner from security/scan.sh: gitleaks 8.30.1
-Scan not executed because pinned scanner is unavailable in PATH.
-Launch attempts and errors are preserved in security-scan.* and status-junction-test.log.

@@ -1,1 +1,0 @@
-{"repo":"mmsp-pin","root":"\\\\?\\<CP2_BENCH>\\mmsp-d62f06a","freshness":"stale","reasons":["dirty"],"fts":true,"snapshot":{"id":<SNAP>,"created_unix":1792478424,"head":"d62f06a576d8e76b705c8ecc57fc380f7ebc9c44","branch":null,"dirty":true,"status_at_write":"fresh","nonce":"<NONCE>"}}

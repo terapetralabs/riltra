@@ -1,4 +1,0 @@
-#META {"label":"smoke-repo-list","wall_ms":474,"wall_s":0.475,"peak_working_set":79912960,"peak_rss_mib":76.2,"exit_code":0,"finished_at":"2026-10-20T14:00:20.1765964+08:00"}
-{"repos":[{"name":"mmsp-pin","root":"\\\\?\\<CP2_BENCH>\\mmsp-d62f06a","added_unix":1792475983}]}
-
-#STDERR

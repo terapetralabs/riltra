@@ -1,9 +1,0 @@
-{
-  "executable": "<REPOSITORY_ROOT>\\.codex-wiy-work\\target\\debug\\riltra.exe",
-  "arguments": [
-    "mcp"
-  ],
-  "working_directory": "<REPOSITORY_ROOT>\\.codex-wiy-work",
-  "riltra_home": "<REPOSITORY_ROOT>\\.codex-wiy-work\\wiy-run-final\\home",
-  "stdin_present": true
-}

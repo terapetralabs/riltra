@@ -1,1 +1,0 @@
-{"schema_version":1,"repo":"wiy","generation":2,"operation":"at","result":{"status":"no-link-proven","unresolved_reason":null,"anchor":{"path":"src/lib.rs","line":5,"col":8},"schema_version":3,"bindings":[]},"pagination":{"limit":50,"offset":0,"total":0,"truncated":false,"next_offset":null}}

@@ -1,8 +1,0 @@
-# GREEN, after the fix (same filter, same index code path)
-test missing_unsupported_destination_fails_path_validation_before_the_refusal ... ok
-test changed_destination_still_reports_source_changed ... ok
-test unsupported_extension_anchor_reports_its_reason_not_source_changed ... ok
-test task4_syntax_fallback_rejects_changed_source ... ok
-test unsupported_extension_destination_reports_its_reason_not_source_changed ... ok
-test cuda_destination_reports_its_unsupported_reason_not_source_changed ... ok
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 148 filtered out

@@ -1,9 +1,0 @@
-# Hasil tindak lanjut empat prioritas
-
-Implementasi menggunakan source span yang digest-nya cocok untuk nama kandidat saat `display_name` semantic kosong. Nama cadangan terpisah dari display name knowledge binding; pemilihan kandidat tidak mengubah identitas atau menaikkan candidate menjadi `CALLS`. Regresi mencakup candidate module scope, stale, dan dua file tidak terkait dengan nama sama. [Diagnosis](diagnosis-typescript.md) mencatat keterbatasan dan pengamatan pada artifact `scip-typescript` asli.
-
-Pengujian source nyata mencakup [Nano Stores](nanostores.md), dan analisis tambahan pada log producer Rust ada di [laporan Rust](rust-repository.md). Oracle Nano Stores yang dibekukan hanya tiga call JavaScript; peninjauan tiga call TypeScript bersifat eksplorasi pasca-query. Tidak semua hasil tambahan atau bahasa diuji menyeluruh.
-
-Tes baru CLI–MCP JavaScript memeriksa hasil fresh, penolakan stale dan kesamaan output incremental/full pada satu query dan satu edit, dengan limit satu. [Laporan freshness](freshness-js-tsx.md) menjelaskan ruang lingkupnya. [Protokol agent v2](protokol-agent-v2.md) telah dijalankan dalam 68 sesi; [hasilnya](agent-v2-results.md) mencatat pembatasan isolasi dan cakupan yang masih berlaku.
-
-Verifikasi Windows setelah perubahan akhir: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings` dan `cargo test --locked -- --quiet` lulus. Delapan target test melaporkan 457, 16, 160, 44, 61, 62, 22 dan 12 test lulus. Suite penuh membutuhkan eksekusi di luar sandbox untuk tes hardlink dan junction. Percobaan sandbox mencatat dua kegagalan izin serta tes truncation SCIP yang gagal pada panjang path TEMP tertentu dan lulus pada path berbeda; ini menunjukkan test sensitif terhadap alignment path, bukan bukti bahwa semua file terpotong valid atau tidak valid. Log validasi disimpan lokal di `target/`.

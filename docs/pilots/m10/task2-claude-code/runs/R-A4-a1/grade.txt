@@ -1,8 +1,0 @@
-PASS reviewer-exit-0-and-4-passed
-PASS modified-tracked-files-only-json.rs
-PASS no-removed-files
-NOTE non-source files added in workspace: 3
-PASS no-added-source-files
-PASS change-confined-to-escape
-PASS test-code-unchanged
-STATUS PASS

@@ -1,2 +1,0 @@
-{"scope":"environment","pass":true,"checks":[{"name":"registry-readable","pass":true,"detail":"registry file loads"},{"name":"git-available","pass":true,"detail":"git executable found"}]}
-

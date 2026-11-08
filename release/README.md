@@ -2,8 +2,7 @@
 
 How a Riltra release candidate is built, checked and verified. Nothing here
 publishes a release, creates a tag or signs anything: the `v0.1.0` release is a
-separate owner decision (design gate decision D-M9-6: native archives,
-checksums and notices only).
+separate maintainer action.
 
 ## What the workflow does
 
@@ -26,8 +25,7 @@ Only `master` may start the workflow. A `guard` job (2026-10-26) refuses a
 `workflow_dispatch` from any other branch, and a `v*-rc*` tag whose commit is not
 an ancestor of `master`. `workflow_dispatch` also needs the workflow file on
 `master`; until the file is merged there, dispatching it returns HTTP 404. The
-throwaway `rc-run/**` branch used for run 40185383581 (2026-10-25, recorded in
-`docs/m9-cp4-evidence.md` §4.1) no longer works, by design.
+workflow does not publish a release or create a tag.
 
 ## Reproduce locally
 
@@ -75,5 +73,5 @@ tooling; it does not make application inference download a model or runtime.
 
 ## Gates
 
-The acceptance tests of G-LIC, G-NAT, G-CLI, G-MCP and G-SEC that run on a
-candidate, and their evidence, are recorded in `docs/m9-cp4-evidence.md`.
+The [changelog](../CHANGELOG.md#unreleased) records the verified scope and
+limits of the post-release workflow run.

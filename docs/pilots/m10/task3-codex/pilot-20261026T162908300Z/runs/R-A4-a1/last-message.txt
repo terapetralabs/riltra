@@ -1,3 +1,0 @@
-- **Final result line:** No test result line—the command failed before running tests because Cargo could not access its build lock (`Access is denied`).
-- **Changed files:** None. The workspace rejected the attempted edit.
-- **Change:** Not made; the implementation needs to escape newline characters as `\n`.

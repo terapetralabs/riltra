@@ -1,7 +1,0 @@
-{
-  "binary": "<RILTRA_ROOT>/target/debug/riltra.exe",
-  "sha256": "5bde071d6845f7d2b22956569f7bbab3a42e5ef99bc83c3df565474cc384d2da",
-  "version": "riltra 0.1.0",
-  "build": "cargo build --locked (debug profile)",
-  "source": "commit df35536 plus the working-tree change of this task (crates/cli/src/syntax.rs, crates/cli/src/store.rs, golden files)"
-}

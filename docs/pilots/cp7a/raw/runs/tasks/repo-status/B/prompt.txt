@@ -1,3 +1,0 @@
-For repository `riltra`, report the git HEAD, whether the worktree is dirty, and the code-index freshness.
-
-Access: use only the direct Riltra MCP tools named riltra_riltra_*. Their input schemas describe the arguments. Do not use read, shell, or any other tool. Answer the question with the requested values and the evidence you observed.

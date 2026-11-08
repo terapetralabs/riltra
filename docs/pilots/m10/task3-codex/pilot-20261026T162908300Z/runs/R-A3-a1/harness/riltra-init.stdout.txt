@@ -1,1 +1,0 @@
-{"name":"m10","root":"\\\\?\\<TASK3_RUNSET>\\R-A3-a1\\snapshot","registered":true}

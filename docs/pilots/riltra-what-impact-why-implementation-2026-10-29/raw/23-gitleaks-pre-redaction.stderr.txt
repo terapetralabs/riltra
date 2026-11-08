@@ -1,3 +1,0 @@
-12:22PM INF 0 commits scanned.
-12:22PM INF scanned ~427064 bytes (427.06 KB) in 546ms
-12:22PM WRN leaks found: 133

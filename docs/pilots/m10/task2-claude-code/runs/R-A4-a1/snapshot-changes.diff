@@ -1,8 +1,0 @@
-0a1,3
-> de800ec458c404e412158787a7bc6660fe54a2bc3b6903b31d07a661325056f0 *./%SystemDrive%/ProgramData/Microsoft/Windows/Caches/cversions.2.db
-> 8bc0d3651f6c9e3514f131efc82141eea6789c37a3caf212f115ffb6797e5cb6 *./%SystemDrive%/ProgramData/Microsoft/Windows/Caches/{6AF0698E-D558-4F6E-9B3C-3716689AF493}.2.ver0x0000000000000001.db
-> c8e500330acbd608437c3ba32ae91c1238aca57788e89690ba3293101494985d *./%SystemDrive%/ProgramData/Microsoft/Windows/Caches/{DDF571F2-BE98-426D-8288-1A9A39C3FDA2}.2.ver0x0000000000000001.db
-26c29
-< f77d3f39777fd000b63ce0f21cfdb150ea038ec0ec0785ca5c61fd55548284ea *./crates/cli/src/json.rs
----
-> 0a70384e65175c732a510d133f6beec107d5535a93c4ac4ab6f15d493a28c517 *./crates/cli/src/json.rs

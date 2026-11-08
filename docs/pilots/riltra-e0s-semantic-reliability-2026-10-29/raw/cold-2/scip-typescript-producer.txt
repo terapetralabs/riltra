@@ -1,2 +1,0 @@
-+ <SCRATCH>\cold-2\home\fixture-ts (21ms)
-done <SCRATCH>\cold-2\home\fixture-ts\index.scip

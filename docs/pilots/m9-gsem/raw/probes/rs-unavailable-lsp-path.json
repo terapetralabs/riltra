@@ -1,1 +1,0 @@
-{"repo":"rs","definitions":[],"references":[],"provider":"lsp-subprocess","provider_version":"","verification":"Unverified","server_diagnostics":[],"fallback":{"provider":"lsp-subprocess","status":"fallback","reason":"language server not found: '<PATH>'","syntax_fallback":true}}

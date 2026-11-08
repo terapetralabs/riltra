@@ -209,7 +209,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test_name='r1_context_reports_scoped_impact_and_unrun_relevance'
+          test_name='r1_context_reports_scoped_impact_and_unavailable_knowledge'
           cargo test --locked --no-default-features --features semantic-knowledge --test edges "$test_name" -- --list | tr -d '\r' | grep -Fx "$test_name: test"
           cargo test --locked --no-default-features --features semantic-knowledge --test edges "$test_name" -- --include-ignored --exact
       - name: Test deterministic MCP tool schemas with optional feature graph

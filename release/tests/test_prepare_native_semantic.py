@@ -40,13 +40,19 @@ class RuntimeFilesTests(unittest.TestCase):
         self.assertEqual(main.name, "libonnxruntime.so.1.24.4")
         self.assertEqual(companion.name, "libonnxruntime_providers_shared.so")
 
+    def test_linux_still_requires_companion_library(self):
+        self.make_build(".", ["libonnxruntime.so.1.24.4"])
+        with patch.object(native.sys, "platform", "linux"):
+            with self.assertRaisesRegex(SystemExit, "expected one companion runtime library"):
+                native.runtime_files(self.ort_source)
+
     def test_macos_build_dir_is_config_subdirectory(self):
-        self.make_build(".", ["libonnxruntime.1.24.4.dylib", "libonnxruntime_providers_shared.dylib"])
+        self.make_build(".", ["libonnxruntime.1.24.4.dylib"])
         with patch.object(native.sys, "platform", "darwin"):
             platform, main, companion = native.runtime_files(self.ort_source)
         self.assertEqual(platform, "macos-x86_64")
         self.assertEqual(main.name, "libonnxruntime.1.24.4.dylib")
-        self.assertEqual(companion.name, "libonnxruntime_providers_shared.dylib")
+        self.assertIsNone(companion)
 
     def test_windows_multiconfig_output_is_found_below_config_dir(self):
         self.make_build("Release", ["onnxruntime.dll", "onnxruntime_providers_shared.dll"])
@@ -56,6 +62,12 @@ class RuntimeFilesTests(unittest.TestCase):
         self.assertEqual(main.name, "onnxruntime.dll")
         self.assertEqual(companion.name, "onnxruntime_providers_shared.dll")
         self.assertEqual(main.parent, companion.parent)
+
+    def test_windows_still_requires_companion_library(self):
+        self.make_build("Release", ["onnxruntime.dll"])
+        with patch.object(native.sys, "platform", "win32"):
+            with self.assertRaisesRegex(SystemExit, "expected one companion runtime library"):
+                native.runtime_files(self.ort_source)
 
 
 class NativeBuildConfigurationTests(unittest.TestCase):
@@ -67,6 +79,18 @@ class NativeBuildConfigurationTests(unittest.TestCase):
     def test_build_disables_onnxruntime_unit_test_targets(self):
         args = native.ort_build_args()
         self.assertIn("onnxruntime_BUILD_UNIT_TESTS=OFF", args)
+
+    def test_windows_suppresses_only_upstream_c4875_warning(self):
+        with (
+            patch.object(native.sys, "platform", "win32"),
+            patch.dict(native.os.environ, {"_CL_": "/DKEEP"}, clear=False),
+        ):
+            env = native.ort_build_env()
+        self.assertEqual(env["_CL_"], "/DKEEP /wd4875")
+
+    def test_other_platforms_do_not_receive_msvc_warning_flags(self):
+        with patch.object(native.sys, "platform", "darwin"):
+            self.assertIsNone(native.ort_build_env())
 
     def test_workflow_marker_matches_native_test_output(self):
         marker = "native direct outbound probe denied by process isolation:"

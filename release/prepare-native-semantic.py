@@ -111,14 +111,16 @@ def runtime_files(ort_source):
     )
     if len(main_files) != 1:
         fail(f"expected one native runtime library matching {main_pattern}; found {len(main_files)}")
-    if len(companion_files) != 1:
+    if len(companion_files) != 1 and not (
+        sys.platform == "darwin" and not companion_files
+    ):
         fail(
             f"expected one companion runtime library matching {companion_pattern}; "
             f"found {len(companion_files)}"
         )
     main = main_files[0]
-    companion = companion_files[0]
-    if main.parent != companion.parent:
+    companion = companion_files[0] if companion_files else None
+    if companion is not None and main.parent != companion.parent:
         fail("native runtime libraries were found in different output directories")
 
     cache = build_dir / "CMakeCache.txt"
@@ -186,6 +188,16 @@ def ort_build_args():
     return build_args
 
 
+def ort_build_env():
+    if sys.platform != "win32":
+        return None
+    build_env = os.environ.copy()
+    build_env["_CL_"] = " ".join(
+        filter(None, (build_env.get("_CL_", ""), "/wd4875"))
+    )
+    return build_env
+
+
 def main():
     if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
         fail("this provisioning helper is CI-only and will not download assets locally")
@@ -218,7 +230,7 @@ def main():
     subprocess.check_call(
         ["git", "-C", str(ort_source), "submodule", "update", "--init", "--recursive"]
     )
-    subprocess.check_call(ort_build_args(), cwd=ort_source)
+    subprocess.check_call(ort_build_args(), cwd=ort_source, env=ort_build_env())
     checked_out = subprocess.check_output(
         ["git", "-C", str(ort_source), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -231,9 +243,14 @@ def main():
     runtime_dir = model_dir / "runtime"
     runtime_dir.mkdir()
     main = runtime_dir / built_main.name
-    companion = runtime_dir / built_companion.name
     shutil.copyfile(built_main, main)
-    shutil.copyfile(built_companion, companion)
+    companion_libraries = []
+    if built_companion is not None:
+        companion = runtime_dir / built_companion.name
+        shutil.copyfile(built_companion, companion)
+        companion_libraries.append(
+            {"path": companion.name, "sha256": sha256(companion)}
+        )
     runtime_manifest = {
         "version": version,
         "platform": platform,
@@ -247,9 +264,7 @@ def main():
         "cpu_only": True,
         "api": api,
         "main_library": {"path": main.name, "sha256": sha256(main)},
-        "companion_libraries": [
-            {"path": companion.name, "sha256": sha256(companion)}
-        ],
+        "companion_libraries": companion_libraries,
         "telemetry_disabled": True,
     }
     (runtime_dir / "runtime-manifest.json").write_text(

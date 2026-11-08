@@ -1,2 +1,0 @@
-state=defect command="cargo test --locked --bin riltra json::tests" exit=101 result="test result: FAILED. 3 passed; 1 failed" failing=json::tests::escapes_quote_backslash_and_newline
-state=restored command="cargo test --locked --bin riltra json::tests" exit=0 result="test result: ok. 4 passed; 0 failed"

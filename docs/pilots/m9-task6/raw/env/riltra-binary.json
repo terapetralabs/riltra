@@ -1,9 +1,0 @@
-{
-  "binary": "<RILTRA_ROOT>\\target\\debug\\riltra.exe",
-  "sha256": "ce6eb97a78c8aa6a92c4acdb4aba8f3799ae31a6dfe713d78b954ccbb5e0a5a0",
-  "version": "riltra 0.1.0",
-  "build": "cargo build --locked (debug profile)",
-  "riltra_head": "72f576a2d60d826e7c72dacb4967172a8379d0ce",
-  "riltra_head_tree": "680b2ca36cbf388e299a183a292ed333672dd569",
-  "crates_tree": "d172c0ac49ed2a3dc140c50269440e3ffb1c0427"
-}

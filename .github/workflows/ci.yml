@@ -47,6 +47,21 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enforce public documentation boundary
+        if: matrix.name == 'ubuntu-latest'
+        env:
+          BOUNDARY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BOUNDARY_HEAD: ${{ github.sha }}
+        run: |
+          base="$BOUNDARY_BASE"
+          if [[ "$base" =~ ^0+$ ]]; then
+            base="$(git merge-base origin/master "$BOUNDARY_HEAD")"
+          fi
+          bash security/check-public-doc-boundary.sh "$base" "$BOUNDARY_HEAD"
+          bash security/check-public-doc-boundary.test.sh
+          bash security/check-public-doc-boundary-outgoing.test.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -194,7 +209,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test_name='r1_context_reports_scoped_impact_and_unrun_relevance'
+          test_name='r1_context_reports_scoped_impact_and_unavailable_knowledge'
           cargo test --locked --no-default-features --features semantic-knowledge --test edges "$test_name" -- --list | tr -d '\r' | grep -Fx "$test_name: test"
           cargo test --locked --no-default-features --features semantic-knowledge --test edges "$test_name" -- --include-ignored --exact
       - name: Test deterministic MCP tool schemas with optional feature graph

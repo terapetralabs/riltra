@@ -1,1 +1,0 @@
-{"record_id":"e2-codex-confined-read-pr14","record_revision":1,"relation":"constrains","author":"codex-implementation-evaluation","rationale":"PR #14 decision constrains how source reads classify filesystem errors.","provenance":"pinned source 2852ddb and historical E2-W PR evidence; explicitly ingested for this new run"}

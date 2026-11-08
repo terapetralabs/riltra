@@ -1,1 +1,0 @@
-{"mcpServers":{"riltra":{"type":"stdio","command":"<SCRATCH>/bin/riltra.exe","args":["mcp"],"env":{"RILTRA_HOME":"<SCRATCH>/runs/R-A1-a1/riltra-home"}}}}

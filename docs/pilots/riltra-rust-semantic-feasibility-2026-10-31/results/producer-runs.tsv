@@ -1,4 +1,0 @@
-run	start_utc	end_utc	exit_code	wall_seconds	index_bytes	index_sha256	enclosing_no_name_errors	should_have_been_in_document_errors	duplicate_symbol_sites
-run-1 (cold scratch target)	2026-10-31T05:40:55Z	2026-10-31T05:42:17Z	0	82	10948181	030b2a76993ee04c689e24b56a613c7122ce6ec2b654f85760046b10236c1219	177	2	93
-run-2 (warm scratch target, same source)	2026-10-31T05:50:46Z	2026-10-31T05:51:17Z	0	31	10948181	030b2a76993ee04c689e24b56a613c7122ce6ec2b654f85760046b10236c1219	177	2	93
-run-3 (clean clone at pin, core.longpaths enabled)	2026-10-31T06:16:29Z	2026-10-31T06:17:06Z	0	37	10948188	5c271d3d12d6a7725792cf06d8cb9f95269bca4e92ac73bcfddac5bf35f38a2e	177	2	93

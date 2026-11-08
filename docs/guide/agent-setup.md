@@ -16,6 +16,12 @@ riltra index status --repo <name>
 
 Use `<name>` as the `repo` argument of every tool. Re-run `riltra index --repo <name>` after significant changes; `index status` and the freshness labels in answers tell you when the index no longer matches the source. If you set `RILTRA_HOME` in your terminal, give your MCP client the same value, or it will look somewhere else.
 
+For optional semantic knowledge search, build the derived vector index from
+the CLI with `riltra knowledge vector build --repo <name> --model-dir <model-dir>`.
+The MCP client must also receive `RILTRA_MODEL_DIR` pointing at the provisioned
+model/runtime assets. This feature requires a Riltra build with the default-off
+`semantic-knowledge` feature; see the [local inference guide](../semantic-inference.md).
+
 ## Which tool for which question
 
 | You want to know | Call | Notes |
@@ -28,7 +34,7 @@ Use `<name>` as the `repo` argument of every tool. Re-run `riltra index --repo <
 | How might A reach B? | `riltra_code_trace` | Optional `to` (`PATH:LINE:COL`) and `depth` (default 3, 1 to 6). Paths are plausible traversal, not execution. |
 | What might this change affect? | `riltra_code_impact` | Returns a coverage verdict; plausible, not execution. Treat `UNKNOWN` and `partial` as "not established". |
 | Is there a recorded decision for this code? | `riltra_knowledge_at_anchor` | Explicit bindings at a source position. An unlinked anchor stays unlinked. |
-| What does that record say, and what is it linked to? | `riltra_knowledge_show`, `riltra_knowledge_related`, `riltra_knowledge_search` | `show` reads one revision with its evidence freshness; `related` follows links one hop (`direction` is `outbound` or `inbound`); `search` matches literal text or an exact stored evidence path. |
+| What does that record say, and what is it linked to? | `riltra_knowledge_show`, `riltra_knowledge_related`, `riltra_knowledge_search` | `show` reads one revision with its evidence freshness; `related` follows links one hop (`direction` is `outbound` or `inbound`); `search` matches literal text or an exact stored evidence path by default. Set `semantic: true` for optional local vector search; when unavailable it reports the FTS5 fallback reason. |
 | Definition or references from a language server | `riltra_code_semantic` | Opt-in; see below. |
 
 The MCP tools cannot write. Decisions and their bindings to code are recorded with the CLI (`riltra knowledge ...`, see the [README](../../README.md#available-today)).
@@ -97,4 +103,6 @@ This repository is indexed by Riltra, a local code map reached through MCP tools
 
 ## Limits
 
-Which languages have which evidence, and what stays unmet, is in the README: [Language support](../../README.md#language-support) and [Known limitations](../../README.md#known-limitations). The [product roadmap](../../ROADMAP.md) tracks product work; the [hybrid architecture roadmap](../hybrid-architecture-roadmap.md) is the adopted architecture direction for future stages, not a claim that those stages are implemented.
+Supported languages, evidence labels and known limitations are listed in the
+[README](../../README.md). For the current user-facing scope, see the [public
+project status](../public-status.md).

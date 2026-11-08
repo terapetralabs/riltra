@@ -4,6 +4,8 @@ use std::path::Path;
 
 use crate::{knowledge_store, registry::RepoEntry};
 
+pub(crate) const SEMANTIC_CANDIDATE_LIMIT: usize = 1000;
+
 pub(crate) enum SearchOutcome {
     Lexical(knowledge_store::SearchPage),
     #[cfg(feature = "semantic-knowledge")]

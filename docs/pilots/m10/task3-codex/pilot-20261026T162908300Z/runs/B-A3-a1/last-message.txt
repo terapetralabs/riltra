@@ -1,3 +1,0 @@
-value 128
-reader crates/cli/src/knowledge.rs:345
-reader crates/cli/src/knowledge.rs:361

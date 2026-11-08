@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
-# Pre-push: scan the commits being pushed and their tip trees.
+# Pre-push: reject local-only documentation and scan outgoing commits/tip trees.
 # Enable once per clone: git config core.hooksPath .githooks
 # Bypassable with --no-verify; the CI security job is the backstop.
-exec "$(git rev-parse --show-toplevel)/security/scan.sh" outgoing
+set -u
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo 'pre-push: cannot locate repository root' >&2
+    exit 1
+}
+
+umask 077
+push_input="$(mktemp)" || {
+    echo 'pre-push: could not create a protected stdin spool' >&2
+    exit 1
+}
+trap 'rm -f -- "$push_input"' EXIT
+trap 'exit 1' HUP INT TERM
+
+if ! cat > "$push_input"; then
+    echo 'pre-push: could not capture ref updates' >&2
+    exit 1
+fi
+
+status=0
+bash "$root/security/check-public-doc-boundary-outgoing.sh" "$@" < "$push_input" || status=1
+bash "$root/security/scan.sh" outgoing < "$push_input" || status=1
+exit "$status"

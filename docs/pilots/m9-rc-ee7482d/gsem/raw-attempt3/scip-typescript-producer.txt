@@ -1,2 +1,0 @@
-+ <EVIDENCE_ROOT>\gsem\home-3\fixture-ts (18ms)
-done <EVIDENCE_ROOT>\gsem\home-3\fixture-ts\index.scip

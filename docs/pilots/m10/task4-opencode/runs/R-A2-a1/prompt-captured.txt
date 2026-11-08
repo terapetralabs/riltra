@@ -1,4 +1,0 @@
-"Repository: the current working directory. List every call site of canonical_root and of resolve_recorded_root in the Rust source under crates/cli/src, including call sites inside test modules. A call site is a line that calls the function. Do not list definitions, imports, field names, variables, parameters, strings, or comments, even when they contain the same name. Do not modify any file.
-Output one line per call site, in this form:
-<name> <path>:<line>
-"

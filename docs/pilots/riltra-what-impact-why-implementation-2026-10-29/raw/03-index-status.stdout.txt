@@ -1,1 +1,0 @@
-{"repo":"riltra-e2-confined","root":"\\\\?\\<PINNED_E2W_ROOT>\\runtime\\source","freshness":"fresh","reasons":[],"fts":true,"snapshot":{"id":1,"created_unix":1793245449,"head":null,"branch":null,"dirty":false,"status_at_write":"fresh","nonce":"22696-1793245449639045200-0"}}

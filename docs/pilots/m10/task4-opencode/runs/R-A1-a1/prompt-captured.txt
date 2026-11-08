@@ -1,6 +1,0 @@
-"Repository: the current working directory. For each name listed below, find its definition in the Rust source under crates/cli/src. A definition is the fn item with exactly that name. Do not modify any file.
-Names: canonical_root, contains, resolve_recorded_root, escape, grammar_versions
-For each name, report the repository-relative file path, the 1-based line of the definition, and the 0-based start and end byte offsets of the name within that file. The end offset is exclusive.
-Output one line per name, in this form:
-<name> <path>:<line> bytes <start>-<end>
-"

@@ -1,4 +1,0 @@
-58811 rows  4e061338902a3f26abecaa5aff5f9814573211f4917b0c9aa9d393ddd715bb3a  home-cold1/index/mmsp-pin.db
-58811 rows  4e061338902a3f26abecaa5aff5f9814573211f4917b0c9aa9d393ddd715bb3a  home-cold2/index/mmsp-pin.db
-58811 rows  4e061338902a3f26abecaa5aff5f9814573211f4917b0c9aa9d393ddd715bb3a  home-main/index/mmsp-pin.db
-IDENTICAL: reference_occurrences

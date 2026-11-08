@@ -1,9 +1,0 @@
-run	arm	task	final_status	initial_status	wall_s	client_ms	api_ms	index_s	reviewer_test_s	tool_calls	riltra_calls	native_search_calls	fallbacks	tokens_in	tokens_out	cache_read	cache_write	cost_usd	models
-R-A1-a1	R	A1	PASS	PASS	55	52606	52658	38.874	-	10	0	1	0	1051	3429	164627	6945	0.0960	claude-haiku-4-5+claude-sonnet-5
-B-A1-a1	B	A1	FAIL	FAIL	42	39602	38629	-	-	8	0	3	0	1047	3087	91998	6299	0.0754	claude-haiku-4-5+claude-sonnet-5
-R-A2-a1	R	A2	FAIL	FAIL	31	26987	28096	38.006	-	9	0	1	0	1008	2625	77389	6777	0.0698	claude-haiku-4-5+claude-sonnet-5
-B-A2-a1	B	A2	PASS	PASS	13	10575	11696	-	-	2	0	2	0	1004	995	25958	2357	0.0255	claude-haiku-4-5+claude-sonnet-5
-R-A3-a1	R	A3	FAIL	FAIL	9	5640	6921	38.228	-	1	0	1	0	997	257	34402	1243	0.0153	claude-haiku-4-5+claude-sonnet-5
-B-A3-a1	B	A3	FAIL	FAIL	8	5124	6048	-	-	1	0	1	0	997	195	25952	1182	0.0128	claude-haiku-4-5+claude-sonnet-5
-R-A4-a1	R	A4	PASS	FAIL	320	316697	235164	38.040	17	31	0	9	0	1053	16747	1482399	59378	0.7025	claude-haiku-4-5+claude-sonnet-5
-B-A4-a1	B	A4	PASS	FAIL	217	214838	182290	-	18	26	0	6	0	1043	11044	882976	42542	0.4582	claude-haiku-4-5+claude-sonnet-5

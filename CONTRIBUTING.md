@@ -30,8 +30,11 @@ Apache-2.0.
   opt-in only.
 - New dependencies need a `docs/licensing.md` entry (package, version,
   license, origin) in the same PR.
-- No performance/accuracy claims vs competitors without a reproducible
-  benchmark committed under `tests/` + methodology in docs.
+- Keep internal plans, prompts, session transcripts, raw measurements and
+  local paths out of public docs. Share only user-relevant result summaries
+  with scope and limits. The CI boundary check matches paths, not copied
+  content, so manually inspect every added, changed or renamed document for
+  internal material moved under a public path.
 
 ## Pull request checklist
 

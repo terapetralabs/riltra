@@ -1,5 +1,0 @@
-Scanner: Gitleaks 8.30.1
-Repository scanner wrapper: security/scan.sh dir docs/pilots/m10/task3-codex
-Direct equivalent invocation: gitleaks dir --config .gitleaks.toml --redact --no-banner . (run from the package directory)
-Result: PASS; no leaks found.
-Environment note: the wrapper could not launch in this Windows sandbox (WindowsApps bash access denied; Git Bash could not create its signal pipe, Win32 error 5). The pinned scanner binary ran the wrapper's same directory-scan operation with the same config and flags.

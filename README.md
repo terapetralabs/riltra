@@ -37,8 +37,9 @@ guessing.
 
 ## Available today
 
-The current binary already does the following, offline, with no runtime
-dependencies beyond itself:
+The default core build does the following offline, with no runtime dependencies
+beyond itself. The optional semantic-knowledge feature requires local model and
+runtime assets, as described below.
 
 - **Repository registry** — register local project roots (`init`) and list
   them as deterministic JSON (`repo list`).
@@ -77,6 +78,15 @@ dependencies beyond itself:
   with a typed relation. Bindings are stored explicitly, never inferred from
   names or paths; a changed source reports `stale` and is not rebound. A
   binding records a relationship, not the truth of the record.
+- **Optional semantic knowledge search** - the default-off `semantic-knowledge`
+  feature adds local vector search for active knowledge records, with explicit
+  FTS5 fallback when optional assets or index state are unavailable. Manage the
+  derived index with `knowledge vector build`, `knowledge vector status`, and
+  `knowledge vector clear`; request
+  semantic results with `knowledge search --semantic` or MCP `semantic: true`.
+  Search reads provisioned model/runtime assets from `RILTRA_MODEL_DIR`; this
+  feature does not embed source code, change default lexical search, or ship in
+  official packages. See the [local inference guide](docs/semantic-inference.md).
 - **MCP server** - `riltra mcp` serves fourteen tools over local stdio: thirteen
   read-only ones and one provider-backed tool that starts the operator's
   language server. Reads never create or migrate a store: a missing
@@ -156,9 +166,15 @@ fourteen tools:
 
 - `riltra_repo_list`, `riltra_repo_status`, `riltra_health`
 - `riltra_code_search`, `riltra_code_callers`, `riltra_code_callees`,
-  `riltra_code_trace`, `riltra_code_impact`, `riltra_context` — bounded graph
-  context with caller-to-anchor distances
-- `riltra_knowledge_search`, `riltra_knowledge_show`, `riltra_knowledge_related`
+  `riltra_code_trace`, `riltra_code_impact`, `riltra_context` — bounded code
+  graph and impact context, composed with explicit anchor bindings and optional
+  lexical or semantic knowledge matches. Bindings stay separate from unlinked
+  matches; a match does not establish a code-to-record relationship.
+- `riltra_knowledge_search` — literal text or exact evidence-path search by
+  default; set `semantic: true` for optional local vector search, which reports
+  an explicit FTS5 fallback reason when unavailable. See the [local inference
+  guide](docs/semantic-inference.md).
+- `riltra_knowledge_show`, `riltra_knowledge_related`
 - `riltra_knowledge_at_anchor` — read-only lookup of the bindings at a code
   anchor (`knowledge at`); an unlinked anchor stays unlinked
 - `riltra_code_semantic` — definition or references at a position, answered by
@@ -229,16 +245,6 @@ installed executable.
 For guidance on when an agent should call each tool and how to read its
 answers, see the [agent setup guide](docs/guide/agent-setup.md).
 
-See [docs/pilots/cp7a/README.md](docs/pilots/cp7a/README.md) for the CP7-A
-benchmark report, raw evidence, and limitations.
-
-## Correctness evidence
-
-The [multilanguage correctness report](docs/pilots/multilanguage-correctness-2026-11-03/laporan.md)
-summarizes engine and provider checks, agent comparisons, and remaining gaps.
-Its v2 comparison contains 68 sessions over 17 small fixtures reused from v1;
-it is not a general product-accuracy estimate or a performance claim.
-
 ## Language support
 
 | Language | Extensions | Syntax facts | Name occurrences | Semantic evidence |
@@ -269,10 +275,8 @@ C++.
   list is not proof that a name is unused.
 - macOS continuous integration covers the x64 pool only; macOS ARM64 is not
   covered.
-- Four C++ capability criteria are not met (status UNMET): C++ method identity for references (`D1-C6`), attribution
-  of the external construction sites to the class (`D2-C6`), the full call chain including the indirect dispatch
-  (`D3-C5`), and the affected set of an impact query (`D4-C5`). They are accepted pre-release limitations, and C++
-  answers stay candidates.
+- C++ reference identity, construction-site attribution, complete call chains and affected-set coverage remain
+  unverified. Treat C++ answers as candidates.
 - The repository history still carries machine-local paths from early commits.
   The history is not rewritten, because documents under `docs/` cite commits by
   hash; see [Repository history](SECURITY.md#repository-history).
@@ -295,17 +299,15 @@ as a stable release. Continuous integration runs format, compile, lint, and test
 checks on Windows, Linux, and macOS (x64) for every change. A manually started
 workflow builds the native archives of a release candidate, checks each with a
 clean-install smoke and writes their checksums; see
-[release/README.md](release/README.md). The M9 evidence is under `docs/m9-*.md`.
+[release/README.md](release/README.md).
 
 ## Documentation
 
-- [Roadmap](ROADMAP.md): what is planned, and what is not.
-- [Hybrid architecture roadmap](docs/hybrid-architecture-roadmap.md): adopted architecture direction, dated implementation status, and acceptance gates.
+- [Public project status](docs/public-status.md): current scope and public-facing limits.
 - [Changelog](CHANGELOG.md): notable changes per release.
 - [Agent setup guide](docs/guide/agent-setup.md): when an agent should call
   Riltra and how to read its answers.
-- [Documentation index](docs/README.md): guides, milestone records, and
-  evidence data.
+- [Documentation index](docs/README.md): user and contributor documentation.
 
 ## Contributing
 

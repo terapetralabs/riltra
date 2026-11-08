@@ -1,8 +1,0 @@
-{
-  "snapshot_head": "d62f06a576d8e76b705c8ecc57fc380f7ebc9c44",
-  "snapshot_porcelain": [],
-  "incremental_index_head": "d62f06a576d8e76b705c8ecc57fc380f7ebc9c44",
-  "oracle_index_head": "d62f06a576d8e76b705c8ecc57fc380f7ebc9c44",
-  "incremental_combined_digest": "46b73363467a875f6932c1b4fe3acfd529e3cd7a8d6c91ffd397fd8d2604e5d2",
-  "oracle_combined_digest": "46b73363467a875f6932c1b4fe3acfd529e3cd7a8d6c91ffd397fd8d2604e5d2"
-}

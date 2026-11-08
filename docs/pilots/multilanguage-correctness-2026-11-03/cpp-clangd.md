@@ -1,7 +1,0 @@
-# Fixture C++ dengan clangd di WSL
-
-Pada Ubuntu WSL, Riltra build `--locked` dari checkout dan clangd Ubuntu 21.1.8 dijalankan sebagai pengguna terbatas. Fixture `direct.cpp` berisi definisi `target` pada baris 2 dan pemanggilan dalam `caller` pada baris 6; oracle ini ditulis sebelum query, tetapi fixture sudah dikenal dan tidak diperiksa secara independen.
-
-Indeks syntax memproses satu file C++ tanpa error. Dua query semantic berurutan pada definisi mengembalikan dua lokasi yang sama: definisi pada baris 2 dan pemanggilan pada baris 6 (koordinat JSON nol-based: 1 dan 5). Keduanya tercantum dalam `references`; `definitions` kosong. Provider melaporkan `lsp-subprocess`, `Heuristic`, `Unverified`, tanpa fallback dan tanpa diagnostik server. Ini menunjukkan lokasi yang ditemukan sesuai fixture, bukan bukti klasifikasi definisi dan call yang lengkap. Dua query menggunakan indeks dan home yang sama, sehingga bukan dua fixture independen.
-
-Salinan fixture dan log init, index, oracle, serta kedua query disimpan di `docs/pilots/agent-kebenaran-2026-11-02/raw-local/multilang-20261103/cpp-clangd/`; hash setiap salinan dibandingkan dengan sumber. Direktori bukti diabaikan Git dan mengandung path lokal. Hash SHA-256 fixture saat pemeriksaan adalah `54f239bb0966f93571db2e74bbcd841c226e0b1d5cb9cfa44011bd92ad24880e`. Belum ada pengujian parity MCP, variasi kasus C++ atau provider C dalam percobaan ini.

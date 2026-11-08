@@ -5,7 +5,7 @@
 //! CLI-observable lifecycle and Task 4 callers/callees evidence contract.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "common/rust_alias.rs"]
@@ -31,8 +31,29 @@ fn run(home: &Path, args: &[&str]) -> (i32, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_riltra"))
         .args(args)
         .env("RILTRA_HOME", home)
+        .env_remove("RILTRA_MODEL_DIR")
         .output()
         .expect("spawn riltra");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn run_stdin(home: &Path, args: &[&str], input: &[u8]) -> (i32, String, String) {
+    use std::io::Write;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+        .args(args)
+        .env("RILTRA_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn riltra");
+    child.stdin.as_mut().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().expect("wait riltra");
     (
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -83,7 +104,7 @@ fn assert_json_keys_are_sorted(value: &serde_json::Value) {
 }
 
 #[test]
-fn r1_context_reports_scoped_impact_and_unrun_relevance() {
+fn r1_context_reports_scoped_impact_and_unavailable_knowledge() {
     let h = home("context-chain");
     let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
     let anchor_line = lines[2].to_string();
@@ -114,8 +135,16 @@ fn r1_context_reports_scoped_impact_and_unrun_relevance() {
     assert_eq!(value["operation"], "context");
     assert_eq!(value["distance_scope"], "inspected_subgraph");
     assert_eq!(value["impact"]["verdict"], "HIGH");
-    assert_eq!(value["query"]["status"], "not_run");
-    assert_eq!(value["semantic"]["status"], "not_run");
+    assert_eq!(value["query"]["status"], "unavailable");
+    assert_eq!(value["query"]["reason"], "knowledge-store-missing");
+    assert_eq!(value["semantic"]["status"], "unavailable");
+    assert_eq!(value["knowledge"]["status"], "unavailable");
+    assert!(value["knowledge"]["snapshot"]["generation"].is_null());
+    assert!(value["knowledge"]["snapshot"]["schema_version"].is_null());
+    assert!(value["knowledge"]["bindings"]["total"].is_null());
+    assert!(value["knowledge"]["bindings"]["schema_version"].is_null());
+    assert_eq!(value["knowledge"]["bindings"]["total_exact"], false);
+    assert!(value["knowledge"]["bindings"]["truncated"].is_null());
     let mut distances: Vec<usize> = value["graph"]["nodes"]
         .as_array()
         .unwrap()
@@ -198,6 +227,707 @@ fn r1_context_empty_graph_keeps_anchor_and_unknown_coverage() {
     assert_eq!(value["graph"]["nodes"].as_array().unwrap().len(), 1);
     assert_eq!(value["graph"]["nodes"][0]["distance"], 0);
     assert_eq!(value["graph"]["edges"], serde_json::json!([]));
+    assert_eq!(value["knowledge"]["status"], "unavailable");
+    assert_eq!(value["knowledge"]["reason"], "knowledge-store-missing");
+    assert_eq!(value["knowledge"]["bindings"]["status"], "unavailable");
+}
+
+#[test]
+fn r3_context_keeps_explicit_bindings_separate_from_unlinked_matches() {
+    let h = home("r3-context-why");
+    let lines = trace_fixture(&h, &[vec![], vec![]]);
+    let create_bound = br#"{"id":"bound","kind":"decision","title":"Read boundary","body":"keep the store local","status":"active","author":"a","evidence":[]}"#;
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            create_bound
+        )
+        .0,
+        0
+    );
+    let create_candidate = br#"{"id":"candidate","kind":"decision","title":"SQLite migration","body":"local database migration","status":"active","author":"a","evidence":[]}"#;
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            create_candidate
+        )
+        .0,
+        0
+    );
+    let create_bound2 = br#"{"id":"bound2","kind":"decision","title":"Read budget","body":"preserve the query limit","status":"active","author":"a","evidence":[]}"#;
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            create_bound2
+        )
+        .0,
+        0
+    );
+    let binding = br#"{"record_id":"bound","record_revision":1,"relation":"constrains","author":"reviewer","rationale":"This decision constrains the code anchor.","provenance":"review"}"#;
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &lines[0].to_string(),
+            "--col",
+            "6",
+            "--input",
+            "-",
+        ],
+        binding,
+    );
+    assert_eq!(code, 0, "bind failed: {err}");
+    let binding2 = br#"{"record_id":"bound2","record_revision":1,"relation":"documents","author":"reviewer","rationale":"This second explicit link is preserved when limited.","provenance":"review"}"#;
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &lines[0].to_string(),
+            "--col",
+            "6",
+            "--input",
+            "-",
+        ],
+        binding2,
+    );
+    assert_eq!(code, 0, "second bind failed: {err}");
+    let knowledge_store = h.join("knowledge").join("sem.db");
+    let knowledge_before = std::fs::read(&knowledge_store).unwrap();
+
+    let context = |line: usize| {
+        let line = line.to_string();
+        let (code, out, err) = run(
+            &h,
+            &[
+                "context",
+                "--repo",
+                "sem",
+                "--path",
+                "graph.py",
+                "--line",
+                &line,
+                "--col",
+                "6",
+                "--query",
+                "database migration",
+            ],
+        );
+        assert_eq!(code, 0, "context failed: {err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+    };
+
+    let linked = context(lines[0]);
+    assert_eq!(
+        linked["knowledge"]["bindings"]["status"], "linked",
+        "{linked}"
+    );
+    assert_eq!(
+        linked["knowledge"]["bindings"]["bindings"][0]["record_id"],
+        "bound"
+    );
+    assert_eq!(linked["query"]["hits"][0]["id"], "candidate", "{linked}");
+    assert_eq!(
+        linked["query"]["hits"][0]["relevance"], "candidate",
+        "{linked}"
+    );
+
+    let unlinked = context(lines[1]);
+    assert_eq!(
+        unlinked["knowledge"]["bindings"]["status"], "no-link-proven",
+        "{unlinked}"
+    );
+    assert_eq!(
+        unlinked["knowledge"]["bindings"]["bindings"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        unlinked["query"]["hits"][0]["id"], "candidate",
+        "{unlinked}"
+    );
+
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &line,
+            "--col",
+            "6",
+            "--query",
+            "database migration",
+            "--limit",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0, "limited context failed: {err}");
+    let limited: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(limited["knowledge"]["bindings"]["total"], 2, "{limited}");
+    assert_eq!(
+        limited["knowledge"]["bindings"]["truncated"], true,
+        "{limited}"
+    );
+    assert_eq!(
+        limited["knowledge"]["bindings"]["omitted_by_limit"], 1,
+        "{limited}"
+    );
+    assert!(limited["truncation"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "binding-limit"));
+
+    let source = h.join("sem").join("graph.py");
+    let source_before = std::fs::read(&source).unwrap();
+    let second_line_start = source_before
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(lines[1] - 1)
+        .map(<[u8]>::len)
+        .sum::<usize>();
+    std::fs::write(&source, "# changed after the code snapshot\n").unwrap();
+    let stale = context(lines[0]);
+    assert_eq!(
+        stale["knowledge"]["bindings"]["status"], "unresolved",
+        "a stale pinned anchor does not establish a current binding: {stale}"
+    );
+    assert_eq!(
+        stale["knowledge"]["bindings"]["bindings"][0]["freshness"], "stale",
+        "{stale}"
+    );
+    assert_eq!(
+        stale["snapshot"]["nonce"],
+        stale["knowledge"]["bindings"]["bindings"][0]["anchor"]["snapshot_nonce"],
+        "binding lookup must keep the code snapshot's pinned anchor"
+    );
+    assert_eq!(std::fs::read(&knowledge_store).unwrap(), knowledge_before);
+
+    let tamper = rusqlite::Connection::open(&knowledge_store).unwrap();
+    tamper
+        .execute(
+            "INSERT INTO code_bindings (
+                 repo,repo_root_digest,snapshot_id,snapshot_nonce,snapshot_digest,source_digest,
+                 path,byte_start,byte_end,cursor_line,cursor_col,symbol_uri,display_name,
+                 anchor_kind,precision,record_id,record_revision,relation,author,rationale,provenance,created_unix
+             ) SELECT repo,repo_root_digest,snapshot_id,snapshot_nonce,snapshot_digest,source_digest,
+                 path,?1,?2,?3,6,symbol_uri,display_name,anchor_kind,precision,'missing-record',1,
+                 'documents','test','orphan row','review',created_unix
+             FROM code_bindings LIMIT 1",
+            rusqlite::params![
+                i64::try_from(second_line_start + 4).unwrap(),
+                i64::try_from(second_line_start + 6).unwrap(),
+                i64::try_from(lines[1]).unwrap()
+            ],
+        )
+        .unwrap();
+    drop(tamper);
+    let orphan_binding = context(lines[1]);
+    assert_eq!(
+        orphan_binding["knowledge"]["bindings"]["status"], "unavailable",
+        "unreadable binding rows must not prove an absent link: {orphan_binding}"
+    );
+    assert_eq!(
+        orphan_binding["knowledge"]["bindings"]["unresolved_reason"],
+        "knowledge-changed-or-unavailable",
+        "{orphan_binding}"
+    );
+
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &line,
+            "--col",
+            "6",
+            "--query",
+            "database migration",
+            "--semantic",
+        ],
+    );
+    assert_eq!(code, 0, "semantic context failed: {err}");
+    let fallback: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(fallback["query"]["status"], "lexical", "{fallback}");
+    assert_eq!(
+        fallback["query"]["hits"][0]["relevance"], "candidate",
+        "{fallback}"
+    );
+    assert_eq!(fallback["semantic"]["status"], "fallback", "{fallback}");
+}
+
+#[test]
+fn r3_context_does_not_prove_no_link_for_a_changed_pinned_anchor() {
+    let h = home("r3-context-unlinked-stale-anchor");
+    let lines = trace_fixture(&h, &[vec![], vec![]]);
+    let create = br#"{"id":"bound","kind":"decision","title":"Read boundary","body":"keep the store local","status":"active","author":"a","evidence":[]}"#;
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            create
+        )
+        .0,
+        0
+    );
+    let binding = br#"{"record_id":"bound","record_revision":1,"relation":"constrains","author":"reviewer","rationale":"This decision constrains the code anchor.","provenance":"review"}"#;
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &lines[0].to_string(),
+            "--col",
+            "6",
+            "--input",
+            "-",
+        ],
+        binding,
+    );
+    assert_eq!(code, 0, "bind failed: {err}");
+
+    let context = |line: usize| {
+        let line = line.to_string();
+        let (code, out, err) = run(
+            &h,
+            &[
+                "context", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+            ],
+        );
+        assert_eq!(code, 0, "context failed: {err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+    };
+
+    let fresh_unlinked = context(lines[1]);
+    assert_eq!(
+        fresh_unlinked["knowledge"]["bindings"]["status"], "no-link-proven",
+        "{fresh_unlinked}"
+    );
+    let source = h.join("sem").join("graph.py");
+    std::fs::write(&source, "# changed after the code snapshot\n").unwrap();
+    let changed = context(lines[1]);
+    assert_eq!(
+        changed["knowledge"]["bindings"]["status"], "unresolved",
+        "a changed live source cannot support no-link proof: {changed}"
+    );
+    assert_eq!(
+        changed["knowledge"]["bindings"]["unresolved_reason"],
+        "anchor unresolved: source changed since pinned code snapshot",
+        "{changed}"
+    );
+}
+
+#[test]
+fn r3_context_does_not_invent_snapshot_metadata_after_binding_read_error() {
+    let h = home("r3-context-binding-read-error");
+    let lines = trace_fixture(&h, &[vec![]]);
+    let create = br#"{"id":"bound","kind":"decision","title":"Read boundary","body":"keep the store local","status":"active","author":"a","evidence":[]}"#;
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            create
+        )
+        .0,
+        0
+    );
+    let binding = br#"{"record_id":"bound","record_revision":1,"relation":"constrains","author":"reviewer","rationale":"This decision constrains the code anchor.","provenance":"review"}"#;
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &lines[0].to_string(),
+            "--col",
+            "6",
+            "--input",
+            "-",
+        ],
+        binding,
+    );
+    assert_eq!(code, 0, "bind failed: {err}");
+    let knowledge_store = h.join("knowledge").join("sem.db");
+    let tamper = rusqlite::Connection::open(&knowledge_store).unwrap();
+    tamper
+        .execute("DELETE FROM meta WHERE key='knowledge_generation'", [])
+        .unwrap();
+    drop(tamper);
+
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "context failed: {err}");
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["knowledge"]["status"], "unavailable", "{value}");
+    assert!(
+        value["knowledge"]["snapshot"]["generation"].is_null(),
+        "{value}"
+    );
+    assert!(
+        value["knowledge"]["snapshot"]["schema_version"].is_null(),
+        "{value}"
+    );
+    assert!(
+        value["knowledge"]["bindings"]["schema_version"].is_null(),
+        "{value}"
+    );
+}
+
+#[test]
+fn r3_context_rejects_same_span_binding_for_a_different_symbol() {
+    let h = home("r3-context-binding-identity");
+    let lines = trace_fixture(&h, &[vec![]]);
+    let create = br#"{"id":"bound","kind":"decision","title":"Read boundary","body":"keep the store local","status":"active","author":"a","evidence":[]}"#;
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            create
+        )
+        .0,
+        0
+    );
+    let binding = br#"{"record_id":"bound","record_revision":1,"relation":"constrains","author":"reviewer","rationale":"This decision constrains the code anchor.","provenance":"review"}"#;
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &lines[0].to_string(),
+            "--col",
+            "6",
+            "--input",
+            "-",
+        ],
+        binding,
+    );
+    assert_eq!(code, 0, "bind failed: {err}");
+    let knowledge_store = h.join("knowledge").join("sem.db");
+    let tamper = rusqlite::Connection::open(&knowledge_store).unwrap();
+    tamper
+        .execute(
+            "UPDATE code_bindings SET snapshot_id=snapshot_id+1,snapshot_nonce='promoted-snapshot'
+             WHERE binding_id=(SELECT min(binding_id) FROM code_bindings)",
+            [],
+        )
+        .unwrap();
+    drop(tamper);
+
+    let line = lines[0].to_string();
+    let (code, compatible_out, err) = run(
+        &h,
+        &[
+            "context", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "context failed: {err}");
+    let compatible: serde_json::Value = serde_json::from_str(&compatible_out).unwrap();
+    assert_eq!(
+        compatible["knowledge"]["bindings"]["status"], "linked",
+        "same bytes and symbol remain compatible across snapshot promotion: {compatible}"
+    );
+    let tamper = rusqlite::Connection::open(&knowledge_store).unwrap();
+    tamper
+        .execute(
+            "UPDATE code_bindings
+             SET symbol_uri='scip-test test test-pkg 1.0.0 graph.py/other().'
+             WHERE binding_id=(SELECT min(binding_id) FROM code_bindings)",
+            [],
+        )
+        .unwrap();
+    drop(tamper);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "context failed: {err}");
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        value["knowledge"]["bindings"]["status"], "unresolved",
+        "{value}"
+    );
+    assert_eq!(
+        value["knowledge"]["bindings"]["bindings"][0]["freshness"], "unresolved",
+        "{value}"
+    );
+    assert_eq!(
+        value["knowledge"]["bindings"]["unresolved_reason"],
+        "stored binding identity does not match pinned code anchor",
+        "{value}"
+    );
+}
+
+#[test]
+fn r3_context_preserves_code_when_knowledge_store_is_corrupt() {
+    let h = home("r3-context-corrupt-knowledge");
+    let lines = trace_fixture(&h, &[vec![]]);
+    let knowledge_dir = h.join("knowledge");
+    std::fs::create_dir_all(&knowledge_dir).unwrap();
+    let db = knowledge_dir.join("sem.db");
+    std::fs::write(&db, b"not a sqlite database").unwrap();
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+            "--query", "decision",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "code context should survive unavailable knowledge: {err}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["snapshot"]["id"], 1, "{value}");
+    assert_eq!(value["knowledge"]["status"], "unavailable", "{value}");
+    assert_eq!(
+        value["knowledge"]["reason"], "knowledge-store-unavailable",
+        "{value}"
+    );
+    assert_eq!(value["query"]["status"], "unavailable", "{value}");
+    assert_eq!(std::fs::read(&db).unwrap(), b"not a sqlite database");
+}
+
+#[test]
+fn r3_context_caps_final_utf8_json_and_truncates_snippets_at_character_boundaries() {
+    let h = home("r3-context-byte-budget");
+    let lines = trace_fixture(&h, &[vec![]]);
+    let body = "界".repeat(5000);
+    let input = format!(
+        "{{\"id\":\"candidate\",\"kind\":\"decision\",\"title\":\"database choice\",\"body\":\"{body}\",\"status\":\"active\",\"author\":\"a\",\"evidence\":[]}}"
+    );
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            input.as_bytes()
+        )
+        .0,
+        0
+    );
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &line,
+            "--col",
+            "6",
+            "--query",
+            "database",
+            "--max-bytes",
+            "8192",
+        ],
+    );
+    assert_eq!(code, 0, "context failed: {err}");
+    assert!(
+        out.trim_end().len() <= 8192,
+        "{} JSON bytes",
+        out.trim_end().len()
+    );
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["anchor"]["span"], serde_json::json!([4, 6]));
+    assert_eq!(value["graph"]["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(value["query"]["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(value["query"]["hits"][0]["snippet_truncated"], true);
+    assert!(value["truncation"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "knowledge-snippets"));
+    assert!(value["query"]["hits"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .chars()
+        .all(|ch| ch == '界'));
+}
+
+#[test]
+fn r3_context_budget_prunes_relevance_then_whole_binding_rows() {
+    let h = home("r3-context-binding-budget");
+    let lines = trace_fixture(&h, &[vec![]]);
+    for (id, title) in [
+        ("bound-first", "Small rationale"),
+        ("bound-second", "Large rationale"),
+    ] {
+        let create = serde_json::json!({
+            "id": id,
+            "kind": "decision",
+            "title": title,
+            "body": "record body",
+            "status": "active",
+            "author": "a",
+            "evidence": []
+        })
+        .to_string();
+        assert_eq!(
+            run_stdin(
+                &h,
+                &["knowledge", "create", "--repo", "sem", "--input", "-"],
+                create.as_bytes()
+            )
+            .0,
+            0
+        );
+    }
+    for (id, rationale) in [
+        ("bound-first", "small rationale".to_string()),
+        ("bound-second", "R".repeat(12_000)),
+    ] {
+        let binding = serde_json::json!({
+            "record_id": id,
+            "record_revision": 1,
+            "relation": "documents",
+            "author": "reviewer",
+            "rationale": rationale,
+            "provenance": "review"
+        })
+        .to_string();
+        let (code, _, err) = run_stdin(
+            &h,
+            &[
+                "knowledge",
+                "bind",
+                "--repo",
+                "sem",
+                "--path",
+                "graph.py",
+                "--line",
+                &lines[0].to_string(),
+                "--col",
+                "6",
+                "--input",
+                "-",
+            ],
+            binding.as_bytes(),
+        );
+        assert_eq!(code, 0, "bind failed: {err}");
+    }
+    for index in 0..40 {
+        let record = serde_json::json!({
+            "id": format!("candidate-{index:03}"),
+            "kind": "decision",
+            "title": format!("Budget query {index}"),
+            "body": "small relevance candidate",
+            "status": "active",
+            "author": "a",
+            "evidence": []
+        })
+        .to_string();
+        assert_eq!(
+            run_stdin(
+                &h,
+                &["knowledge", "create", "--repo", "sem", "--input", "-"],
+                record.as_bytes()
+            )
+            .0,
+            0
+        );
+    }
+
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &line,
+            "--col",
+            "6",
+            "--query",
+            "budget",
+            "--limit",
+            "100",
+            "--max-bytes",
+            "8192",
+        ],
+    );
+    assert_eq!(code, 0, "context failed: {err}");
+    assert!(
+        out.trim_end().len() <= 8192,
+        "{} bytes",
+        out.trim_end().len()
+    );
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["anchor"]["span"], serde_json::json!([4, 6]));
+    assert_eq!(value["knowledge"]["bindings"]["total"], 2, "{value}");
+    assert_eq!(
+        value["knowledge"]["bindings"]["total_exact"], true,
+        "{value}"
+    );
+    assert_eq!(value["knowledge"]["bindings"]["truncated"], true, "{value}");
+    assert_eq!(
+        value["knowledge"]["bindings"]["omitted_by_limit"], 0,
+        "{value}"
+    );
+    assert_eq!(
+        value["knowledge"]["bindings"]["omitted_by_budget"], 1,
+        "{value}"
+    );
+    assert_eq!(
+        value["knowledge"]["bindings"]["bindings"][0]["record_id"], "bound-first",
+        "the oldest binding is retained deterministically: {value}"
+    );
+    assert_eq!(value["query"]["hits"], serde_json::json!([]), "{value}");
+    assert!(value["truncation"]["omitted_query_hits"].as_u64().unwrap() > 0);
+    assert_eq!(value["truncation"]["omitted_bindings_by_budget"], 1);
+    let reasons = value["truncation"]["reasons"].as_array().unwrap();
+    assert!(reasons
+        .iter()
+        .any(|reason| reason == "knowledge-candidates"));
+    assert!(reasons.iter().any(|reason| reason == "binding-budget"));
 }
 
 #[test]
@@ -251,6 +981,7 @@ fn r1_context_rejects_reserved_query_and_bounds_without_creating_an_index() {
         vec!["--max-bytes", "8191"],
         vec!["--max-bytes", "131073"],
         vec!["--query", "   "],
+        vec!["--semantic"],
     ] {
         let mut args = vec![
             "context", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
@@ -266,6 +997,10 @@ fn r1_context_rejects_reserved_query_and_bounds_without_creating_an_index() {
     );
     assert_eq!(code, 3, "{err}");
     assert!(err.contains("no snapshot"), "{err}");
+    assert!(
+        !h.join("knowledge").exists(),
+        "context must not create knowledge state"
+    );
     assert!(
         !h.join("index").exists(),
         "read-only context must not create an index"

@@ -1,7 +1,0 @@
-# release-candidate.yml guard job: the run script executed with simulated GitHub event variables (bash -e)
-# YAML parsed with PyYAML: jobs = [guard, package]; package.needs = guard; triggers = workflow_dispatch, push (tags v*-rc*)
-dispatch, ref refs/heads/master, sha M9 tip                      -> exit 0 (expected 0)
-dispatch, ref refs/heads/m9-multirepo-release-candidate          -> exit 1 (expected 1)
-push tag v0.1.0-rc1, sha = origin/master tip                     -> exit 0 (expected 0)
-push tag v0.1.0-rc1, sha = origin/master~1 (ancestor of master)  -> exit 0 (expected 0)
-push tag v0.1.0-rc1, sha = M9 tip (not on master)                -> exit 1 (expected 1)

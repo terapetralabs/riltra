@@ -1,5 +1,0 @@
-2026-10-26T17:35:15.086375Z ERROR codex_core::tools::router: error=Exit code: 1
-Wall time: 0.1 seconds
-Output:
-Failed to write file <TASK3_RUNSET>\R-A4-a1\snapshot\crates\cli\src\json.rs
-

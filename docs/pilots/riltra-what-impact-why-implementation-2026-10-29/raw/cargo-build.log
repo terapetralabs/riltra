@@ -1,4 +1,0 @@
-warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `\\?\<REPOSITORY_ROOT>\.codex-wiy-work\target\debug\incremental\riltra-3590cwn74ozo0\s-hnnhg3ywqf-0n1jq0n-working`
-
-warning: `riltra` (bin "riltra") generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.66s

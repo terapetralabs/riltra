@@ -85,6 +85,4 @@ unit tests, and two reviewed false positives (40-hex commit SHAs matched by the
 `sourcegraph-access-token` heuristic, and SHA-256 integrity constants matched
 by `generic-api-key`). No blanket allowlists (directories, `*.log`, `*.json`)
 are used. The two superseded synthetic findings from the earlier fixture
-revision are pinned by fingerprint in `.gitleaksignore`; these exceptions are
-temporary and must be re-evaluated and removed after the history rewrite
-(`history-rewrite-plan.md`).
+revision remain pinned by fingerprint in `.gitleaksignore`.

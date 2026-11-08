@@ -1,8 +1,0 @@
-#META {"label":"init-mmsp-pin","wall_ms":642,"wall_s":0.643,"peak_working_set":88338432,"peak_rss_mib":84.2,"exit_code":1,"finished_at":"2026-10-20T13:59:38.5316299+08:00"}
-
-#STDERR
-[31;1mParserError: [0m
-[31;1m[36;1mLine |[0m
-[31;1m[36;1m[36;1m   1 | [0m . bench\cp2';  $env:RILTRA_HOME = $env:TEMP[36;1m\opencode\bench\home[0m; & 'E:\ .[0m
-[31;1m[36;1m[36;1m[0m[36;1m[0m[36;1m     | [31;1m                                            ~~~~~~~~~~~~~~~~~~~~[0m
-[31;1m[36;1m[36;1m[0m[36;1m[0m[36;1m[31;1m[31;1m[36;1m     | [31;1mUnexpected token '\opencode\bench\home' in expression or statement.[0m

@@ -1,3 +1,0 @@
-Show record `cp7a-other-stale` in `other`. What is its freshness status, verification state, and what does that freshness status mean?
-
-Access: use only the shell tool, running the read-only wrapper <CP7A_ROOT>\bin\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.

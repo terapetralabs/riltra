@@ -1,9 +1,0 @@
-{
-  "queries": 22,
-  "answers_compared": 20,
-  "answers_identical_after_volatile_normalization": 20,
-  "error_outputs": 2,
-  "error_outputs_identical_bytes": 2,
-  "differing": [],
-  "normalization": "fact-digest.cjs compare-outputs: snapshot id, created_unix, nonce, revision, registry added_unix only"
-}

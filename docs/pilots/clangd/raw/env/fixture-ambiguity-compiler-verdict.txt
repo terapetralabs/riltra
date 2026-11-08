@@ -1,6 +1,0 @@
-ambiguous.cc
-src\ambiguous.cc(10): error C2668: 'amb::pick': ambiguous call to overloaded function
-include\geom/overload.h(29): note: could be 'void amb::pick(double)'
-include\geom/overload.h(28): note: or       'void amb::pick(long)'
-src\ambiguous.cc(10): note: while trying to match the argument list '(char)'
-

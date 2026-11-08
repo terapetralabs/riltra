@@ -2410,8 +2410,10 @@ fn r1_context_mcp_matches_cli_and_keeps_the_index_read_only() {
     );
     assert_eq!(d["distance_scope"], "inspected_subgraph", "{d}");
     assert_eq!(d["impact"]["verdict"], "HIGH", "{d}");
-    assert_eq!(d["query"]["status"], "not_run", "{d}");
-    assert_eq!(d["semantic"]["status"], "not_run", "{d}");
+    assert_eq!(d["query"]["status"], "unavailable", "{d}");
+    assert_eq!(d["query"]["reason"], "knowledge-store-missing", "{d}");
+    assert_eq!(d["semantic"]["status"], "unavailable", "{d}");
+    assert_eq!(d["knowledge"]["status"], "unavailable", "{d}");
     let mut distances: Vec<u64> = d["graph"]["nodes"]
         .as_array()
         .unwrap()
@@ -2425,10 +2427,82 @@ fn r1_context_mcp_matches_cli_and_keeps_the_index_read_only() {
         before,
         "context must be read-only"
     );
+    assert!(
+        !h.join("knowledge").exists(),
+        "context must not create a knowledge store"
+    );
+
+    kcreate(
+        &h,
+        "g",
+        r#"{"id":"explicit","kind":"decision","title":"Read boundary","body":"keep this operation local","status":"active","author":"owner","evidence":[]}"#,
+    );
+    kcreate(
+        &h,
+        "g",
+        r#"{"id":"candidate","kind":"decision","title":"Database migration","body":"local database migration","status":"active","author":"owner","evidence":[]}"#,
+    );
+    let binding = br#"{"record_id":"explicit","record_revision":1,"relation":"constrains","author":"owner","rationale":"This decision constrains the anchor.","provenance":"architecture review"}"#;
+    let (code, _, err) = run_cli_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "g",
+            "--path",
+            "graph.py",
+            "--line",
+            &lines[2].to_string(),
+            "--col",
+            "6",
+            "--input",
+            "-",
+        ],
+        binding,
+    );
+    assert_eq!(code, 0, "bind: {err}");
+    let knowledge_before = std::fs::read(knowledge_db(&h, "g")).unwrap();
+    let query_line = lines[2].to_string();
+    let query_args = [
+        "context",
+        "--repo",
+        "g",
+        "--path",
+        "graph.py",
+        "--line",
+        &query_line,
+        "--col",
+        "6",
+        "--query",
+        "database migration",
+    ];
+    let result = call_tool(
+        &mut s,
+        3,
+        "riltra_context",
+        &json!({"repo":"g","path":"graph.py","line":lines[2],"col":6,"query":"database migration"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    let contextual = doc(&result);
+    assert_graph_parity(&h, &contextual, &query_args);
+    assert_eq!(
+        contextual["knowledge"]["bindings"]["status"], "linked",
+        "{contextual}"
+    );
+    assert_eq!(
+        contextual["query"]["hits"][0]["id"], "candidate",
+        "{contextual}"
+    );
+    assert_eq!(
+        std::fs::read(knowledge_db(&h, "g")).unwrap(),
+        knowledge_before,
+        "context knowledge lookup must be read-only"
+    );
 
     let bad = call_tool(
         &mut s,
-        3,
+        4,
         "riltra_context",
         &json!({"repo":"g","path":"../outside","line":1,"col":1}),
     );

@@ -1,1 +1,0 @@
-{"repo":"ts","snapshot":1,"imports":[{"import":1,"provider":"scip-typescript","provider_version":"0.4.0","capability":"definitions,references","verification":"Unverified","artifact_id":"5e19efe6ada65ed4","claimed_source_digest":"","content_identity_match":true,"source_revision_match":true,"limitation":"unsupported semantic provider: 'scip-typescript'"}]}

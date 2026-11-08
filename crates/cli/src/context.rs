@@ -10,7 +10,10 @@ use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::Reversed;
 use petgraph::Directed;
 
-use crate::{edges, index, response, store};
+use crate::{
+    edges, index, knowledge, knowledge_binding, knowledge_search, knowledge_store, registry,
+    response, store,
+};
 
 pub const DEFAULT_DEPTH: usize = 3;
 pub const DEFAULT_LIMIT: usize = 20;
@@ -39,11 +42,37 @@ pub struct ContextNode {
 pub struct ContextResult {
     pub graph: Vec<ContextNode>,
     pub trace: index::TraceQueryOut,
+    pub knowledge: ContextKnowledge,
     pub limit: usize,
     pub omitted_nodes: usize,
-    pub query_requested: bool,
-    pub semantic_requested: bool,
     pub max_bytes: usize,
+}
+
+pub struct ContextKnowledge {
+    pub status: &'static str,
+    pub reason: Option<&'static str>,
+    pub generation: Option<u64>,
+    pub schema_version: Option<u32>,
+    pub bindings: knowledge_binding::AtPage,
+    pub query: ContextRetrieval,
+    pub semantic: ContextRetrieval,
+}
+
+pub struct ContextRetrieval {
+    pub requested: bool,
+    pub status: &'static str,
+    pub reason: Option<&'static str>,
+    pub generation: Option<u64>,
+    pub hits: Vec<ContextHit>,
+    pub total: Option<usize>,
+    pub total_exact: bool,
+    pub truncated: Option<bool>,
+    pub candidates_returned: Option<usize>,
+}
+
+pub struct ContextHit {
+    pub record: knowledge::RecordVersion,
+    pub embedding_truncated: Option<bool>,
 }
 
 struct ContextEdge {
@@ -74,6 +103,9 @@ pub fn validate_request(
             ));
         }
     }
+    if request.semantic && request.query.is_none() {
+        return Err("context semantic retrieval requires --query".to_string());
+    }
     let trace = trace_request(request);
     let (canon, rel, _) = index::validated_trace_anchor(root, &trace)?;
     Ok((canon, rel))
@@ -81,6 +113,8 @@ pub fn validate_request(
 
 pub fn query_conn(
     conn: &mut rusqlite::Connection,
+    home: &Path,
+    entry: &registry::RepoEntry,
     repo: &str,
     root: &Path,
     request: &ContextRequest<'_>,
@@ -101,15 +135,375 @@ pub fn query_conn(
     let mut graph = context_nodes(&trace);
     let omitted_nodes = graph.len().saturating_sub(request.limit);
     graph.truncate(request.limit);
+    let knowledge = knowledge_context(conn, home, entry, root, &trace, request);
     Ok(ContextResult {
         graph,
         trace,
+        knowledge,
         limit: request.limit,
         omitted_nodes,
-        query_requested: request.query.is_some(),
-        semantic_requested: request.semantic,
         max_bytes: request.max_bytes,
     })
+}
+
+fn retrieval(requested: bool, status: &'static str) -> ContextRetrieval {
+    ContextRetrieval {
+        requested,
+        status,
+        reason: None,
+        generation: None,
+        hits: Vec::new(),
+        total: None,
+        total_exact: false,
+        truncated: None,
+        candidates_returned: None,
+    }
+}
+
+fn unavailable_page(
+    path: &str,
+    line: u32,
+    col: u32,
+    generation: u64,
+    reason: &'static str,
+) -> knowledge_binding::AtPage {
+    let mut page = knowledge_binding::empty_at(path, line, col, generation, 0);
+    page.status = "unavailable";
+    page.unresolved_reason = Some(reason.to_string());
+    page
+}
+
+fn map_lexical(outcome: knowledge_search::SearchOutcome) -> ContextRetrieval {
+    match outcome {
+        knowledge_search::SearchOutcome::Lexical(page) => ContextRetrieval {
+            requested: true,
+            status: "lexical",
+            reason: None,
+            generation: Some(page.generation),
+            hits: page
+                .hits
+                .into_iter()
+                .map(|record| ContextHit {
+                    record,
+                    embedding_truncated: None,
+                })
+                .collect(),
+            total: Some(page.total),
+            total_exact: true,
+            truncated: Some(page.truncated),
+            candidates_returned: None,
+        },
+        knowledge_search::SearchOutcome::Fallback { page, reason } => ContextRetrieval {
+            requested: true,
+            status: "fallback",
+            reason: Some(reason),
+            generation: Some(page.generation),
+            hits: page
+                .hits
+                .into_iter()
+                .map(|record| ContextHit {
+                    record,
+                    embedding_truncated: None,
+                })
+                .collect(),
+            total: Some(page.total),
+            total_exact: true,
+            truncated: Some(page.truncated),
+            candidates_returned: None,
+        },
+        #[cfg(feature = "semantic-knowledge")]
+        knowledge_search::SearchOutcome::Semantic { .. } => {
+            unreachable!("lexical query returned semantic results")
+        }
+    }
+}
+
+fn map_semantic(outcome: knowledge_search::SearchOutcome) -> ContextRetrieval {
+    match outcome {
+        #[cfg(feature = "semantic-knowledge")]
+        knowledge_search::SearchOutcome::Semantic {
+            hits,
+            generation,
+            candidates_returned,
+        } => ContextRetrieval {
+            requested: true,
+            status: "semantic",
+            reason: None,
+            generation: Some(generation),
+            hits: hits
+                .into_iter()
+                .map(|hit| ContextHit {
+                    record: hit.record,
+                    embedding_truncated: Some(hit.embedding_truncated),
+                })
+                .collect(),
+            total: None,
+            total_exact: false,
+            truncated: None,
+            candidates_returned: Some(candidates_returned),
+        },
+        knowledge_search::SearchOutcome::Fallback { page, reason } => ContextRetrieval {
+            requested: true,
+            status: "fallback",
+            reason: Some(reason),
+            generation: Some(page.generation),
+            hits: Vec::new(),
+            total: None,
+            total_exact: false,
+            truncated: None,
+            candidates_returned: None,
+        },
+        knowledge_search::SearchOutcome::Lexical(page) => ContextRetrieval {
+            requested: true,
+            status: "fallback",
+            reason: Some("semantic-fallback"),
+            generation: Some(page.generation),
+            hits: Vec::new(),
+            total: None,
+            total_exact: false,
+            truncated: None,
+            candidates_returned: None,
+        },
+    }
+}
+
+fn knowledge_context(
+    code_conn: &rusqlite::Connection,
+    home: &Path,
+    entry: &registry::RepoEntry,
+    root: &Path,
+    trace: &index::TraceQueryOut,
+    request: &ContextRequest<'_>,
+) -> ContextKnowledge {
+    let mut query = retrieval(
+        request.query.is_some(),
+        if request.query.is_some() {
+            "unavailable"
+        } else {
+            "not_requested"
+        },
+    );
+    let mut semantic = retrieval(
+        request.semantic,
+        if request.semantic {
+            "unavailable"
+        } else {
+            "not_requested"
+        },
+    );
+    let db = knowledge_store::knowledge_db_path(home, &entry.name);
+    match crate::knowledge_store_absent(&db) {
+        Ok(true) => {
+            query.status = if query.requested {
+                "unavailable"
+            } else {
+                "not_requested"
+            };
+            query.reason = query.requested.then_some("knowledge-store-missing");
+            semantic.status = if semantic.requested {
+                "unavailable"
+            } else {
+                "not_requested"
+            };
+            semantic.reason = semantic.requested.then_some("knowledge-store-missing");
+            return ContextKnowledge {
+                status: "unavailable",
+                reason: Some("knowledge-store-missing"),
+                generation: None,
+                schema_version: None,
+                bindings: unavailable_page(
+                    request.path,
+                    request.line,
+                    request.col,
+                    0,
+                    "knowledge-store-missing",
+                ),
+                query,
+                semantic,
+            };
+        }
+        Err(_) => {
+            query.status = if query.requested {
+                "unavailable"
+            } else {
+                "not_requested"
+            };
+            query.reason = query.requested.then_some("knowledge-store-unavailable");
+            semantic.status = if semantic.requested {
+                "unavailable"
+            } else {
+                "not_requested"
+            };
+            semantic.reason = semantic.requested.then_some("knowledge-store-unavailable");
+            return ContextKnowledge {
+                status: "unavailable",
+                reason: Some("knowledge-store-unavailable"),
+                generation: None,
+                schema_version: None,
+                bindings: unavailable_page(
+                    request.path,
+                    request.line,
+                    request.col,
+                    0,
+                    "knowledge-store-unavailable",
+                ),
+                query,
+                semantic,
+            };
+        }
+        Ok(false) => {}
+    }
+    let mut knowledge_conn = match knowledge_store::open_knowledge_at(home, entry, false) {
+        Ok(conn) => conn,
+        Err(_) => {
+            query.status = if query.requested {
+                "unavailable"
+            } else {
+                "not_requested"
+            };
+            query.reason = query.requested.then_some("knowledge-store-unavailable");
+            semantic.status = if semantic.requested {
+                "unavailable"
+            } else {
+                "not_requested"
+            };
+            semantic.reason = semantic.requested.then_some("knowledge-store-unavailable");
+            return ContextKnowledge {
+                status: "unavailable",
+                reason: Some("knowledge-store-unavailable"),
+                generation: None,
+                schema_version: None,
+                bindings: unavailable_page(
+                    request.path,
+                    request.line,
+                    request.col,
+                    0,
+                    "knowledge-store-unavailable",
+                ),
+                query,
+                semantic,
+            };
+        }
+    };
+    let anchor = match knowledge_binding::anchor_from_trace(code_conn, entry, root, trace) {
+        Ok(anchor) => anchor,
+        Err(_) => {
+            query.reason = query.requested.then_some("code-anchor-unavailable");
+            semantic.reason = semantic.requested.then_some("code-anchor-unavailable");
+            return ContextKnowledge {
+                status: "unavailable",
+                reason: Some("code-anchor-unavailable"),
+                generation: None,
+                schema_version: None,
+                bindings: unavailable_page(
+                    request.path,
+                    request.line,
+                    request.col,
+                    0,
+                    "code-anchor-unavailable",
+                ),
+                query,
+                semantic,
+            };
+        }
+    };
+    let model_dir = std::env::var_os("RILTRA_MODEL_DIR").map(std::path::PathBuf::from);
+    let mut expected_generation = None;
+    let mut status = "available";
+    let mut reason = None;
+    if let Some(text) = request.query {
+        match knowledge_search::search(
+            &mut knowledge_conn,
+            home,
+            entry,
+            text,
+            None,
+            None,
+            false,
+            false,
+            false,
+            request.limit,
+            0,
+            None,
+            false,
+            None,
+        ) {
+            Ok(outcome) => {
+                query = map_lexical(outcome);
+                expected_generation = query.generation;
+            }
+            Err(_) => {
+                status = "unavailable";
+                reason = Some("knowledge-query-unavailable");
+                query.status = "unavailable";
+                query.reason = reason;
+            }
+        }
+        if request.semantic && expected_generation.is_some() {
+            match knowledge_search::search(
+                &mut knowledge_conn,
+                home,
+                entry,
+                text,
+                None,
+                None,
+                false,
+                false,
+                false,
+                request.limit,
+                0,
+                expected_generation,
+                true,
+                model_dir.as_deref(),
+            ) {
+                Ok(outcome) => semantic = map_semantic(outcome),
+                Err(_) => {
+                    semantic.status = "unavailable";
+                    semantic.reason = Some("knowledge-changed-or-unavailable");
+                }
+            }
+        } else if request.semantic {
+            semantic.status = "unavailable";
+            semantic.reason = Some("knowledge-query-unavailable");
+        }
+    }
+    let (bindings, binding_generation, binding_schema_version) = match knowledge_binding::at_pinned(
+        &knowledge_conn,
+        entry,
+        &anchor,
+        request.limit,
+        expected_generation,
+    ) {
+        Ok(page) => {
+            let generation = Some(page.generation);
+            let schema_version = Some(page.schema_version);
+            (page, generation, schema_version)
+        }
+        Err(_) => {
+            status = "unavailable";
+            reason = Some("knowledge-changed-or-unavailable");
+            (
+                unavailable_page(
+                    &anchor.path,
+                    anchor.cursor_line,
+                    anchor.cursor_col,
+                    expected_generation.unwrap_or(0),
+                    "knowledge-changed-or-unavailable",
+                ),
+                None,
+                None,
+            )
+        }
+    };
+    ContextKnowledge {
+        status,
+        reason,
+        generation: binding_generation,
+        schema_version: binding_schema_version,
+        bindings,
+        query,
+        semantic,
+    }
 }
 
 fn trace_request<'a>(request: &ContextRequest<'a>) -> index::TraceRequest<'a> {

@@ -1,6 +1,0 @@
-id	state	mode	exit	compiled_here	test_binary_sha256	result
-P1	defect	clean	101	1	aa0634a5f2e5c44e927280cfa70264b4c44282c77c16d687ab7447abc7b64581	test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 425 filtered out; finished in 0.00s
-P2	restored	clean	0	1	89083af648298957c4b3a2778749dcdb93a5ef6d1a4654dcefdad72935258ba2	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 425 filtered out; finished in 0.00s
-P3	defect	clean	101	1	87e9d2176592fca97f47890a5644e33068a1f93e44ce75105421eae81d073bba	test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 425 filtered out; finished in 0.00s
-C1	restored	noclean	101	0	87e9d2176592fca97f47890a5644e33068a1f93e44ce75105421eae81d073bba	test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 425 filtered out; finished in 0.00s
-P4	restored	clean	0	1	f51ae1e559aadedc80640e5105bd9f2a242e11bf3d9793314607d9e8c3e3f926	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 425 filtered out; finished in 0.00s

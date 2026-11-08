@@ -425,17 +425,124 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
     let context_limit_omitted_nodes = omitted_nodes;
     let mut byte_omitted_edges = 0usize;
     let mut byte_omitted_nodes = 0usize;
+    let root = Path::new(&trace.snapshot.root);
+    let mut query_hits = context_hits_json(&result.knowledge.query, root)?;
+    let mut semantic_hits = context_hits_json(&result.knowledge.semantic, root)?;
+    let mut bindings: serde_json::Value = serde_json::from_str(
+        &crate::knowledge_binding::page_json(&result.knowledge.bindings),
+    )
+    .map_err(|e| format!("context binding assembly failed: {e}"))?;
+    for binding in bindings["bindings"].as_array_mut().into_iter().flatten() {
+        if let Some(record) = binding
+            .get_mut("record")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if let Some(body) = record.remove("body") {
+                record.insert("snippet".to_string(), body);
+                record.insert(
+                    "snippet_truncated".to_string(),
+                    serde_json::Value::Bool(false),
+                );
+            }
+        }
+    }
+    let bindings_total_exact = result.knowledge.bindings.status != "unavailable";
+    let omitted_bindings_by_limit = bindings_total_exact.then(|| {
+        result
+            .knowledge
+            .bindings
+            .total
+            .saturating_sub(result.knowledge.bindings.bindings.len())
+    });
+    if let Some(fields) = bindings.as_object_mut() {
+        if result.knowledge.schema_version.is_none() {
+            fields.insert("schema_version".to_string(), serde_json::Value::Null);
+        }
+        fields.insert(
+            "total".to_string(),
+            if bindings_total_exact {
+                serde_json::json!(result.knowledge.bindings.total)
+            } else {
+                serde_json::Value::Null
+            },
+        );
+        fields.insert(
+            "total_exact".to_string(),
+            serde_json::Value::Bool(bindings_total_exact),
+        );
+        fields.insert(
+            "truncated".to_string(),
+            if bindings_total_exact {
+                serde_json::json!(result.knowledge.bindings.truncated)
+            } else {
+                serde_json::Value::Null
+            },
+        );
+        fields.insert(
+            "omitted_by_limit".to_string(),
+            serde_json::json!(omitted_bindings_by_limit),
+        );
+    }
+    let mut omitted_query_hits = 0usize;
+    let mut omitted_semantic_hits = 0usize;
+    let mut omitted_bindings_by_budget = 0usize;
     loop {
-        let truncated = trace.truncated || omitted_edges > 0 || omitted_nodes > 0;
-        let mut reasons = trace.unresolved.clone();
+        if let Some(fields) = bindings.as_object_mut() {
+            fields.insert(
+                "truncated".to_string(),
+                if bindings_total_exact {
+                    serde_json::json!(
+                        result.knowledge.bindings.truncated || omitted_bindings_by_budget > 0
+                    )
+                } else {
+                    serde_json::Value::Null
+                },
+            );
+            fields.insert(
+                "omitted_by_budget".to_string(),
+                serde_json::json!(omitted_bindings_by_budget),
+            );
+        }
+        let snippet_truncated = count_truncated_snippets(&bindings)
+            + count_truncated_snippets_in(&query_hits)
+            + count_truncated_snippets_in(&semantic_hits);
+        let query_limited = result.knowledge.query.truncated == Some(true);
+        let truncated = trace.truncated
+            || omitted_edges > 0
+            || omitted_nodes > 0
+            || omitted_query_hits > 0
+            || omitted_semantic_hits > 0
+            || omitted_bindings_by_budget > 0
+            || omitted_bindings_by_limit.is_some_and(|count| count > 0)
+            || snippet_truncated > 0
+            || query_limited;
+        let mut graph_reasons = trace.unresolved.clone();
         if context_limit_omitted_edges > 0 || context_limit_omitted_nodes > 0 {
-            reasons.push("context-limit".to_string());
+            graph_reasons.push("context-limit".to_string());
         }
         if byte_omitted_edges > 0 || byte_omitted_nodes > 0 {
-            reasons.push("output-byte-budget".to_string());
+            graph_reasons.push("output-byte-budget".to_string());
         }
-        reasons.sort();
-        reasons.dedup();
+        graph_reasons.sort();
+        graph_reasons.dedup();
+        let mut truncation_reasons = graph_reasons.clone();
+        if omitted_query_hits > 0 || omitted_semantic_hits > 0 {
+            truncation_reasons.push("knowledge-candidates".to_string());
+        }
+        if omitted_bindings_by_limit.is_some_and(|count| count > 0) {
+            truncation_reasons.push("binding-limit".to_string());
+        }
+        if omitted_bindings_by_budget > 0 {
+            truncation_reasons.push("binding-budget".to_string());
+        }
+        if snippet_truncated > 0 {
+            truncation_reasons.push("knowledge-snippets".to_string());
+        }
+        if query_limited {
+            truncation_reasons.push("query-limit".to_string());
+        }
+        truncation_reasons.sort();
+        truncation_reasons.dedup();
         let value = serde_json::json!({
             "schema_version": 1,
             "operation": "context",
@@ -467,17 +574,44 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
                 "bridges": &bridges,
                 "visits": {"nodes": trace.nodes, "edges": trace.edge_visits},
                 "truncated": trace.truncated || omitted_edges > 0 || omitted_nodes > 0,
-                "unresolved": &reasons,
+                "unresolved": &graph_reasons,
+            },
+            "knowledge": {
+                "status": result.knowledge.status,
+                "reason": result.knowledge.reason,
+                "snapshot": {
+                    "generation": result.knowledge.generation,
+                    "schema_version": result.knowledge.schema_version,
+                },
+                "freshness": {
+                    "status": result.knowledge.status,
+                    "bindings": result.knowledge.bindings.status,
+                },
+                "bindings": &bindings,
             },
             "query": {
-                "requested": result.query_requested,
-                "status": if result.query_requested { "not_run" } else { "not_requested" },
-                "reason": if result.query_requested { Some("reserved_for_follow_up") } else { None },
+                "requested": result.knowledge.query.requested,
+                "status": result.knowledge.query.status,
+                "reason": result.knowledge.query.reason,
+                "generation": result.knowledge.query.generation,
+                "hits": &query_hits,
+                "total": result.knowledge.query.total,
+                "total_exact": result.knowledge.query.total_exact,
+                "truncated": result.knowledge.query.truncated,
+                "omitted_by_budget": omitted_query_hits,
             },
             "semantic": {
-                "requested": result.semantic_requested,
-                "status": if result.semantic_requested { "not_run" } else { "not_requested" },
-                "reason": if result.semantic_requested { Some("reserved_for_follow_up") } else { None },
+                "requested": result.knowledge.semantic.requested,
+                "status": result.knowledge.semantic.status,
+                "reason": result.knowledge.semantic.reason,
+                "generation": result.knowledge.semantic.generation,
+                "hits": &semantic_hits,
+                "total": result.knowledge.semantic.total,
+                "total_exact": result.knowledge.semantic.total_exact,
+                "truncated": result.knowledge.semantic.truncated,
+                "candidate_limit": crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT,
+                "candidates_returned": result.knowledge.semantic.candidates_returned,
+                "omitted_by_budget": omitted_semantic_hits,
             },
             "budgets": {
                 "depth": trace.depth,
@@ -494,6 +628,12 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
                 "max_bytes": result.max_bytes,
                 "omitted_nodes": omitted_nodes,
                 "omitted_edges": omitted_edges,
+                "omitted_query_hits": omitted_query_hits,
+                "omitted_semantic_hits": omitted_semantic_hits,
+                "omitted_bindings_by_limit": omitted_bindings_by_limit,
+                "omitted_bindings_by_budget": omitted_bindings_by_budget,
+                "snippets_truncated": snippet_truncated,
+                "reasons": truncation_reasons,
             },
         });
         #[cfg(feature = "semantic-knowledge")]
@@ -507,7 +647,18 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
         if encoded.len() <= result.max_bytes {
             return Ok(encoded);
         }
-        if !edge_values.is_empty() {
+        if shrink_first_snippet_in(&mut semantic_hits)
+            || shrink_first_snippet_in(&mut query_hits)
+            || shrink_first_snippet(&mut bindings)
+        {
+            continue;
+        } else if !semantic_hits.is_empty() {
+            semantic_hits.pop();
+            omitted_semantic_hits += 1;
+        } else if !query_hits.is_empty() {
+            query_hits.pop();
+            omitted_query_hits += 1;
+        } else if !edge_values.is_empty() {
             edge_values.pop();
             omitted_edges += 1;
             byte_omitted_edges += 1;
@@ -515,10 +666,92 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             nodes.pop();
             omitted_nodes += 1;
             byte_omitted_nodes += 1;
+        } else if bindings["bindings"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+        {
+            bindings["bindings"].as_array_mut().unwrap().pop();
+            omitted_bindings_by_budget += 1;
         } else {
-            return Err("context response envelope exceeds max_bytes".to_string());
+            return Err("context response metadata exceeds max_bytes".to_string());
         }
     }
+}
+
+fn context_hits_json(
+    retrieval: &crate::context::ContextRetrieval,
+    root: &Path,
+) -> Result<Vec<serde_json::Value>, String> {
+    retrieval
+        .hits
+        .iter()
+        .map(|hit| {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&record_json(&hit.record, root))
+                    .map_err(|e| format!("context candidate assembly failed: {e}"))?;
+            if let Some(record) = value.as_object_mut() {
+                let body = record
+                    .remove("body")
+                    .unwrap_or(serde_json::Value::String(String::new()));
+                record.insert("snippet".to_string(), body);
+                record.insert(
+                    "snippet_truncated".to_string(),
+                    serde_json::Value::Bool(false),
+                );
+                record.insert("relevance".to_string(), serde_json::json!("candidate"));
+                if let Some(truncated) = hit.embedding_truncated {
+                    record.insert(
+                        "embedding_truncated".to_string(),
+                        serde_json::json!(truncated),
+                    );
+                }
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+fn shrink_first_snippet(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values.iter_mut().rev().any(shrink_first_snippet),
+        serde_json::Value::Object(fields) => {
+            if let Some(serde_json::Value::String(snippet)) = fields.get_mut("snippet") {
+                if !snippet.is_empty() {
+                    let mut keep = snippet.len() / 2;
+                    while !snippet.is_char_boundary(keep) {
+                        keep -= 1;
+                    }
+                    snippet.truncate(keep);
+                    fields.insert(
+                        "snippet_truncated".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                    return true;
+                }
+            }
+            fields.values_mut().any(shrink_first_snippet)
+        }
+        _ => false,
+    }
+}
+
+fn shrink_first_snippet_in(values: &mut [serde_json::Value]) -> bool {
+    values.iter_mut().any(shrink_first_snippet)
+}
+
+fn count_truncated_snippets(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(values) => values.iter().map(count_truncated_snippets).sum(),
+        serde_json::Value::Object(fields) => {
+            usize::from(fields.get("snippet_truncated") == Some(&serde_json::Value::Bool(true)))
+                + fields.values().map(count_truncated_snippets).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+fn count_truncated_snippets_in(values: &[serde_json::Value]) -> usize {
+    values.iter().map(count_truncated_snippets).sum()
 }
 
 // --- knowledge -------------------------------------------------------------
@@ -794,7 +1027,8 @@ pub(crate) fn knowledge_semantic_hits_result_json(
     let mut result = knowledge_search_result_rendered_json(query, path, kind, false, &hits);
     result.pop();
     format!(
-        "{result},\"semantic\":{{\"status\":\"semantic\",\"reason\":null,\"candidate_limit\":1000,\"candidates_returned\":{candidates_returned}}}}}"
+        "{result},\"semantic\":{{\"status\":\"semantic\",\"reason\":null,\"candidate_limit\":{},\"candidates_returned\":{candidates_returned}}}}}",
+        crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT
     )
 }
 
@@ -809,8 +1043,9 @@ pub(crate) fn knowledge_semantic_search_result_json(
     let mut result = knowledge_search_result_json(query, path, kind, false, hits, root);
     result.pop();
     format!(
-        "{result},\"semantic\":{{\"status\":\"fallback\",\"reason\":{},\"candidate_limit\":1000,\"candidates_returned\":null}}}}",
-        opt_str(&reason.map(str::to_string))
+        "{result},\"semantic\":{{\"status\":\"fallback\",\"reason\":{},\"candidate_limit\":{},\"candidates_returned\":null}}}}",
+        opt_str(&reason.map(str::to_string)),
+        crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT
     )
 }
 

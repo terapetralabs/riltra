@@ -1,1 +1,0 @@
-{"relation_id":"fixture-review-link","src_id":"fixture-review-confined-read","src_revision":1,"dst_id":"e2-codex-confined-read-pr14","dst_revision":1,"kind":"relates_to","author":"fixture-reviewer","rationale":"Synthetic review with inconclusive outcome; this link does not certify the decision."}

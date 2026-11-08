@@ -29,7 +29,6 @@ const VECTOR_HOME: &str = "v";
 const LOCK_FILE: &str = "LOCK";
 const TABLE_NAME: &str = "v";
 const VECTOR_DIMENSIONS: usize = 384;
-const SEMANTIC_CANDIDATE_LIMIT: usize = 1000;
 const MANIFEST_VERSION: u32 = 1;
 // LanceDB creates 56-character data filenames below <table>.lance/data. Keep
 // a conservative budget below the observed failing paths in this backend;
@@ -931,7 +930,7 @@ fn query_vector_table(path: &Path, vector: &[f32]) -> Result<Vec<VectorCandidate
                 "_distance",
             ]))
             // This bounds returned candidates; LanceDB may still scan the full table without an index.
-            .limit(SEMANTIC_CANDIDATE_LIMIT)
+            .limit(crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT)
             .execute()
             .await
             .map_err(|e| format!("cannot execute vector query: {e}"))?;
@@ -1020,7 +1019,7 @@ fn query_vector_table(path: &Path, vector: &[f32]) -> Result<Vec<VectorCandidate
                 });
             }
         }
-        if candidates.len() > SEMANTIC_CANDIDATE_LIMIT {
+        if candidates.len() > crate::knowledge_search::SEMANTIC_CANDIDATE_LIMIT {
             return Err("vector query exceeded the candidate limit".into());
         }
         candidates.sort_by(|a, b| {

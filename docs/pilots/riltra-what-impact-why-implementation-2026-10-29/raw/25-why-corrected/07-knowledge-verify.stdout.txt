@@ -1,1 +1,0 @@
-{"schema_version":1,"repo":"riltra-e2-confined","generation":2,"operation":"verify","result":{"status":"ok","schema_version":3,"records":1,"relations":0,"code_bindings":1}}

@@ -1,3 +1,0 @@
-Reading additional input from stdin...
-2026-10-26T17:18:04.054677Z ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "UnsupportedOperation(\"native MXC is unavailable on this executor\")" }
-2026-10-26T17:18:07.114981Z ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "UnsupportedOperation(\"native MXC is unavailable on this executor\")" }

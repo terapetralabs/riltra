@@ -1,5 +1,0 @@
-I couldn’t complete the change: the file edits were rejected, and the requested test command could not run because Cargo was denied access to its build lock.
-
-- **Final result line:** Unavailable; the test command failed before running.
-- **Changed files:** None.
-- **Change:** Not applied; the fix is to escape newline characters as `\n` in `crates/cli/src/json.rs`.

@@ -1,3 +1,0 @@
-"Repository: the current working directory. The test json::tests::escapes_quote_backslash_and_newline fails in this copy of the repository. Restore the correct behavior in the implementation. Do not modify the tests module or any file under a tests directory. Then run: cargo test --locked --bin riltra json::tests
-Report three things: the final result line of that command, the list of changed files, and one sentence describing the change.
-"

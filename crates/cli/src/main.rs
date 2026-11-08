@@ -891,19 +891,23 @@ fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i
         limit,
         max_bytes,
     };
-    let (root, _) = match resolve_recorded_root(&args.repo, err) {
+    let (root, entry) = match knowledge_repo(&args.repo, err) {
         Ok(paths) => paths,
         Err(code) => return code,
     };
     if let Err(e) = context::validate_request(Path::new(&root), &request) {
         err.push_str(&format!("error: {e}\n"));
-        return if e.starts_with("invalid context bounds") || e.starts_with("context query") {
+        return if e.starts_with("invalid context bounds")
+            || e.starts_with("context query")
+            || e.starts_with("context semantic")
+        {
             2
         } else {
             3
         };
     }
-    match store::open_read(&store::db_path(&paths::config_dir(), &args.repo)) {
+    let home = paths::config_dir();
+    match store::open_read(&store::db_path(&home, &args.repo)) {
         store::IndexRead::Missing => {
             err.push_str("error: no snapshot: index the repository first\n");
             3
@@ -924,14 +928,20 @@ fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i
             3
         }
         store::IndexRead::Ready(mut conn) => {
-            let result =
-                match context::query_conn(&mut conn, &args.repo, Path::new(&root), &request) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        err.push_str(&format!("error: {e}\n"));
-                        return 3;
-                    }
-                };
+            let result = match context::query_conn(
+                &mut conn,
+                &home,
+                &entry,
+                &args.repo,
+                Path::new(&root),
+                &request,
+            ) {
+                Ok(result) => result,
+                Err(e) => {
+                    err.push_str(&format!("error: {e}\n"));
+                    return 3;
+                }
+            };
             match response::context_query_json(&result) {
                 Ok(value) => {
                     *out = value + "\n";

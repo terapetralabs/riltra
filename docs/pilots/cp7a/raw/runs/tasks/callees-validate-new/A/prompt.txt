@@ -1,3 +1,0 @@
-For the function `validate_new` anchored at `crates/cli/src/knowledge.rs:199:1` in `riltra`, how many callee edges are returned, and what are the distinct callee names?
-
-Access: use only the shell tool, running the read-only wrapper <CP7A_ROOT>\bin\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.

@@ -8,15 +8,19 @@ Changes made after `0.1.0` is cut are listed here.
 
 ### Added
 
+- A `context` CLI and MCP query that composes bounded code graph and impact
+  results with explicit knowledge bindings and optional lexical or local
+  semantic matches. It keeps unlinked relevance matches separate from explicit
+  bindings.
 - A manual workflow, `installer-phase-b`, that downloads the assets of a published release and runs the installer checks on them on hosted Windows, Linux and macOS x64 runners ([workflow](.github/workflows/installer-phase-b.yml)).
 
 ### Changed
 
 - Python caller queries can include candidates for simple aliased imports. These remain heuristic, unverified candidates and do not establish a binding.
 
-### Scope and limits of the evidence
+### Evidence status
 
-- The installers were run against the published `0.1.0` assets on 2026-11-04, once, on GitHub-hosted Windows, Linux and macOS (Intel) x64 runners. Checksum, install, reinstall, the refusal checks and a user-style install passed on all three ([M10 Phase B amendment](docs/m10-phase-b-amendment-2026-11-04.md)). The hosted Windows runner is an administrator account, so no least-privilege claim follows.
+- [Workflow run 41797080889](https://github.com/terapetralabs/riltra/actions/runs/41797080889) completed successfully for the Phase B Ubuntu, Windows and macOS Intel x64 jobs. The archive download and verification, acceptance-test, and installer-download-path steps passed in those jobs. Conditional targets outside those runners were skipped; this does not establish ARM64 coverage or least-privilege Windows execution.
 
 ## [0.1.0] - 2026-11-04
 
@@ -36,7 +40,5 @@ First pre-release. The version number is already in the build. Native archives f
 
 ### Scope and limits of the evidence
 
-- The evidence behind this release comes from fixtures, pilots and CI checks. It supports no performance or accuracy claim beyond the measured corpus, no comparison with other products, and no claim of superiority ([M10 consolidation, section 10](docs/m10-consolidation.md#10-public-reporting-boundary)).
-- In the agent pilot, 24 slots were planned and 18 reached an agent turn; no agent made a Riltra call in any run of the arm that had Riltra available, so the pilot says nothing about benefit to agents ([section 4.1](docs/m10-consolidation.md#41-totals)).
-- When 0.1.0 was cut, the installers had been checked against locally built archives and the check against a published release had not run ([section 6](docs/m10-consolidation.md#6-release-readiness)). It ran afterwards; see Unreleased.
-- Four C++ capability criteria are unmet, and macOS coverage is x64 only ([Known limitations](README.md#known-limitations)).
+- This release makes no general performance, accuracy, product-comparison or agent-benefit claim. Supported scope and known limitations are listed in the [README](README.md).
+- C++ results remain candidates, and macOS CI coverage is x64 only ([Known limitations](README.md#known-limitations)).

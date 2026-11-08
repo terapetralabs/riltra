@@ -1,4 +1,0 @@
-   Compiling riltra v0.1.0 (<TASK3_RUNSET>\B-A4-a1\snapshot\crates\cli)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.07s
-     Running unittests src\main.rs (<CARGO_TARGET_DIR>\debug\deps\riltra-fb0975e3ce9d37f0.exe)
-error: test failed, to rerun pass `--bin riltra`

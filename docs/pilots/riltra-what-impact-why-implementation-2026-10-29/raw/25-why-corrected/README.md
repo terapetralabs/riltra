@@ -1,5 +1,0 @@
-# Corrected Why evidence run
-
-This isolated run repeats the confined_read knowledge binding lookup using the verified baseline commit 2852ddb4658afdfdcd0286f9a5d1a47f4f5bb87d. It captures the CLI write/read/verify flow and the read-only MCP anchor lookup as separate inputs, commands, stdout, stderr, and exit codes. 09-cli-mcp-parity.json compares the complete CLI response with MCP structuredContent after JSON object-key canonicalization.
-
-The earlier captures in raw/09-knowledge-create.*, raw/11-knowledge-at.*, and raw/13-mcp-at.* are retained as originally captured. Their record body contains a baseline SHA missing the final d; therefore those captures are superseded for the authoritative Why result. No historic capture was rewritten. The corrected record still has support unverified and verification Unverified; the explicit binding proves that a relation was stored and retrieved, not that the knowledge claim is true. Anchor precision remains Heuristic.

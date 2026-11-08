@@ -8,7 +8,7 @@ scan="$repo_root/security/scan.sh"
 pre_push="$repo_root/.githooks/pre-push"
 real_git="$(command -v git)"
 canonical_url='https://github.com/terapetralabs/riltra.git'
-renamed_url='https://test-user:test-secret@github.com/RyanAraaful/riltra.git'
+renamed_url='https://codex-test-user@github.com/RyanAraaful/riltra.git'
 repo=''
 trap '[[ -z "$repo" ]] || rm -rf "$repo"' EXIT
 
@@ -36,7 +36,7 @@ STUB
 #!/usr/bin/env bash
 if [[ "${1:-}" == ls-remote ]]; then
     if [[ "${2:-}" == https://github.com/terapetralabs/riltra.git || \
-          "${2:-}" == https://test-user:test-secret@github.com/RyanAraaful/riltra.git ]]; then
+          "${2:-}" == https://codex-test-user@github.com/RyanAraaful/riltra.git ]]; then
         if [[ -n "${TEST_MASTER_SHA:-}" ]]; then
             printf '%s\trefs/heads/master\n' "$TEST_MASTER_SHA"
             exit 0
@@ -108,9 +108,9 @@ feature_line="refs/heads/feature $safe_head refs/heads/feature $zeros"
 run_checker "$feature_line" origin "$canonical_url" >/dev/null || fail 'new branch from canonical origin/master was rejected'
 run_checker "$feature_line" origin "$renamed_url" >/dev/null || fail 'authenticated renamed canonical URL was rejected'
 run_checker "$feature_line" "$canonical_url" "$canonical_url" >/dev/null || fail 'direct canonical URL push was rejected'
-unsupported_url='https://test-user:test-secret@example.invalid/riltra.git'
+unsupported_url='https://codex-test-user@example.invalid/riltra.git'
 expect_checker_failure 'new branch to an unsupported remote' "$feature_line" backup "$unsupported_url"
-if grep -Fq 'test-secret' "$repo/output.txt"; then fail 'remote credentials leaked in an error'; fi
+if grep -Fq 'codex-test-user' "$repo/output.txt"; then fail 'remote credentials leaked in an error'; fi
 expect_checker_failure 'new branch without remote identity' "$feature_line"
 TEST_MASTER_SHA=''
 export TEST_MASTER_SHA
@@ -120,7 +120,6 @@ TEST_MASTER_SHA="$safe_head"
 export TEST_MASTER_SHA
 expect_checker_failure 'new branch with stale local origin/master' "$feature_line" origin "$canonical_url"
 grep -Fq 'differs from the live remote master' "$repo/output.txt" || {
-    sed 's/test-secret/[REDACTED]/g' "$repo/output.txt" >&2
     fail 'stale-base error was not actionable'
 }
 TEST_MASTER_SHA="$base"

@@ -83,18 +83,16 @@ def provision_model(model_dir, manifest):
 
 
 def runtime_files(ort_source):
+    build_dir = ort_source / "build/Release"
     if sys.platform == "win32":
-        build_dir = ort_source / "build/Windows/Release"
         main_pattern = "onnxruntime.dll"
         companion_pattern = "onnxruntime_providers_shared.dll"
         platform = "windows-x86_64"
     elif sys.platform == "darwin":
-        build_dir = ort_source / "build/MacOS/Release"
         main_pattern = "libonnxruntime*.dylib"
         companion_pattern = "libonnxruntime_providers_shared.dylib"
         platform = "macos-x86_64"
     elif sys.platform == "linux":
-        build_dir = ort_source / "build/Linux/Release"
         main_pattern = "libonnxruntime.so*"
         companion_pattern = "libonnxruntime_providers_shared.so"
         platform = "linux-x86_64"
@@ -103,12 +101,12 @@ def runtime_files(ort_source):
 
     main_files = sorted(
         path
-        for path in build_dir.glob(main_pattern)
+        for path in build_dir.rglob(main_pattern)
         if path.name != companion_pattern and path.is_file() and not path.is_symlink()
     )
     companion_files = sorted(
         path
-        for path in build_dir.glob(companion_pattern)
+        for path in build_dir.rglob(companion_pattern)
         if path.is_file() and not path.is_symlink()
     )
     if len(main_files) != 1:
@@ -120,12 +118,15 @@ def runtime_files(ort_source):
         )
     main = main_files[0]
     companion = companion_files[0]
+    if main.parent != companion.parent:
+        fail("native runtime libraries were found in different output directories")
 
     cache = build_dir / "CMakeCache.txt"
     cache_text = cache.read_text(encoding="utf-8", errors="replace")
     for option in (
         "onnxruntime_USE_TELEMETRY:BOOL=OFF",
         "onnxruntime_BUILD_SHARED_LIB:BOOL=ON",
+        "onnxruntime_BUILD_UNIT_TESTS:BOOL=OFF",
     ):
         if option not in cache_text:
             fail(f"ONNX Runtime build cache does not prove {option}")
@@ -157,6 +158,32 @@ def runtime_files(ort_source):
         if f"onnxruntime_USE_{provider}:BOOL=ON" in cache_text:
             fail(f"ONNX Runtime build unexpectedly enabled the {provider} provider")
     return platform, main, companion
+
+
+def ort_build_args():
+    build_args = [
+        sys.executable,
+        "tools/ci_build/build.py",
+        "--build_dir",
+        "build",
+        "--config",
+        "Release",
+        "--update",
+        "--build",
+        "--build_shared_lib",
+        "--skip_tests",
+        "--skip_pip_install",
+        "--parallel",
+        "2",
+        "--cmake_extra_defines",
+        "onnxruntime_USE_TELEMETRY=OFF",
+        "onnxruntime_BUILD_UNIT_TESTS=OFF",
+    ]
+    if sys.platform == "win32":
+        build_args.extend(["--cmake_generator", "Visual Studio 18 2026"])
+    if sys.platform == "darwin":
+        build_args.extend(["--osx_arch", "x86_64"])
+    return build_args
 
 
 def main():
@@ -191,26 +218,7 @@ def main():
     subprocess.check_call(
         ["git", "-C", str(ort_source), "submodule", "update", "--init", "--recursive"]
     )
-    build_args = [
-        sys.executable,
-        "tools/ci_build/build.py",
-        "--build_dir",
-        "build",
-        "--config",
-        "Release",
-        "--update",
-        "--build",
-        "--build_shared_lib",
-        "--skip_tests",
-        "--skip_pip_install",
-        "--parallel",
-        "2",
-        "--cmake_extra_defines",
-        "onnxruntime_USE_TELEMETRY=OFF",
-    ]
-    if sys.platform == "darwin":
-        build_args.extend(["--osx_arch", "x86_64"])
-    subprocess.check_call(build_args, cwd=ort_source)
+    subprocess.check_call(ort_build_args(), cwd=ort_source)
     checked_out = subprocess.check_output(
         ["git", "-C", str(ort_source), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -232,6 +240,7 @@ def main():
         "build_options": [
             "onnxruntime_USE_TELEMETRY=OFF",
             "onnxruntime_BUILD_SHARED_LIB=ON",
+            "onnxruntime_BUILD_UNIT_TESTS=OFF",
         ],
         "source_repository": REPOSITORY_URL,
         "source_commit": source_commit,

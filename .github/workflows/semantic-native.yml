@@ -13,6 +13,7 @@ on:
       - crates/cli/tests/knowledge.rs
       - Cargo.lock
       - release/prepare-native-semantic.py
+      - release/tests/test_prepare_native_semantic.py
       - security/check-public-doc-boundary.sh
       - security/check-public-doc-boundary.test.sh
       - security/check-public-doc-boundary-outgoing.test.sh
@@ -28,6 +29,7 @@ on:
       - crates/cli/tests/knowledge.rs
       - Cargo.lock
       - release/prepare-native-semantic.py
+      - release/tests/test_prepare_native_semantic.py
       - security/check-public-doc-boundary.sh
       - security/check-public-doc-boundary.test.sh
       - security/check-public-doc-boundary-outgoing.test.sh
@@ -83,6 +85,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Test native semantic provisioning paths
+        run: python release/tests/test_prepare_native_semantic.py
       - name: Install pinned protoc (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -163,7 +167,7 @@ jobs:
             $testOutput | ForEach-Object { Write-Output $_ }
             $testText = $testOutput -join "`n"
             if ($testExit -ne 0) { throw "native query test exited with $testExit" }
-            if ($testText -notmatch 'native direct outbound probe denied:' -or $testText -notmatch 'native semantic observations:') { throw 'native query test did not report network denial and resource observations' }
+            if ($testText -notmatch 'native direct outbound probe denied by process isolation:' -or $testText -notmatch 'native semantic observations:') { throw 'native query test did not report network denial and resource observations' }
           }
           finally {
             if ($ruleAdded) {
@@ -185,7 +189,7 @@ jobs:
           set -e
           printf '%s\n' "$output"
           [[ $status -eq 0 ]] || exit "$status"
-          printf '%s\n' "$output" | grep -F 'native direct outbound probe denied:'
+          printf '%s\n' "$output" | grep -F 'native direct outbound probe denied by process isolation:'
           printf '%s\n' "$output" | grep -F 'native semantic observations:'
       - name: Run macOS query under Seatbelt network deny
         if: runner.os == 'macOS'
@@ -202,7 +206,7 @@ jobs:
           set -e
           printf '%s\n' "$output"
           [[ $status -eq 0 ]] || exit "$status"
-          printf '%s\n' "$output" | grep -F 'native direct outbound probe denied:'
+          printf '%s\n' "$output" | grep -F 'native direct outbound probe denied by process isolation:'
           printf '%s\n' "$output" | grep -F 'native semantic observations:'
       - name: Test lexical fallback without a local model
         shell: bash

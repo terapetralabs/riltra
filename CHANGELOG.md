@@ -12,6 +12,9 @@ Changes made after `0.1.0` is cut are listed here.
   results with explicit knowledge bindings and optional lexical or local
   semantic matches. It keeps unlinked relevance matches separate from explicit
   bindings.
+- Opt-in local semantic knowledge search with explicit vector build, status,
+  and clear commands and an FTS5 fallback when the derived index or assets are
+  unavailable. Official packages remain core-only.
 - A manual workflow, `installer-phase-b`, that downloads the assets of a published release and runs the installer checks on them on hosted Windows, Linux and macOS x64 runners ([workflow](.github/workflows/installer-phase-b.yml)).
 
 ### Changed

@@ -23,10 +23,27 @@ If the feature, model/runtime assets, or usable vector index is unavailable,
 search falls back to FTS5 with an explicit reason. Default lexical searches do
 not load the model.
 
+Inspect the derived index with `riltra knowledge vector status --repo <name>`.
+After changing active knowledge or model assets, rebuild it with the same build
+command. To discard derived vectors, run `riltra knowledge vector clear --repo <name>`;
+knowledge records remain in SQLite. A stale or missing index causes an explicit
+lexical fallback until it is rebuilt.
+
+The local model is `intfloat/multilingual-e5-small`. Only record title and body
+are embedded, up to 512 tokens; `embedding_truncated` marks truncated passages.
+An overlong query falls back with `query-truncated`, while lexical search still
+uses the full text. Semantic search requires a nonempty query, does not support
+historical-status flags or a nonzero offset, and reports inexact totals rather
+than offering subsequent pages. A similarity match is a relevance candidate,
+not proof of a relationship to code.
+
 The `semantic-knowledge` Cargo feature is off by default. Building it does not
 fetch a model or an ONNX Runtime library. The inference loader accepts local
-model files whose hashes match `crates/cli/src/model_manifest.json` and requires
-a separate runtime manifest under the supplied model directory:
+model files whose hashes match `crates/cli/src/model_manifest.json`. Obtain each
+listed file from the exact model revision in that manifest, preserve its
+relative path, and verify its SHA-256 before use. Provisioning is an explicit
+operator step; neither the build nor a query downloads the assets. A separate
+runtime manifest is also required under the supplied model directory:
 
 ```text
 <model-dir>/
@@ -87,8 +104,11 @@ loader rejects the known telemetry-enabled Microsoft Windows 1.24.4 DLL even
 if its local manifest claims otherwise. No public archive currently includes
 this optional runtime.
 
-CI checks optional-feature compilation and asset-validation tests on Windows,
-Linux, and macOS Intel. Those checks do not provision runtime/model assets and
-do not establish successful native inference on those platforms. Native
-inference requires the local model and a reviewed local runtime manifest; this
-guide does not claim that real E5 inference has been exercised in CI.
+The [native CI workflow](../.github/workflows/semantic-native.yml) provisions
+the pinned model and a telemetry-disabled runtime for its own test. On Windows
+x64, Linux x64, and macOS Intel, [run 42611986561](https://github.com/terapetralabs/riltra/actions/runs/42611986561)
+passed a small bilingual retrieval fixture, a direct outbound-denial probe,
+query-side file snapshots, and a missing-model fallback test. This is a smoke
+test for those assets and runners, not a general retrieval-quality or platform
+support guarantee. The provisioning helper is CI-only; local operators must
+provide and review their own assets and runtime manifest.

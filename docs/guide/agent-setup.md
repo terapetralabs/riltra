@@ -33,6 +33,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | What does this call? | `riltra_code_callees` | Same anchor. |
 | How might A reach B? | `riltra_code_trace` | Optional `to` (`PATH:LINE:COL`) and `depth` (default 3, 1 to 6). Paths are plausible traversal, not execution. |
 | What might this change affect? | `riltra_code_impact` | Returns a coverage verdict; plausible, not execution. Treat `UNKNOWN` and `partial` as "not established". |
+| What code, impact and knowledge context is available here? | `riltra_context` | Combines a bounded graph with explicit bindings and optional relevance candidates; an unlinked match is not a proven relationship. |
 | Is there a recorded decision for this code? | `riltra_knowledge_at_anchor` | Explicit bindings at a source position. An unlinked anchor stays unlinked. |
 | What does that record say, and what is it linked to? | `riltra_knowledge_show`, `riltra_knowledge_related`, `riltra_knowledge_search` | `show` reads one revision with its evidence freshness; `related` follows links one hop (`direction` is `outbound` or `inbound`); `search` matches literal text or an exact stored evidence path by default. Set `semantic: true` for optional local vector search; when unavailable it reports the FTS5 fallback reason. |
 | Definition or references from a language server | `riltra_code_semantic` | Opt-in; see below. |

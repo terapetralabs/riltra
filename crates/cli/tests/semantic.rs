@@ -167,10 +167,10 @@ fn new_dependencies_are_audited_for_core_graph() {
     for want in [
         "serde_json v1.0.154 [MIT OR Apache-2.0]",
         "protobuf v3.7.2 [MIT]",
-        "rmcp v3.5.1 [Apache-2.0]",
+        "rmcp v3.9.0 [Apache-2.0]",
         "tokio v1.53.3 [MIT]",
         "petgraph v0.8.3 [MIT OR Apache-2.0]",
-        "rmcp-macros v3.5.1 (proc-macro) [Apache-2.0]",
+        "rmcp-macros v3.9.0 (proc-macro) [Apache-2.0]",
     ] {
         assert!(core.contains(want), "missing core dependency: {want}");
     }

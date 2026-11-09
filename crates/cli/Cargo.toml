@@ -16,9 +16,9 @@ tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 petgraph = { version = "=0.8.3", default-features = false }
-rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io", "macros"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 fastembed = { version = "=7.6.0", default-features = false, features = ["ort-load-dynamic"], optional = true }
 futures-util = { version = "=0.3.34", default-features = false, optional = true }

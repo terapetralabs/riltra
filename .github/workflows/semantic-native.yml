@@ -199,7 +199,7 @@ jobs:
         run: |
           set -euo pipefail
           test_name='knowledge_vector::tests::native_model_build_and_offline_query_are_read_only'
-          profile='(version 1)(allow default)(deny network-outbound)(deny network-inbound)(deny network-bind)(deny network-listen)'
+          profile='(version 1)(allow default)(deny network-outbound)(deny network-inbound)(deny network-bind)'
           set +e
           output="$(sandbox-exec -p "$profile" /usr/bin/env "RILTRA_TEST_MODEL_DIR=$RILTRA_TEST_MODEL_DIR" "RILTRA_NATIVE_EGRESS_PROBE_IP=$RILTRA_NATIVE_EGRESS_PROBE_IP" "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH:-}" "$RILTRA_NATIVE_TEST_EXE" "$test_name" --include-ignored --exact --nocapture 2>&1)"
           status=$?

@@ -236,6 +236,10 @@ as `MIT OR Apache-2.0 OR LGPL-2.1-or-later`; the MIT alternative is the one used
 `tree-sitter-typescript`) publish no license file, so the release archive carries the
 canonical text of the license each declares (`THIRD_PARTY_LICENSES.txt`).
 
+Amendment, 2026-11-09: the inventory rows below reflect the current locked
+versions of `rusqlite`, `libsqlite3-sys`, `rmcp`, and `rmcp-macros`; the
+dated milestone records above retain their historical versions.
+
 | Package | Version | License | Origin |
 |---|---|---|---|
 | aho-corasick | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
@@ -277,7 +281,7 @@ canonical text of the license each declares (`THIRD_PARTY_LICENSES.txt`).
 | itoa | 1.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa |
 | js-sys | 0.3.106 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
 | libc | 0.2.191 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
-| libsqlite3-sys | 0.38.2 | MIT | https://github.com/rusqlite/rusqlite |
+| libsqlite3-sys | 0.39.1 | MIT | https://github.com/rusqlite/rusqlite |
 | log | 0.4.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits |
@@ -295,10 +299,10 @@ canonical text of the license each declares (`THIRD_PARTY_LICENSES.txt`).
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
-| rmcp | 3.5.1 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
-| rmcp-macros | 3.5.1 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
+| rmcp | 3.9.0 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
+| rmcp-macros | 3.9.0 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
 | rsqlite-vfs | 0.1.1 | MIT | crates.io |
-| rusqlite | 0.40.2 | MIT | https://github.com/rusqlite/rusqlite |
+| rusqlite | 0.41.1 | MIT | https://github.com/rusqlite/rusqlite |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | schemars | 1.2.3 | MIT | https://github.com/GREsau/schemars |
 | schemars_derive | 1.2.3 | MIT | https://github.com/GREsau/schemars |

@@ -82,8 +82,8 @@ jobs:
       - run: cargo run -q -p riltra -- status
 
   # Source-build preflight for the default-off semantic-knowledge graph.
-  # This does not provision or download the model or ONNX Runtime assets;
-  # native local inference with verified assets is a later integration gate.
+  # Native inference with pinned model and telemetry-off ONNX Runtime source
+  # is exercised by semantic-native.yml on the native x64 runners.
   semantic-knowledge:
     strategy:
       fail-fast: false

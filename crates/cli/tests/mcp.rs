@@ -1108,12 +1108,9 @@ fn g4_protocol_level_rejections_stay_protocol_level() {
 fn g4_structurally_invalid_jsonrpc_gets_invalid_request() {
     // Well-formed JSON that is not a JSON-RPC message (serde_json
     // Category::Data) gets the transport's -32600 reply. Exercise it on a fresh
-    // process before initialize, with no outstanding responses: rmcp 3.5.1 can
-    // lose this reply when it competes with a response-send task because
-    // AsyncRwTransport::receive is not cancel-safe on this path
-    // (modelcontextprotocol/rust-sdk#1353). That upstream race is separate from
-    // Riltra's domain-error classification and is deliberately not worked
-    // around here; CP7 interoperability evaluation owns it.
+    // process before initialize, with no outstanding responses. RMCP 3.5.1
+    // had a separate response cancellation race (rust-sdk#1353); upstream
+    // fixed it before the current dependency version.
     let h = home("cp6-data-error");
     let mut s = spawn(&h);
     s.send(r#"{"foo":"bar"}"#);

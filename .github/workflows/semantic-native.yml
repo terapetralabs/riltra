@@ -1,0 +1,220 @@
+name: semantic-native
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - .github/workflows/semantic-native.yml
+      - crates/cli/Cargo.toml
+      - crates/cli/src/inference.rs
+      - crates/cli/src/knowledge*.rs
+      - crates/cli/src/semantic.rs
+      - crates/cli/src/model_manifest.json
+      - crates/cli/tests/knowledge.rs
+      - Cargo.lock
+      - release/prepare-native-semantic.py
+      - release/tests/test_prepare_native_semantic.py
+      - security/check-public-doc-boundary.sh
+      - security/check-public-doc-boundary.test.sh
+      - security/check-public-doc-boundary-outgoing.test.sh
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/semantic-native.yml
+      - crates/cli/Cargo.toml
+      - crates/cli/src/inference.rs
+      - crates/cli/src/knowledge*.rs
+      - crates/cli/src/semantic.rs
+      - crates/cli/src/model_manifest.json
+      - crates/cli/tests/knowledge.rs
+      - Cargo.lock
+      - release/prepare-native-semantic.py
+      - release/tests/test_prepare_native_semantic.py
+      - security/check-public-doc-boundary.sh
+      - security/check-public-doc-boundary.test.sh
+      - security/check-public-doc-boundary-outgoing.test.sh
+  workflow_dispatch:
+
+concurrency:
+  group: semantic-native-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  public-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Enforce public documentation boundary
+        env:
+          BOUNDARY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BOUNDARY_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          base="$BOUNDARY_BASE"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base="$(git merge-base origin/master "$BOUNDARY_HEAD")"
+          fi
+          bash security/check-public-doc-boundary.sh "$base" "$BOUNDARY_HEAD"
+          bash security/check-public-doc-boundary.test.sh
+          bash security/check-public-doc-boundary-outgoing.test.sh
+
+  native-inference:
+    needs: public-boundary
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-2025-x64, runner: windows-2025 }
+          - { name: ubuntu-24.04-x64, runner: ubuntu-24.04 }
+          - { name: macos-15-intel, runner: macos-15-intel }
+    name: native-inference (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test native semantic provisioning paths
+        run: python release/tests/test_prepare_native_semantic.py
+      - name: Install pinned protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'protoc-33.5.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'protoc-33.5'
+          Invoke-WebRequest -Uri 'https://github.com/protocolbuffers/protobuf/releases/download/v33.5/protoc-33.5-win64.zip' -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($actual -ne '7e3468cd1fbd1ae9361a5304d4ac28fbd593aa1a425b5464bd9d4da5fca224b4') { throw "protoc archive SHA-256 mismatch: $actual" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $root 'bin')
+          $protocExe = Join-Path $root 'bin/protoc.exe'
+          $version = & $protocExe --version
+          if ($version -ne 'libprotoc 33.5') { throw "unexpected protoc version: $version" }
+      - name: Install pinned protoc (Linux and macOS Intel)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)
+              asset=protoc-33.5-linux-x86_64.zip
+              expected=24e58fb231d50306ee28491f33a170301e99540f7e29ca461e0e80fd1239f8d1 ;;
+            macOS)
+              asset=protoc-33.5-osx-x86_64.zip
+              expected=7f31625f8bec4929082ae9209e101c1c03692624457cc6332f83736db495ee92 ;;
+            *) echo "unsupported protoc runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          archive="$RUNNER_TEMP/$asset"
+          curl -fsSL --retry 3 "https://github.com/protocolbuffers/protobuf/releases/download/v33.5/$asset" -o "$archive"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          else
+            actual="$(sha256sum "$archive" | awk '{print $1}')"
+          fi
+          [[ "$actual" == "$expected" ]] || { echo "protoc archive SHA-256 mismatch: $actual" >&2; exit 1; }
+          root="$RUNNER_TEMP/protoc-33.5"
+          mkdir -p "$root"
+          unzip -q "$archive" -d "$root"
+          echo "$root/bin" >> "$GITHUB_PATH"
+          [[ "$("$root/bin/protoc" --version)" == 'libprotoc 33.5' ]]
+      - name: Fetch locked Rust sources
+        run: cargo fetch --locked
+      - name: Build pinned telemetry-off ONNX Runtime and provision pinned model
+        run: python release/prepare-native-semantic.py
+      - name: Compile native query test executable
+        shell: bash
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          set -euo pipefail
+          messages="$RUNNER_TEMP/native-query-build.jsonl"
+          cargo test --locked --no-default-features --features semantic-knowledge --bin riltra --no-run --message-format=json >"$messages" || { cat "$messages"; exit 1; }
+          test_exe="$(python -c 'import json,sys; messages=[json.loads(line) for line in open(sys.argv[1],encoding="utf-8") if line.startswith("{")]; matches=[m["executable"] for m in messages if m.get("reason")=="compiler-artifact" and m.get("target",{}).get("name")=="riltra" and m.get("profile",{}).get("test") is True and m.get("executable")]; assert len(matches)==1, matches; print(matches[0])' "$messages")"
+          test -f "$test_exe"
+          printf 'RILTRA_NATIVE_TEST_EXE=%s\n' "$test_exe" >> "$GITHUB_ENV"
+      - name: Run Windows query under scoped firewall block
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          $testExe = $env:RILTRA_NATIVE_TEST_EXE
+          if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) { throw "native test executable missing: $testExe" }
+          $enabledProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object { $_.Enabled -eq $true })
+          if ($enabledProfiles.Count -eq 0) { throw 'Windows Firewall is not enabled for any active profile' }
+          $ruleName = "riltra-native-offline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $ruleAdded = $false
+          try {
+            & netsh.exe advfirewall firewall add rule "name=$ruleName" dir=out action=block "program=$testExe" enable=yes profile=any
+            if ($LASTEXITCODE -ne 0) { throw 'failed to add the test-process outbound firewall rule' }
+            $ruleAdded = $true
+            $ruleInfo = (& netsh.exe advfirewall firewall show rule "name=$ruleName" verbose) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $ruleInfo -notmatch [regex]::Escape($testExe) -or $ruleInfo -notmatch 'Enabled:\s+Yes' -or $ruleInfo -notmatch 'Action:\s+Block' -or $ruleInfo -notmatch 'Direction:\s+Out') { throw 'firewall rule does not prove an enabled outbound block scoped to the test executable' }
+            $testName = 'knowledge_vector::tests::native_model_build_and_offline_query_are_read_only'
+            $testOutput = & $testExe $testName --include-ignored --exact --nocapture 2>&1
+            $testExit = $LASTEXITCODE
+            $testOutput | ForEach-Object { Write-Output $_ }
+            $testText = $testOutput -join "`n"
+            if ($testExit -ne 0) { throw "native query test exited with $testExit" }
+            if ($testText -notmatch 'native direct outbound probe denied by process isolation:' -or $testText -notmatch 'native semantic observations:') { throw 'native query test did not report network denial and resource observations' }
+          }
+          finally {
+            if ($ruleAdded) {
+              & netsh.exe advfirewall firewall delete rule "name=$ruleName"
+              if ($LASTEXITCODE -ne 0) { throw 'failed to remove the temporary outbound firewall rule' }
+            }
+          }
+      - name: Run Linux query in isolated network namespace
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          set -euo pipefail
+          test_name='knowledge_vector::tests::native_model_build_and_offline_query_are_read_only'
+          set +e
+          output="$(sudo --non-interactive /usr/bin/unshare --net --fork /usr/bin/setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups /usr/bin/env "RILTRA_TEST_MODEL_DIR=$RILTRA_TEST_MODEL_DIR" "RILTRA_NATIVE_EGRESS_PROBE_IP=$RILTRA_NATIVE_EGRESS_PROBE_IP" "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" "$RILTRA_NATIVE_TEST_EXE" "$test_name" --include-ignored --exact --nocapture 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          [[ $status -eq 0 ]] || exit "$status"
+          printf '%s\n' "$output" | grep -F 'native direct outbound probe denied by process isolation:'
+          printf '%s\n' "$output" | grep -F 'native semantic observations:'
+      - name: Run macOS query under Seatbelt network deny
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          set -euo pipefail
+          test_name='knowledge_vector::tests::native_model_build_and_offline_query_are_read_only'
+          profile='(version 1)(allow default)(deny network-outbound)(deny network-inbound)(deny network-bind)'
+          set +e
+          output="$(sandbox-exec -p "$profile" /usr/bin/env "RILTRA_TEST_MODEL_DIR=$RILTRA_TEST_MODEL_DIR" "RILTRA_NATIVE_EGRESS_PROBE_IP=$RILTRA_NATIVE_EGRESS_PROBE_IP" "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH:-}" "$RILTRA_NATIVE_TEST_EXE" "$test_name" --include-ignored --exact --nocapture 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          [[ $status -eq 0 ]] || exit "$status"
+          printf '%s\n' "$output" | grep -F 'native direct outbound probe denied by process isolation:'
+          printf '%s\n' "$output" | grep -F 'native semantic observations:'
+      - name: Test lexical fallback without a local model
+        shell: bash
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          set -euo pipefail
+          test_name='semantic_search_explicitly_falls_back_to_lexical_without_local_model'
+          output="$(cargo test --locked --no-default-features --features semantic-knowledge --test knowledge "$test_name" -- --exact 2>&1)"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -F "$test_name ... ok"

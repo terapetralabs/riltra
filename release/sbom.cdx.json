@@ -6476,7 +6476,7 @@
       "version": "0.2.2"
     },
     {
-      "bom-ref": "pkg:cargo/libsqlite3-sys@0.38.2",
+      "bom-ref": "pkg:cargo/libsqlite3-sys@0.39.1",
       "externalReferences": [
         {
           "type": "vcs",
@@ -6486,7 +6486,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+          "content": "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
         }
       ],
       "licenses": [
@@ -6495,9 +6495,9 @@
         }
       ],
       "name": "libsqlite3-sys",
-      "purl": "pkg:cargo/libsqlite3-sys@0.38.2",
+      "purl": "pkg:cargo/libsqlite3-sys@0.39.1",
       "type": "library",
-      "version": "0.38.2"
+      "version": "0.39.1"
     },
     {
       "bom-ref": "pkg:cargo/lindera@3.0.7",
@@ -9428,7 +9428,7 @@
       "version": "0.8.18"
     },
     {
-      "bom-ref": "pkg:cargo/rmcp@3.5.1",
+      "bom-ref": "pkg:cargo/rmcp@3.9.0",
       "externalReferences": [
         {
           "type": "vcs",
@@ -9438,7 +9438,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "ab5023804cbe0304cbe06197ac16e645a0a0d0ffa2953bf735c15c2fa0213350"
+          "content": "d24a7e92f4bcaa36b97fa93c4fa7ca8f3e669eced949345b3462dba333c7f909"
         }
       ],
       "licenses": [
@@ -9447,12 +9447,12 @@
         }
       ],
       "name": "rmcp",
-      "purl": "pkg:cargo/rmcp@3.5.1",
+      "purl": "pkg:cargo/rmcp@3.9.0",
       "type": "library",
-      "version": "3.5.1"
+      "version": "3.9.0"
     },
     {
-      "bom-ref": "pkg:cargo/rmcp-macros@3.5.1",
+      "bom-ref": "pkg:cargo/rmcp-macros@3.9.0",
       "externalReferences": [
         {
           "type": "vcs",
@@ -9462,7 +9462,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "a1da498700030856ba63114bceefa30ba21f5e278cb975e5b9de3529fe842b40"
+          "content": "b3140f24a766f80f9ec1607bde85680959a69b83d46fa9ce87dadab7e67ab029"
         }
       ],
       "licenses": [
@@ -9471,9 +9471,9 @@
         }
       ],
       "name": "rmcp-macros",
-      "purl": "pkg:cargo/rmcp-macros@3.5.1",
+      "purl": "pkg:cargo/rmcp-macros@3.9.0",
       "type": "library",
-      "version": "3.5.1"
+      "version": "3.9.0"
     },
     {
       "bom-ref": "pkg:cargo/roaring@0.11.5",
@@ -9518,7 +9518,7 @@
       "version": "0.1.1"
     },
     {
-      "bom-ref": "pkg:cargo/rusqlite@0.40.2",
+      "bom-ref": "pkg:cargo/rusqlite@0.41.1",
       "externalReferences": [
         {
           "type": "vcs",
@@ -9528,7 +9528,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+          "content": "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
         }
       ],
       "licenses": [
@@ -9537,9 +9537,9 @@
         }
       ],
       "name": "rusqlite",
-      "purl": "pkg:cargo/rusqlite@0.40.2",
+      "purl": "pkg:cargo/rusqlite@0.41.1",
       "type": "library",
-      "version": "0.40.2"
+      "version": "0.41.1"
     },
     {
       "bom-ref": "pkg:cargo/rustc-hash@2.1.3",
@@ -16643,7 +16643,7 @@
         "pkg:cargo/pkg-config@0.3.34",
         "pkg:cargo/vcpkg@0.2.15"
       ],
-      "ref": "pkg:cargo/libsqlite3-sys@0.38.2"
+      "ref": "pkg:cargo/libsqlite3-sys@0.39.1"
     },
     {
       "dependsOn": [
@@ -17567,8 +17567,8 @@
         "pkg:cargo/ort@2.0.0-rc.15",
         "pkg:cargo/petgraph@0.8.3",
         "pkg:cargo/protobuf@3.7.2",
-        "pkg:cargo/rmcp@3.5.1",
-        "pkg:cargo/rusqlite@0.40.2",
+        "pkg:cargo/rmcp@3.9.0",
+        "pkg:cargo/rusqlite@0.41.1",
         "pkg:cargo/serde@1.0.229",
         "pkg:cargo/serde_json@1.0.154",
         "pkg:cargo/sha2@0.10.9",
@@ -17627,26 +17627,28 @@
         "pkg:cargo/serde_json@1.0.154",
         "pkg:cargo/syn@3.0.9"
       ],
-      "ref": "pkg:cargo/rmcp-macros@3.5.1"
+      "ref": "pkg:cargo/rmcp-macros@3.9.0"
     },
     {
       "dependsOn": [
         "pkg:cargo/chrono@0.4.45",
         "pkg:cargo/futures@0.3.34",
         "pkg:cargo/indexmap@2.14.2",
+        "pkg:cargo/libc@0.2.191",
         "pkg:cargo/pastey@0.2.3",
         "pkg:cargo/pin-project-lite@0.2.17",
-        "pkg:cargo/rmcp-macros@3.5.1",
+        "pkg:cargo/rmcp-macros@3.9.0",
         "pkg:cargo/schemars@1.2.3",
         "pkg:cargo/serde@1.0.229",
         "pkg:cargo/serde_json@1.0.154",
+        "pkg:cargo/sha2@0.11.1",
         "pkg:cargo/thiserror@2.0.21",
         "pkg:cargo/tokio-util@0.7.20",
         "pkg:cargo/tokio@1.53.3",
         "pkg:cargo/tracing@0.1.44",
         "pkg:cargo/uuid@1.28.0"
       ],
-      "ref": "pkg:cargo/rmcp@3.5.1"
+      "ref": "pkg:cargo/rmcp@3.9.0"
     },
     {
       "dependsOn": [
@@ -17668,11 +17670,11 @@
         "pkg:cargo/fallible-iterator@0.3.0",
         "pkg:cargo/fallible-streaming-iterator@0.1.9",
         "pkg:cargo/hashlink@0.12.2",
-        "pkg:cargo/libsqlite3-sys@0.38.2",
+        "pkg:cargo/libsqlite3-sys@0.39.1",
         "pkg:cargo/smallvec@1.16.3",
         "pkg:cargo/sqlite-wasm-rs@0.5.5"
       ],
-      "ref": "pkg:cargo/rusqlite@0.40.2"
+      "ref": "pkg:cargo/rusqlite@0.41.1"
     },
     {
       "dependsOn": [],

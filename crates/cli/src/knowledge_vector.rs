@@ -1967,6 +1967,175 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicit local model and telemetry-disabled ONNX Runtime; never downloads"]
+    fn native_model_build_and_offline_query_are_read_only() {
+        use std::{
+            net::{IpAddr, SocketAddr, TcpStream},
+            time::{Duration, Instant},
+        };
+
+        let model_dir = std::env::var_os("RILTRA_TEST_MODEL_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("set RILTRA_TEST_MODEL_DIR to provisioned local assets");
+        let probe_ip = std::env::var("RILTRA_NATIVE_EGRESS_PROBE_IP")
+            .expect("setup must establish direct egress before isolating this process")
+            .parse::<IpAddr>()
+            .unwrap();
+        let probe_result =
+            TcpStream::connect_timeout(&SocketAddr::new(probe_ip, 443), Duration::from_secs(5));
+        let blocked = match probe_result {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.kind() == std::io::ErrorKind::TimedOut
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(1 | 13 | 51 | 60 | 100 | 101 | 110 | 10013 | 10050 | 10051 | 10060)
+                    ) =>
+            {
+                eprintln!(
+                    "native direct outbound probe denied by process isolation: kind={:?}, os_error={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
+                true
+            }
+            Err(error) => panic!("outbound probe failed without a recognized deny: {error}"),
+            Ok(_) => false,
+        };
+        assert!(
+            blocked,
+            "process isolation allowed direct outbound TCP egress"
+        );
+
+        let (home, repo) = fixture();
+        let mut conn = knowledge_store::open_knowledge_at(&home, &repo, true).unwrap();
+        for (id, title, body) in [
+            (
+                "storage-choice",
+                "Penyimpanan catatan proyek",
+                "Catatan proyek disimpan secara lokal di SQLite agar tetap berfungsi tanpa internet.",
+            ),
+            (
+                "color-choice",
+                "Palet warna antarmuka",
+                "Panel aplikasi menggunakan warna biru muda dan ikon sederhana.",
+            ),
+        ] {
+            knowledge_store::create_record(
+                &mut conn,
+                &NewRecord {
+                    id: id.into(),
+                    kind: "decision".into(),
+                    title: title.into(),
+                    body: body.into(),
+                    status: "active".into(),
+                    author: "native-smoke".into(),
+                },
+            )
+            .unwrap();
+        }
+
+        let build_started = Instant::now();
+        let model = crate::inference::local_model_fingerprint(&model_dir).unwrap();
+        let mut embeddings =
+            crate::inference::LocalEmbeddings::load_vector_model(&model_dir).unwrap();
+        let built = super::build_with(&home, &repo, &model, |title, body| {
+            let embedded = embeddings.embed_passage_vector(title, body)?;
+            Ok((embedded.vector, embedded.embedding_truncated))
+        })
+        .unwrap();
+        assert_eq!(built.rows, 2);
+        let build_elapsed_ms = build_started.elapsed().as_millis();
+
+        let home_before = tree_snapshot(&home);
+        let repo_before = tree_snapshot(std::path::Path::new(&repo.root));
+        let model_before = tree_snapshot(&model_dir);
+        let query_started = Instant::now();
+        let result = super::semantic_search(
+            &mut conn,
+            &home,
+            &repo,
+            "store project notes locally so they work offline",
+            None,
+            None,
+            10,
+            None,
+            Some(&model_dir),
+        )
+        .unwrap()
+        .expect("provisioned local model and vector index should be available");
+        let query_elapsed_ms = query_started.elapsed().as_millis();
+        assert_eq!(result.hits[0].record.id, "storage-choice");
+        assert_eq!(result.candidates_returned, 2);
+        assert!(result.hits.iter().all(|hit| !hit.embedding_truncated));
+        assert_eq!(
+            tree_snapshot(&home),
+            home_before,
+            "semantic query wrote local state"
+        );
+        assert_eq!(
+            tree_snapshot(std::path::Path::new(&repo.root)),
+            repo_before,
+            "semantic query wrote repository files"
+        );
+        assert_eq!(
+            tree_snapshot(&model_dir),
+            model_before,
+            "semantic query changed model or runtime assets"
+        );
+
+        let model_bytes = tree_size(&model_dir);
+        let vector_bytes = tree_size(&super::vector_paths(&home, &repo).unwrap().repo);
+        eprintln!(
+            "native semantic observations: build_elapsed_ms={}, query_elapsed_ms={}, model_runtime_bytes={}, vector_bytes={}, candidates={}",
+            build_elapsed_ms,
+            query_elapsed_ms,
+            model_bytes,
+            vector_bytes,
+            result.candidates_returned
+        );
+    }
+
+    fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    let path = entry.path();
+                    files.push((path.clone(), "directory".into()));
+                    pending.push(path);
+                } else if kind.is_file() {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    files.push((entry.path(), super::hex_digest(&bytes)));
+                } else {
+                    files.push((entry.path(), "special-file".into()));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    fn tree_size(root: &std::path::Path) -> u64 {
+        let mut pending = vec![root.to_path_buf()];
+        let mut bytes = 0;
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    bytes += entry.metadata().unwrap().len();
+                }
+            }
+        }
+        bytes
+    }
+
+    #[test]
     fn semantic_query_falls_back_when_the_model_truncates_the_input() {
         let complete = crate::inference::EmbeddedText {
             vector: vec![1.0, 2.0],

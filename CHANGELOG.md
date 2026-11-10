@@ -4,7 +4,7 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
-Changes made after `0.1.0` is cut are listed here.
+## [0.2.0-rc.1] - 2026-11-10
 
 ### Added
 

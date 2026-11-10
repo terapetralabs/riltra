@@ -29,6 +29,11 @@ command. To discard derived vectors, run `riltra knowledge vector clear --repo <
 knowledge records remain in SQLite. A stale or missing index causes an explicit
 lexical fallback until it is rebuilt.
 
+Before `knowledge restore`, close all processes using the repository's knowledge
+store, including vector builds, status checks, and searches. Concurrent access
+during restore is not supported. After restoring, check vector status and rebuild
+the index if it is stale.
+
 The local model is `intfloat/multilingual-e5-small`. Only record title and body
 are embedded, up to 512 tokens; `embedding_truncated` marks truncated passages.
 An overlong query falls back with `query-truncated`, while lexical search still

@@ -38,12 +38,17 @@ for lang in ["py", "ts", "rs", "c", "cpp"]:
                 else: r["def_tp"] += 1; matched.add(hit)
         for i, d in enumerate(defs):
             if i not in matched: r["def_extra"].append(f"{fn}:{d['span']['start_line']}:{d['name']}")
-        # call recall only on cases with zero non-call references; every non-def occurrence is a call
-        if m.get("inbound_references") == 0:
+        # Call recall only on cases with zero non-call references; every non-def occurrence is a call,
+        # except dynamic_dispatch, whose only such occurrence is the receiver (its manifest says it
+        # must not prove a member call). Competing-target cases list one call position once per
+        # candidate symbol, so occurrences are counted once per position.
+        if m.get("inbound_references") == 0 and os.path.splitext(fn)[0] != "dynamic_dispatch":
+            seen = set()
             for o in m["occurrences"]:
-                if o["definition"]: continue
+                if o["definition"] or (o["line"], o["col"]) in seen: continue
+                seen.add((o["line"], o["col"]))
                 r["call_exp"] += 1
-                L, C = o["line"] + 1, o["col"] + 1
+                L = o["line"] + 1
                 ok = any(o["text"] in c["name"] and c["span"]["start_line"] <= L <= c["span"]["end_line"] for c in calls)
                 if ok: r["call_tp"] += 1
                 else: r["call_fn"].append(f"{fn}:{L}:{o['text']}")

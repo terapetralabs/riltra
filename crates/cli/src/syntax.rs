@@ -1927,6 +1927,29 @@ mod tests {
     }
 
     #[test]
+    fn relationship_proof_treats_a_js_generator_declaration_as_the_owner_of_its_calls() {
+        let src = concat!(
+            "function outer() {\n",
+            "  first();\n",
+            "  function* gen() {\n",
+            "    second();\n",
+            "  }\n",
+            "}\n",
+        );
+        let proof = super::relationship_proof(Language::JavaScript, src.as_bytes());
+        let (owner, _) = scope_of(src, &proof, "first()");
+        assert!(owner.unwrap().starts_with("function outer()"));
+        let (owner, _) = scope_of(src, &proof, "second()");
+        assert!(owner.unwrap().starts_with("function* gen()"));
+        let names: Vec<_> = proof
+            .declarations
+            .iter()
+            .map(|&(from, to)| &src[from..to])
+            .collect();
+        assert_eq!(names, ["outer", "gen"]);
+    }
+
+    #[test]
     fn relationship_proof_walks_deeply_nested_calls_within_a_time_bound() {
         // Guards the walk against per-call ancestor lookups. The walk over 300
         // nested calls takes milliseconds; the bound is generous for slow

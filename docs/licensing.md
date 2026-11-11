@@ -56,6 +56,7 @@ Direct dependencies (all permissive; `Cargo.lock` pins exact versions):
 | tree-sitter-rust | 0.24.2 | MIT (LICENSE file, Maxim Sokolov 2017) | https://github.com/tree-sitter/tree-sitter-rust |
 | tree-sitter-c | 0.24.2 | MIT (LICENSE file, Max Brunsfeld 2014) | https://github.com/tree-sitter/tree-sitter-c |
 | tree-sitter-cpp | 0.23.4 | MIT (declared) | https://github.com/tree-sitter/tree-sitter-cpp |
+| tree-sitter-go | 0.25.0 | MIT (LICENSE file, Max Brunsfeld 2014) | https://github.com/tree-sitter/tree-sitter-go |
 
 Build-time transitive dependencies (compiled into the binary via `cc` build scripts):
 
@@ -240,6 +241,12 @@ Amendment, 2026-11-09: the inventory rows below reflect the current locked
 versions of `rusqlite`, `libsqlite3-sys`, `rmcp`, and `rmcp-macros`; the
 dated milestone records above retain their historical versions.
 
+Amendment, 2026-11-11: `tree-sitter-go` 0.25.0 (MIT, LICENSE file, Max Brunsfeld 2014) is
+added as a direct dependency for Go syntax facts; the owner approved the new language and
+dependency in writing on 2026-11-11. It adds no other package to the lock (`cc` and
+`tree-sitter-language` were already locked). The "109 packages" figure above is the
+release-candidate state and is not rewritten.
+
 | Package | Version | License | Origin |
 |---|---|---|---|
 | aho-corasick | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
@@ -332,6 +339,7 @@ dated milestone records above retain their historical versions.
 | tree-sitter | 0.25.10 | MIT | https://github.com/tree-sitter/tree-sitter |
 | tree-sitter-c | 0.24.2 | MIT | https://github.com/tree-sitter/tree-sitter-c |
 | tree-sitter-cpp | 0.23.4 | MIT | https://github.com/tree-sitter/tree-sitter-cpp |
+| tree-sitter-go | 0.25.0 | MIT | https://github.com/tree-sitter/tree-sitter-go |
 | tree-sitter-javascript | 0.25.0 | MIT | https://github.com/tree-sitter/tree-sitter-javascript |
 | tree-sitter-language | 0.1.9 | MIT | https://github.com/tree-sitter/tree-sitter |
 | tree-sitter-python | 0.25.0 | MIT | https://github.com/tree-sitter/tree-sitter-python |

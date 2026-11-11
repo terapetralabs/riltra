@@ -20,6 +20,7 @@ pub enum Language {
     Rust,
     C,
     Cpp,
+    Go,
 }
 
 pub fn language_name(lang: Language) -> &'static str {
@@ -31,6 +32,7 @@ pub fn language_name(lang: Language) -> &'static str {
         Language::Rust => "rust",
         Language::C => "c",
         Language::Cpp => "cpp",
+        Language::Go => "go",
     }
 }
 
@@ -45,6 +47,7 @@ pub fn grammar_version(lang: Language) -> &'static str {
         Language::Rust => "rust:0.24.2",
         Language::C => "c:0.24.2",
         Language::Cpp => "cpp:0.23.4",
+        Language::Go => "go:0.25.0",
     }
 }
 
@@ -73,6 +76,7 @@ pub fn classify(path: &Path) -> FileKind {
         Some("ts" | "mts" | "cts") => FileKind::Supported(Language::TypeScript),
         Some("tsx") => FileKind::Supported(Language::Tsx),
         Some("rs") => FileKind::Supported(Language::Rust),
+        Some("go") => FileKind::Supported(Language::Go),
         Some("c") => FileKind::Supported(Language::C),
         Some("h" | "hh" | "hpp" | "hxx" | "inl") => FileKind::Supported(Language::Cpp),
         Some("cc" | "cpp" | "cxx") => FileKind::Supported(Language::Cpp),
@@ -157,6 +161,7 @@ fn ts_language(lang: Language) -> tree_sitter::Language {
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::C => tree_sitter_c::LANGUAGE.into(),
         Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Language::Go => tree_sitter_go::LANGUAGE.into(),
     }
 }
 
@@ -277,6 +282,7 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
                 | "generator_function_declaration"
                 | "function_item"
                 | "method_definition"
+                | "method_declaration"
         )
     }
     fn name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -380,6 +386,7 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
                     | "arrow_function"
                     | "closure_expression"
                     | "function_expression"
+                    | "func_literal"
                     | "generator_function"
                     | "class_definition"
                     | "class_declaration"
@@ -417,6 +424,17 @@ fn push_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, 
         callee: None,
         tcallee: None,
     });
+}
+
+/// Go `type X struct{...}`, `type X interface{...}`, or any other named type
+/// (alias, defined type); one fact per `type_spec`, kind from its type node.
+fn push_go_type(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let kind = match node.child_by_field_name("type").map(|t| t.kind()) {
+        Some("struct_type") => "struct",
+        Some("interface_type") => "interface",
+        _ => "type",
+    };
+    push_def(facts, kind, node, src);
 }
 
 fn push_c_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, src: &[u8]) {
@@ -933,6 +951,14 @@ fn visit_node(
             "call_expression" => push_call(facts, node, src),
             _ => {}
         },
+        Language::Go => match node.kind() {
+            "function_declaration" => push_def(facts, "function", node, src),
+            "method_declaration" => push_def(facts, "method", node, src),
+            "type_spec" | "type_alias" => push_go_type(facts, node, src),
+            "import_declaration" => push_import(facts, node, src),
+            "call_expression" => push_call(facts, node, src),
+            _ => {}
+        },
         Language::C => match node.kind() {
             "function_definition" => push_c_def(facts, "function", node, src),
             "struct_specifier" => push_struct(facts, node, src),
@@ -1334,6 +1360,95 @@ mod tests {
     fn grammar_versions_match_lockfile_entries() {
         assert_eq!(grammar_version(Language::Python), "python:0.25.0");
         assert_eq!(grammar_version(Language::Cpp), "cpp:0.23.4");
+        assert_eq!(grammar_version(Language::Go), "go:0.25.0");
+    }
+
+    #[test]
+    fn extracts_go_definitions_imports_and_calls() {
+        let src = concat!(
+            "package main\n",
+            "\n",
+            "import (\n",
+            "\t\"fmt\"\n",
+            "\tstr \"strings\"\n",
+            ")\n",
+            "\n",
+            "type Server struct{ name string }\n",
+            "type Handler interface{ Serve() }\n",
+            "type ID = int\n",
+            "\n",
+            "func helper(n int) int { return n + 1 }\n",
+            "\n",
+            "func (s *Server) Start() {\n",
+            "\tfmt.Println(helper(1))\n",
+            "\tstr.ToUpper(s.name)\n",
+            "\tf := func() { helper(2) }\n",
+            "\tf()\n",
+            "}\n",
+        );
+        let facts = parse_source(Language::Go, src.as_bytes());
+        assert_eq!(facts.errors, 0);
+        let defs: Vec<_> = facts
+            .definitions
+            .iter()
+            .map(|d| (d.kind, d.name.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            defs,
+            vec![
+                ("struct", "Server"),
+                ("interface", "Handler"),
+                ("type", "ID"),
+                ("function", "helper"),
+                ("method", "Start"),
+            ]
+        );
+        // A grouped import is one statement, starting on its first line.
+        assert_eq!(facts.imports.len(), 1);
+        assert_eq!(facts.imports[0].span.start_line, 3);
+        assert_eq!(facts.imports[0].span.end_line, 6);
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| c.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            calls,
+            vec!["fmt.Println", "helper", "str.ToUpper", "helper", "f"]
+        );
+        assert_eq!(
+            classify(Path::new("main.go")),
+            FileKind::Supported(Language::Go)
+        );
+    }
+
+    #[test]
+    fn relationship_proof_attributes_go_calls_to_functions_methods_and_closures() {
+        let src = concat!(
+            "package main\n",
+            "func outer() {\n",
+            "\tfirst()\n",
+            "\tf := func() { second() }\n",
+            "\tf()\n",
+            "}\n",
+            "func (s *S) m() {\n",
+            "\tthird()\n",
+            "}\n",
+        );
+        let proof = super::relationship_proof(Language::Go, src.as_bytes());
+        let (owner, _) = scope_of(src, &proof, "first()");
+        assert!(owner.unwrap().starts_with("func outer()"));
+        // A closure ends the owner chain, as in the other languages.
+        let (owner, _) = scope_of(src, &proof, "second()");
+        assert_eq!(owner, None);
+        let (owner, _) = scope_of(src, &proof, "third()");
+        assert!(owner.unwrap().starts_with("func (s *S) m()"));
+        let names: Vec<_> = proof
+            .declarations
+            .iter()
+            .map(|&(from, to)| &src[from..to])
+            .collect();
+        assert_eq!(names, ["outer", "m"]);
     }
 
     #[test]

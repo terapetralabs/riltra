@@ -104,6 +104,13 @@ fn golden_rust() {
 }
 
 #[test]
+fn golden_go() {
+    let h = home("go");
+    registered(&h);
+    check_golden(&h, "go/hello.go", "m2-go-hello.json");
+}
+
+#[test]
 fn golden_c() {
     let h = home("c");
     registered(&h);

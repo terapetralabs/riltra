@@ -16,6 +16,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.25"
 rusqlite = { version = "0.41", features = ["bundled"] }
 petgraph = { version = "=0.8.3", default-features = false }
 rmcp = { version = "=3.9.0", default-features = false, features = ["server", "transport-io", "macros"] }

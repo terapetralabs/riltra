@@ -119,6 +119,44 @@ pub fn query_conn(
     root: &Path,
     request: &ContextRequest<'_>,
 ) -> Result<ContextResult, String> {
+    query_conn_inner(conn, home, entry, repo, root, request, || {}, || {})
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn query_conn_with_hooks(
+    conn: &mut rusqlite::Connection,
+    home: &Path,
+    entry: &registry::RepoEntry,
+    repo: &str,
+    root: &Path,
+    request: &ContextRequest<'_>,
+    pinned: impl FnOnce(),
+    before_bindings: impl FnOnce(),
+) -> Result<ContextResult, String> {
+    query_conn_inner(
+        conn,
+        home,
+        entry,
+        repo,
+        root,
+        request,
+        pinned,
+        before_bindings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_conn_inner(
+    conn: &mut rusqlite::Connection,
+    home: &Path,
+    entry: &registry::RepoEntry,
+    repo: &str,
+    root: &Path,
+    request: &ContextRequest<'_>,
+    pinned: impl FnOnce(),
+    before_bindings: impl FnOnce(),
+) -> Result<ContextResult, String> {
     let (canon, rel) = validate_request(root, request)?;
     let trace_request = trace_request(request);
     let trace = index::graph_query_conn(
@@ -129,13 +167,13 @@ pub fn query_conn(
         None,
         &trace_request,
         Instant::now(),
-        || {},
+        pinned,
         true,
     )?;
     let mut graph = context_nodes(&trace);
     let omitted_nodes = graph.len().saturating_sub(request.limit);
     graph.truncate(request.limit);
-    let knowledge = knowledge_context(conn, home, entry, root, &trace, request);
+    let knowledge = knowledge_context(conn, home, entry, root, &trace, request, before_bindings);
     Ok(ContextResult {
         graph,
         trace,
@@ -274,6 +312,7 @@ fn knowledge_context(
     root: &Path,
     trace: &index::TraceQueryOut,
     request: &ContextRequest<'_>,
+    before_bindings: impl FnOnce(),
 ) -> ContextKnowledge {
     let mut query = retrieval(
         request.query.is_some(),
@@ -467,6 +506,7 @@ fn knowledge_context(
             semantic.reason = Some("knowledge-query-unavailable");
         }
     }
+    before_bindings();
     let (bindings, binding_generation, binding_schema_version) = match knowledge_binding::at_pinned(
         &knowledge_conn,
         entry,
@@ -627,6 +667,193 @@ fn graph_nodes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        index, knowledge::NewRecord, knowledge_binding::BindingInput, knowledge_store, store,
+        testutil::tmpdir,
+    };
+
+    struct Fixture {
+        home: PathBuf,
+        root: PathBuf,
+        entry: registry::RepoEntry,
+        knowledge_generation: u64,
+        code_nonce: String,
+    }
+
+    fn fixture(tag: &str) -> Fixture {
+        let home = tmpdir(&format!("context-{tag}-home"));
+        let root = tmpdir(&format!("context-{tag}-repo"))
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("a.py"), b"def anchor():\n    old_call()\n").unwrap();
+        index::build_full(&home, "r", &root).unwrap();
+        let entry = registry::RepoEntry {
+            name: "r".to_string(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+
+        let mut conn = knowledge_store::open_knowledge_at(&home, &entry, true).unwrap();
+        knowledge_store::create_record(
+            &mut conn,
+            &NewRecord {
+                id: "bound".to_string(),
+                kind: "decision".to_string(),
+                title: "Local boundary".to_string(),
+                body: "local database".to_string(),
+                status: "active".to_string(),
+                author: "test".to_string(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let (_, knowledge_generation) = knowledge_binding::create_for_test(
+            &home,
+            &entry,
+            "a.py",
+            1,
+            5,
+            &BindingInput {
+                record_id: "bound".to_string(),
+                record_revision: 1,
+                relation: "constrains".to_string(),
+                author: "test".to_string(),
+                rationale: "Pinned context test binding".to_string(),
+                provenance: "unit-test".to_string(),
+            },
+        )
+        .unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let code_nonce = store::latest_snapshot(&conn).unwrap().unwrap().nonce;
+        Fixture {
+            home,
+            root,
+            entry,
+            knowledge_generation,
+            code_nonce,
+        }
+    }
+
+    fn request() -> ContextRequest<'static> {
+        ContextRequest {
+            path: "a.py",
+            line: 1,
+            col: 5,
+            symbol: None,
+            query: Some("local database"),
+            semantic: false,
+            depth: 3,
+            limit: 20,
+            max_bytes: DEFAULT_MAX_BYTES,
+        }
+    }
+
+    #[test]
+    fn context_reports_unavailable_binding_after_knowledge_changes_between_reads() {
+        let fixture = fixture("knowledge-mutation");
+        let expected_generation = fixture.knowledge_generation;
+        let (start_write, write_started) = std::sync::mpsc::sync_channel(0);
+        let (write_done, generation_written) = std::sync::mpsc::sync_channel(0);
+        let writer_home = fixture.home.clone();
+        let writer_entry = fixture.entry.clone();
+        let writer = std::thread::spawn(move || {
+            write_started.recv().unwrap();
+            let mut conn =
+                knowledge_store::open_knowledge_at(&writer_home, &writer_entry, true).unwrap();
+            let (_, generation) = knowledge_store::create_record(
+                &mut conn,
+                &NewRecord {
+                    id: "new-match".to_string(),
+                    kind: "decision".to_string(),
+                    title: "Local database update".to_string(),
+                    body: "local database".to_string(),
+                    status: "active".to_string(),
+                    author: "writer".to_string(),
+                },
+            )
+            .unwrap();
+            write_done.send(generation).unwrap();
+        });
+
+        let mut code = store::open_live(&store::db_path(&fixture.home, "r")).unwrap();
+        let result = query_conn_with_hooks(
+            &mut code,
+            &fixture.home,
+            &fixture.entry,
+            "r",
+            &fixture.root,
+            &request(),
+            || {},
+            || {
+                start_write.send(()).unwrap();
+                assert_eq!(generation_written.recv().unwrap(), expected_generation + 1);
+            },
+        )
+        .unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(result.trace.snapshot.nonce, fixture.code_nonce);
+        assert_eq!(result.knowledge.query.status, "lexical");
+        assert_eq!(result.knowledge.query.generation, Some(expected_generation));
+        assert_eq!(result.knowledge.query.hits.len(), 1);
+        assert_eq!(result.knowledge.query.hits[0].record.id, "bound");
+        assert_eq!(result.knowledge.status, "unavailable");
+        assert_eq!(
+            result.knowledge.reason,
+            Some("knowledge-changed-or-unavailable")
+        );
+        assert_eq!(result.knowledge.generation, None);
+        assert_eq!(result.knowledge.bindings.status, "unavailable");
+        assert_eq!(
+            result.knowledge.bindings.unresolved_reason.as_deref(),
+            Some("knowledge-changed-or-unavailable")
+        );
+        assert!(result.knowledge.bindings.bindings.is_empty());
+    }
+
+    #[test]
+    fn context_keeps_pinned_code_binding_during_index_promotion() {
+        let fixture = fixture("index-promotion");
+        let mut code = store::open_live(&store::db_path(&fixture.home, "r")).unwrap();
+        let result = query_conn_with_hooks(
+            &mut code,
+            &fixture.home,
+            &fixture.entry,
+            "r",
+            &fixture.root,
+            &request(),
+            || {
+                index::build_full(&fixture.home, "r", &fixture.root).unwrap();
+            },
+            || {},
+        )
+        .unwrap();
+
+        let live = store::open_live(&store::db_path(&fixture.home, "r")).unwrap();
+        let promoted_nonce = store::latest_snapshot(&live).unwrap().unwrap().nonce;
+        assert_ne!(fixture.code_nonce, promoted_nonce);
+        assert_eq!(result.trace.snapshot.nonce, fixture.code_nonce);
+        assert_eq!(result.trace.freshness, "fresh");
+        assert_eq!(result.knowledge.status, "available");
+        assert_eq!(
+            result.knowledge.generation,
+            Some(fixture.knowledge_generation)
+        );
+        assert_eq!(
+            result.knowledge.query.generation,
+            Some(fixture.knowledge_generation)
+        );
+        assert_eq!(
+            result.knowledge.bindings.generation,
+            fixture.knowledge_generation
+        );
+        assert_eq!(result.knowledge.bindings.status, "linked");
+        assert_eq!(result.knowledge.bindings.bindings.len(), 1);
+        let binding = &result.knowledge.bindings.bindings[0];
+        assert_eq!(binding.record_id, "bound");
+        assert_eq!(binding.snapshot_nonce, fixture.code_nonce);
+        assert_eq!(binding.freshness, "fresh");
+    }
 
     #[test]
     fn distances_follow_caller_to_anchor_direction_and_ignore_candidate_shortcuts() {

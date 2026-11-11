@@ -864,6 +864,20 @@ fn create(
     Ok((binding_id, generation))
 }
 
+#[cfg(test)]
+pub(crate) fn create_for_test(
+    home: &Path,
+    entry: &registry::RepoEntry,
+    path: &str,
+    line: u32,
+    col: u32,
+    input: &BindingInput,
+) -> Result<(i64, u64), String> {
+    let anchor = resolve_code_anchor(home, entry, path, line, col, None, true, None)?;
+    let mut conn = knowledge_store::open_knowledge_at(home, entry, true)?;
+    create(&mut conn, Path::new(&entry.root), &anchor, input)
+}
+
 fn retract(conn: &mut Connection, binding_id: i64, input: &RetractInput) -> Result<u64, String> {
     if binding_id <= 0 {
         return Err("binding id must be positive".to_string());

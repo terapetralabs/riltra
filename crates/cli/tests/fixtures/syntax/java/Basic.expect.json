@@ -1,0 +1,1 @@
+{"defs": [["Basic", 5], ["Greeter", 6], ["hi", 6], ["Basic", 8], ["twice", 9], ["run", 10]], "imports": [2, 3], "calls": [["max", 9], ["add", 12], ["println", 13], ["twice", 13]]}

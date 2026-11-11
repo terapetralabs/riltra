@@ -1,0 +1,1 @@
+{"defs": [["Stack", 6], ["Push", 8], ["Map", 10], ["run", 18]], "imports": [4], "calls": [["append", 8], ["make", 11], ["len", 11], ["append", 13], ["f", 13], ["Exit", 19], ["Map", 20]]}

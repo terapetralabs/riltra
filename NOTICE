@@ -16,8 +16,8 @@ Notable bundled components, all under permissive licenses:
 
   SQLite                     public domain; compiled in through the bundled
                              feature of rusqlite
-  tree-sitter and the        MIT; the Python, JavaScript, TypeScript, Rust, C
-  tree-sitter grammars       and C++ grammars are compiled into the binary
+  tree-sitter and the        MIT; the Python, JavaScript, TypeScript, Rust, C,
+  tree-sitter grammars       C++ and Go grammars are compiled into the binary
   rust-protobuf              MIT; reads SCIP indexes
   rmcp and Tokio             Apache-2.0 and MIT; the local stdio MCP server
   serde, serde_json          MIT OR Apache-2.0

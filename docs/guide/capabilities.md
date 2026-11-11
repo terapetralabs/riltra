@@ -15,6 +15,7 @@ guide to check the current scope before relying on an answer.
 | Rust | `.rs` | Same | SCIP import verified on a fixture with `rust-analyzer` |
 | C | `.c` | Same | SCIP import contract only |
 | C++ | `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, `.hxx`, `.inl` | Same, plus classes, structs, and data members | Configured language-server query (such as clangd); not verified on a real project |
+| Go | `.go` | Functions, methods, struct/interface/type declarations, imports (a grouped `import (...)` is one fact), and call-site candidates | None; no SCIP or language-server evidence has been tried |
 | CUDA | `.cu`, `.cuh` | Unsupported; not parsed | None |
 
 Other extensions are reported as unsupported. Headers are parsed as C++; a

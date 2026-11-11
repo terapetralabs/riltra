@@ -20,6 +20,7 @@ pub enum Language {
     Rust,
     C,
     Cpp,
+    Go,
 }
 
 pub fn language_name(lang: Language) -> &'static str {
@@ -31,6 +32,7 @@ pub fn language_name(lang: Language) -> &'static str {
         Language::Rust => "rust",
         Language::C => "c",
         Language::Cpp => "cpp",
+        Language::Go => "go",
     }
 }
 
@@ -45,6 +47,7 @@ pub fn grammar_version(lang: Language) -> &'static str {
         Language::Rust => "rust:0.24.2",
         Language::C => "c:0.24.2",
         Language::Cpp => "cpp:0.23.4",
+        Language::Go => "go:0.25.0",
     }
 }
 
@@ -73,6 +76,7 @@ pub fn classify(path: &Path) -> FileKind {
         Some("ts" | "mts" | "cts") => FileKind::Supported(Language::TypeScript),
         Some("tsx") => FileKind::Supported(Language::Tsx),
         Some("rs") => FileKind::Supported(Language::Rust),
+        Some("go") => FileKind::Supported(Language::Go),
         Some("c") => FileKind::Supported(Language::C),
         Some("h" | "hh" | "hpp" | "hxx" | "inl") => FileKind::Supported(Language::Cpp),
         Some("cc" | "cpp" | "cxx") => FileKind::Supported(Language::Cpp),
@@ -157,6 +161,7 @@ fn ts_language(lang: Language) -> tree_sitter::Language {
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::C => tree_sitter_c::LANGUAGE.into(),
         Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Language::Go => tree_sitter_go::LANGUAGE.into(),
     }
 }
 
@@ -277,6 +282,7 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
                 | "generator_function_declaration"
                 | "function_item"
                 | "method_definition"
+                | "method_declaration"
         )
     }
     fn name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -380,6 +386,7 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
                     | "arrow_function"
                     | "closure_expression"
                     | "function_expression"
+                    | "func_literal"
                     | "generator_function"
                     | "class_definition"
                     | "class_declaration"
@@ -417,6 +424,17 @@ fn push_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, 
         callee: None,
         tcallee: None,
     });
+}
+
+/// Go `type X struct{...}`, `type X interface{...}`, or any other named type
+/// (alias, defined type); one fact per `type_spec`, kind from its type node.
+fn push_go_type(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let kind = match node.child_by_field_name("type").map(|t| t.kind()) {
+        Some("struct_type") => "struct",
+        Some("interface_type") => "interface",
+        _ => "type",
+    };
+    push_def(facts, kind, node, src);
 }
 
 fn push_c_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, src: &[u8]) {
@@ -674,7 +692,45 @@ fn function_macro_names<'a>(root: tree_sitter::Node<'a>, src: &'a [u8]) -> HashS
 }
 
 fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
-    let func = node.child_by_field_name("function");
+    push_call_to(facts, node, node.child_by_field_name("function"), src);
+}
+
+/// Go call candidates. An explicit type argument hides the callee two ways:
+/// `F[int](1, 2)` is a call whose callee is an index expression (name
+/// `F[int]`), and `F[int](1)` parses as a `type_conversion_expression` with no
+/// call node at all. Record both under the function name, as for C++ template
+/// arguments. shortcut: `fns[0](x)` has the same shape as `F[int](x)` and is
+/// recorded as a call to `fns`; telling them apart needs type information.
+/// A candidate only; a real conversion `Celsius[float64](x)` is
+/// indistinguishable from a call without types too.
+fn push_go_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    fn base(f: tree_sitter::Node) -> tree_sitter::Node {
+        match f.kind() {
+            "index_expression" => f
+                .child_by_field_name("operand")
+                .filter(|o| matches!(o.kind(), "identifier" | "selector_expression"))
+                .unwrap_or(f),
+            _ => f,
+        }
+    }
+    let func = match node.kind() {
+        "type_conversion_expression" => node
+            .child_by_field_name("type")
+            .filter(|t| t.kind() == "generic_type")
+            .and_then(|t| t.child_by_field_name("type")),
+        _ => node.child_by_field_name("function").map(base),
+    };
+    if func.is_some() {
+        push_call_to(facts, node, func, src);
+    }
+}
+
+fn push_call_to(
+    facts: &mut FileFacts,
+    node: tree_sitter::Node,
+    func: Option<tree_sitter::Node>,
+    src: &[u8],
+) {
     let callee = func.and_then(|f| node_text(f, src).map(|s| s.to_string()));
     let (span, byte_start, byte_end) = span_of(node);
     facts.calls.push(Fact {
@@ -931,6 +987,14 @@ fn visit_node(
             "struct_item" => push_def(facts, "struct", node, src),
             "use_declaration" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
+            _ => {}
+        },
+        Language::Go => match node.kind() {
+            "function_declaration" => push_def(facts, "function", node, src),
+            "method_declaration" => push_def(facts, "method", node, src),
+            "type_spec" | "type_alias" => push_go_type(facts, node, src),
+            "import_declaration" => push_import(facts, node, src),
+            "call_expression" | "type_conversion_expression" => push_go_call(facts, node, src),
             _ => {}
         },
         Language::C => match node.kind() {
@@ -1334,6 +1398,136 @@ mod tests {
     fn grammar_versions_match_lockfile_entries() {
         assert_eq!(grammar_version(Language::Python), "python:0.25.0");
         assert_eq!(grammar_version(Language::Cpp), "cpp:0.23.4");
+        assert_eq!(grammar_version(Language::Go), "go:0.25.0");
+    }
+
+    #[test]
+    fn extracts_go_definitions_imports_and_calls() {
+        let src = concat!(
+            "package main\n",
+            "\n",
+            "import (\n",
+            "\t\"fmt\"\n",
+            "\tstr \"strings\"\n",
+            ")\n",
+            "\n",
+            "type Server struct{ name string }\n",
+            "type Handler interface{ Serve() }\n",
+            "type ID = int\n",
+            "\n",
+            "func helper(n int) int { return n + 1 }\n",
+            "\n",
+            "func (s *Server) Start() {\n",
+            "\tfmt.Println(helper(1))\n",
+            "\tstr.ToUpper(s.name)\n",
+            "\tf := func() { helper(2) }\n",
+            "\tf()\n",
+            "}\n",
+        );
+        let facts = parse_source(Language::Go, src.as_bytes());
+        assert_eq!(facts.errors, 0);
+        let defs: Vec<_> = facts
+            .definitions
+            .iter()
+            .map(|d| (d.kind, d.name.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            defs,
+            vec![
+                ("struct", "Server"),
+                ("interface", "Handler"),
+                ("type", "ID"),
+                ("function", "helper"),
+                ("method", "Start"),
+            ]
+        );
+        // A grouped import is one statement, starting on its first line.
+        assert_eq!(facts.imports.len(), 1);
+        assert_eq!(facts.imports[0].span.start_line, 3);
+        assert_eq!(facts.imports[0].span.end_line, 6);
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| c.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            calls,
+            vec!["fmt.Println", "helper", "str.ToUpper", "helper", "f"]
+        );
+        assert_eq!(
+            classify(Path::new("main.go")),
+            FileKind::Supported(Language::Go)
+        );
+    }
+
+    #[test]
+    fn go_generic_calls_are_recorded_under_the_function_name() {
+        // `F[int](1)` parses as a type conversion and `F[int](1, 2)` as a call
+        // whose callee is an index expression; neither may lose the call or
+        // keep the type argument in its name. `T(3)` and `[]int(z)` are the
+        // plain call and the real conversion.
+        let src = concat!(
+            "package p\n",
+            "func a() {\n",
+            "\tF[int](1)\n",
+            "\tpkg.F[int](1)\n",
+            "\tF[int](1, 2)\n",
+            "\tpkg.F[int](1, 2)\n",
+            "\tG[int, string](1, 2)\n",
+            "\tT(3)\n",
+            "\t_ = []int(z)\n",
+            "\t_ = M[int]\n",
+            "}\n",
+        );
+        let facts = parse_source(Language::Go, src.as_bytes());
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.span.start_line, c.name.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (3, "F"),
+                (4, "pkg.F"),
+                (5, "F"),
+                (6, "pkg.F"),
+                (7, "G"),
+                (8, "T")
+            ]
+        );
+        let c = &facts.calls[1];
+        let t = c.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src.as_bytes()[t.byte_start..t.byte_end], b"F");
+    }
+
+    #[test]
+    fn relationship_proof_attributes_go_calls_to_functions_methods_and_closures() {
+        let src = concat!(
+            "package main\n",
+            "func outer() {\n",
+            "\tfirst()\n",
+            "\tf := func() { second() }\n",
+            "\tf()\n",
+            "}\n",
+            "func (s *S) m() {\n",
+            "\tthird()\n",
+            "}\n",
+        );
+        let proof = super::relationship_proof(Language::Go, src.as_bytes());
+        let (owner, _) = scope_of(src, &proof, "first()");
+        assert!(owner.unwrap().starts_with("func outer()"));
+        // A closure ends the owner chain, as in the other languages.
+        let (owner, _) = scope_of(src, &proof, "second()");
+        assert_eq!(owner, None);
+        let (owner, _) = scope_of(src, &proof, "third()");
+        assert!(owner.unwrap().starts_with("func (s *S) m()"));
+        let names: Vec<_> = proof
+            .declarations
+            .iter()
+            .map(|&(from, to)| &src[from..to])
+            .collect();
+        assert_eq!(names, ["outer", "m"]);
     }
 
     #[test]

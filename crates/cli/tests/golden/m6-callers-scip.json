@@ -4,7 +4,7 @@
   "snapshot": {
     "id": 1,
     "nonce": "<nonce>",
-    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=bd170f7252fafb91|nonce=<nonce>"
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=91ff196d944504f7|nonce=<nonce>"
   },
   "direction": "callers",
   "anchor": {
@@ -115,7 +115,7 @@
             "provider": "scip-test",
             "version": "1.0",
             "artifact_id": "<artifact>",
-            "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=bd170f7252fafb91|nonce=<nonce>",
+            "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=91ff196d944504f7|nonce=<nonce>",
             "content_identity": "9a80fe22347c0ef3"
           }
         ]

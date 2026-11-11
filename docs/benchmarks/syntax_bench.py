@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Syntax-fact benchmark: compares `riltra scan` with hand-written expectations.
 # usage: python -I syntax_bench.py <abs riltra binary> <abs fixtures/syntax dir> <abs scratch dir> [lang ...]
-# Default languages: js py (supported today). go and java are expected to fail until supported; name them to run.
+# Default languages: js py go (supported today). java is expected to fail until supported; name it to run.
 # Fixture: <lang>/<name>.<ext> + <name>.expect.json = {"defs":[[name,line]],"imports":[line],"calls":[[text,line]]}
 # Lines are 1-based statement/definition start lines. A scanned call matches when its name (as written)
-# contains the expected text. Expectations are written from the source, before looking at scan output.
+# equals the expected text or ends with it after a `.`, `::` or `->` separator (`os.getcwd` for `getcwd`). Expectations are written from the source, before looking at scan output.
 # Exit 0 only when every language has no FN and no FP.
 import glob, json, os, shutil, subprocess, sys
 
 B, FIX, WORK = sys.argv[1:4]
-langs = sys.argv[4:] or ["js", "py"]
+langs = sys.argv[4:] or ["js", "py", "go"]
 os.environ["RILTRA_HOME"] = os.path.join(WORK, "home")
 bad = False
 for lang in langs:
@@ -37,7 +37,7 @@ for lang in langs:
             want = [w if k == "imports" else tuple(w) for w in e[k]]
             have = list(got[k])
             for w in list(want):
-                if k == "calls": hit = next((h for h in have if w[0] in h[0] and h[1] == w[1]), None)
+                if k == "calls": hit = next((h for h in have if h[1] == w[1] and (h[0] == w[0] or any(h[0].endswith(s + w[0]) for s in (".", "::", "->")))), None)
                 else: hit = w if w in have else None
                 if hit is not None: want.remove(w); have.remove(hit); tot[k][0] += 1
             tot[k][2] += len(want); tot[k][1] += len(have)

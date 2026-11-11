@@ -692,7 +692,45 @@ fn function_macro_names<'a>(root: tree_sitter::Node<'a>, src: &'a [u8]) -> HashS
 }
 
 fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
-    let func = node.child_by_field_name("function");
+    push_call_to(facts, node, node.child_by_field_name("function"), src);
+}
+
+/// Go call candidates. An explicit type argument hides the callee two ways:
+/// `F[int](1, 2)` is a call whose callee is an index expression (name
+/// `F[int]`), and `F[int](1)` parses as a `type_conversion_expression` with no
+/// call node at all. Record both under the function name, as for C++ template
+/// arguments. shortcut: `fns[0](x)` has the same shape as `F[int](x)` and is
+/// recorded as a call to `fns`; telling them apart needs type information.
+/// A candidate only; a real conversion `Celsius[float64](x)` is
+/// indistinguishable from a call without types too.
+fn push_go_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    fn base(f: tree_sitter::Node) -> tree_sitter::Node {
+        match f.kind() {
+            "index_expression" => f
+                .child_by_field_name("operand")
+                .filter(|o| matches!(o.kind(), "identifier" | "selector_expression"))
+                .unwrap_or(f),
+            _ => f,
+        }
+    }
+    let func = match node.kind() {
+        "type_conversion_expression" => node
+            .child_by_field_name("type")
+            .filter(|t| t.kind() == "generic_type")
+            .and_then(|t| t.child_by_field_name("type")),
+        _ => node.child_by_field_name("function").map(base),
+    };
+    if func.is_some() {
+        push_call_to(facts, node, func, src);
+    }
+}
+
+fn push_call_to(
+    facts: &mut FileFacts,
+    node: tree_sitter::Node,
+    func: Option<tree_sitter::Node>,
+    src: &[u8],
+) {
     let callee = func.and_then(|f| node_text(f, src).map(|s| s.to_string()));
     let (span, byte_start, byte_end) = span_of(node);
     facts.calls.push(Fact {
@@ -956,7 +994,7 @@ fn visit_node(
             "method_declaration" => push_def(facts, "method", node, src),
             "type_spec" | "type_alias" => push_go_type(facts, node, src),
             "import_declaration" => push_import(facts, node, src),
-            "call_expression" => push_call(facts, node, src),
+            "call_expression" | "type_conversion_expression" => push_go_call(facts, node, src),
             _ => {}
         },
         Language::C => match node.kind() {
@@ -1420,6 +1458,47 @@ mod tests {
             classify(Path::new("main.go")),
             FileKind::Supported(Language::Go)
         );
+    }
+
+    #[test]
+    fn go_generic_calls_are_recorded_under_the_function_name() {
+        // `F[int](1)` parses as a type conversion and `F[int](1, 2)` as a call
+        // whose callee is an index expression; neither may lose the call or
+        // keep the type argument in its name. `T(3)` and `[]int(z)` are the
+        // plain call and the real conversion.
+        let src = concat!(
+            "package p\n",
+            "func a() {\n",
+            "\tF[int](1)\n",
+            "\tpkg.F[int](1)\n",
+            "\tF[int](1, 2)\n",
+            "\tpkg.F[int](1, 2)\n",
+            "\tG[int, string](1, 2)\n",
+            "\tT(3)\n",
+            "\t_ = []int(z)\n",
+            "\t_ = M[int]\n",
+            "}\n",
+        );
+        let facts = parse_source(Language::Go, src.as_bytes());
+        let got: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| (c.span.start_line, c.name.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (3, "F"),
+                (4, "pkg.F"),
+                (5, "F"),
+                (6, "pkg.F"),
+                (7, "G"),
+                (8, "T")
+            ]
+        );
+        let c = &facts.calls[1];
+        let t = c.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src.as_bytes()[t.byte_start..t.byte_end], b"F");
     }
 
     #[test]

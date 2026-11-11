@@ -5,7 +5,7 @@
   "snapshot": {
     "id": 1,
     "nonce": "<nonce>",
-    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=c4f60b3e67e71144|nonce=<nonce>"
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=bd170f7252fafb91|nonce=<nonce>"
   },
   "direction": "impact",
   "anchor": {
@@ -122,7 +122,7 @@
                 "provider": "trace",
                 "version": "1.0",
                 "artifact_id": "<artifact>",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=c4f60b3e67e71144|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=bd170f7252fafb91|nonce=<nonce>",
                 "content_identity": "564596e4b180d905"
               }
             ]
@@ -196,7 +196,7 @@
                 "provider": "trace",
                 "version": "1.0",
                 "artifact_id": "<artifact>",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=c4f60b3e67e71144|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=bd170f7252fafb91|nonce=<nonce>",
                 "content_identity": "564596e4b180d905"
               }
             ]
@@ -260,7 +260,7 @@
                 "provider": "trace",
                 "version": "1.0",
                 "artifact_id": "<artifact>",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=c4f60b3e67e71144|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=bd170f7252fafb91|nonce=<nonce>",
                 "content_identity": "564596e4b180d905"
               }
             ]

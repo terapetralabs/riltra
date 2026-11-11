@@ -20,7 +20,8 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// 5: the argument of a C++ factory call (`make_unique<T>`) is a candidate edge.
 /// 6: `.inl` files are extracted as C++ (G-SYN coverage gap, M9).
 /// 7: a multi-line import ends on its last line (G-SYN import span fix, M9).
-pub const PARSER_VERSION: u32 = 7;
+/// 8: JS/TS/TSX `function*` declarations are extracted as function definitions.
+pub const PARSER_VERSION: u32 = 8;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.

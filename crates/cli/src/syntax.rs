@@ -272,7 +272,11 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
     fn callable(node: tree_sitter::Node<'_>) -> bool {
         matches!(
             node.kind(),
-            "function_definition" | "function_declaration" | "function_item" | "method_definition"
+            "function_definition"
+                | "function_declaration"
+                | "generator_function_declaration"
+                | "function_item"
+                | "method_definition"
         )
     }
     fn name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -902,7 +906,9 @@ fn visit_node(
             _ => {}
         },
         Language::JavaScript => match node.kind() {
-            "function_declaration" => push_def(facts, "function", node, src),
+            "function_declaration" | "generator_function_declaration" => {
+                push_def(facts, "function", node, src)
+            }
             "method_definition" => push_def(facts, "method", node, src),
             "class_declaration" => push_def(facts, "class", node, src),
             "import_statement" => push_import(facts, node, src),
@@ -910,7 +916,9 @@ fn visit_node(
             _ => {}
         },
         Language::TypeScript | Language::Tsx => match node.kind() {
-            "function_declaration" => push_def(facts, "function", node, src),
+            "function_declaration" | "generator_function_declaration" => {
+                push_def(facts, "function", node, src)
+            }
             "method_definition" => push_def(facts, "method", node, src),
             "class_declaration" => push_def(facts, "class", node, src),
             "interface_declaration" => push_def(facts, "interface", node, src),
@@ -1118,6 +1126,24 @@ mod tests {
         let terminal = call.tcallee.as_ref().expect("terminal span recorded");
         assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"process");
         assert!(terminal.byte_start > callee.byte_start);
+    }
+
+    #[test]
+    fn js_and_ts_generator_functions_are_function_definitions() {
+        let src = b"function* gen() { yield 1; }\nexport function* exported() {}\n";
+        for lang in [Language::JavaScript, Language::TypeScript, Language::Tsx] {
+            let facts = parse_source(lang, src);
+            let names: Vec<_> = facts
+                .definitions
+                .iter()
+                .map(|d| (d.kind, d.name.as_deref()))
+                .collect();
+            assert_eq!(
+                names,
+                vec![("function", Some("gen")), ("function", Some("exported"))],
+                "{lang:?}"
+            );
+        }
     }
 
     #[test]

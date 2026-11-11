@@ -111,6 +111,13 @@ fn golden_go() {
 }
 
 #[test]
+fn golden_java() {
+    let h = home("java");
+    registered(&h);
+    check_golden(&h, "java/Hello.java", "m2-java-hello.json");
+}
+
+#[test]
 fn golden_c() {
     let h = home("c");
     registered(&h);

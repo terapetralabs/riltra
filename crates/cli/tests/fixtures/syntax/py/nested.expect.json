@@ -1,0 +1,1 @@
+{"defs": [["deco", 5], ["inner", 6], ["fetch", 8], ["K", 10], ["s", 12], ["am", 13]], "imports": [2, 3], "calls": [["inner", 7], ["deco", 9], ["getcwd", 12], ["s", 13], ["d", 14]]}

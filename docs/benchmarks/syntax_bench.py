@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Syntax-fact benchmark: compares `riltra scan` with hand-written expectations.
 # usage: python -I syntax_bench.py <abs riltra binary> <abs fixtures/syntax dir> <abs scratch dir> [lang ...]
-# Default languages: js py go java (supported today).
+# Default languages: every directory under the fixtures dir.
 # Fixture: <lang>/<name>.<ext> + <name>.expect.json = {"defs":[[name,line]],"imports":[line],"calls":[[text,line]]}
 # Lines are 1-based statement/definition start lines. A scanned call matches when its name (as written)
 # equals the expected text or ends with it after a `.`, `::` or `->` separator (`os.getcwd` for `getcwd`). Expectations are written from the source, before looking at scan output.
@@ -9,7 +9,7 @@
 import glob, json, os, shutil, subprocess, sys
 
 B, FIX, WORK = sys.argv[1:4]
-langs = sys.argv[4:] or ["js", "py", "go", "java"]
+langs = sys.argv[4:] or sorted(d for d in os.listdir(FIX) if os.path.isdir(os.path.join(FIX, d)))
 os.environ["RILTRA_HOME"] = os.path.join(WORK, "home")
 bad = False
 for lang in langs:

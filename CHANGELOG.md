@@ -8,11 +8,17 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 - Syntax facts for Go (`.go`) and Java (`.java`): definitions, imports and
   call candidates. Syntax-only; calls stay `POTENTIAL_CALL` and no SCIP or
-  language-server evidence is claimed. `PARSER_VERSION` is now 10, so existing
-  indexes rebuild.
+  language-server evidence is claimed.
 
 ### Fixed
 
+- Syntax calibration against hand-written fixtures: Rust enums, traits, trait
+  method signatures and type aliases; C and C++ enums and typedefs; C++ `using`
+  aliases; and TypeScript enums, type aliases and abstract classes are now
+  extracted as definitions. A bare `struct X *p;` or forward declaration
+  (`class X;`) is no longer reported as a definition. Rust
+  `extern` function signatures are now function definitions. `PARSER_VERSION` is now
+  11 (Go and Java were 9 and 10), so existing indexes rebuild.
 - JavaScript and TypeScript `function*` declarations are extracted as function
   definitions.
 

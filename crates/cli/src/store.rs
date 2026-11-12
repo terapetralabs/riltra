@@ -25,7 +25,10 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// declarations, imports and calls (syntax facts only).
 /// 10: Java files (`.java`) are extracted: classes, records, enums, interfaces,
 /// methods, constructors, imports and method invocations (syntax facts only).
-pub const PARSER_VERSION: u32 = 10;
+/// 11: calibration round 1: Rust enums, traits, trait method signatures and type
+/// aliases; C/C++ enums and typedefs; C++ `using` aliases; TS/TSX enums, type
+/// aliases and abstract classes are extracted as definitions.
+pub const PARSER_VERSION: u32 = 11;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.

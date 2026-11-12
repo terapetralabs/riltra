@@ -288,6 +288,8 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
                 | "function_item"
                 | "method_definition"
                 | "method_declaration"
+                | "constructor_declaration"
+                | "compact_constructor_declaration"
         )
     }
     fn name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -363,7 +365,10 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
             proof.declarations.push((n.start_byte(), n.end_byte()));
         }
         let span = (node.start_byte(), node.end_byte());
-        if matches!(node.kind(), "call" | "call_expression") {
+        if matches!(
+            node.kind(),
+            "call" | "call_expression" | "method_invocation"
+        ) {
             proof.owners.insert(span, scope.owner);
             proof.call_blocks.insert(span, scope.block);
         }
@@ -1035,9 +1040,9 @@ fn visit_node(
                 push_def(facts, "interface", node, src)
             }
             "enum_declaration" => push_def(facts, "type", node, src),
-            "method_declaration" | "constructor_declaration" => {
-                push_def(facts, "method", node, src)
-            }
+            "method_declaration"
+            | "constructor_declaration"
+            | "compact_constructor_declaration" => push_def(facts, "method", node, src),
             "import_declaration" => push_import(facts, node, src),
             "method_invocation" => push_java_call(facts, node, src),
             _ => {}
@@ -1450,6 +1455,7 @@ class C {
   C() {}
   void m() { a.b().c(); d(); new C(); }
 }
+record Q(int y) { Q {} }
 ";
         let facts = parse_source(Language::Java, src.as_bytes());
         assert_eq!(facts.errors, 0);
@@ -1469,6 +1475,8 @@ class C {
                 ("class", "C"),
                 ("method", "C"),
                 ("method", "m"),
+                ("class", "Q"),
+                ("method", "Q"),
             ]
         );
         assert_eq!(facts.imports.len(), 1);
@@ -1616,6 +1624,32 @@ class C {
             .map(|&(from, to)| &src[from..to])
             .collect();
         assert_eq!(names, ["outer", "m"]);
+    }
+
+    #[test]
+    fn relationship_proof_attributes_java_calls_to_methods_and_constructors() {
+        let src = concat!(
+            "class A {
+",
+            "  A() { init(); }
+",
+            "  void m() { first(); Runnable r = () -> second(); }
+",
+            "}
+",
+            "record R(int x) { R { check(); } }
+",
+        );
+        let proof = super::relationship_proof(Language::Java, src.as_bytes());
+        let (owner, _) = scope_of(src, &proof, "init()");
+        assert!(owner.unwrap().starts_with("A() {"));
+        let (owner, _) = scope_of(src, &proof, "first()");
+        assert!(owner.unwrap().starts_with("void m()"));
+        // A lambda ends the owner chain, as in the other languages.
+        let (owner, _) = scope_of(src, &proof, "second()");
+        assert_eq!(owner, None);
+        let (owner, _) = scope_of(src, &proof, "check()");
+        assert!(owner.unwrap().starts_with("R {"));
     }
 
     #[test]

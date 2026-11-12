@@ -191,7 +191,11 @@ fn span_of(node: tree_sitter::Node) -> (Span, usize, usize) {
 
 /// Name child via the `name` field, else the first identifier-like child.
 fn def_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
-    if let Some(n) = node.child_by_field_name("name") {
+    // `property` names a JS class field (`m = () => {}`).
+    if let Some(n) = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("property"))
+    {
         if let Some(t) = node_text(n, src) {
             return Some(t.to_string());
         }
@@ -276,6 +280,47 @@ pub struct LocalFunctionAlias {
     pub binding: (usize, usize),
     pub target: (usize, usize),
     pub block: (usize, usize),
+}
+
+/// JS/TS `const f = () => {}`, `const f = function () {}` and class fields
+/// `m = () => {}`: a plain name bound to a function expression. The binding is
+/// the definition; destructuring patterns and other values are not. Calls
+/// inside stay unattributed to any owner: the M6 corpus fixes that an anonymous
+/// callable has no named owner and no closure inference is made.
+/// shortcut: a function value reassigned later (`f = () => {}` without a
+/// declaration) is not a binding here.
+fn is_named_function_binding(node: tree_sitter::Node<'_>) -> bool {
+    if !matches!(
+        node.kind(),
+        "variable_declarator" | "field_definition" | "public_field_definition"
+    ) {
+        return false;
+    }
+    let named = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("property"))
+        .is_some_and(|n| {
+            matches!(
+                n.kind(),
+                "identifier" | "property_identifier" | "private_property_identifier"
+            )
+        });
+    named
+        && node.child_by_field_name("value").is_some_and(|v| {
+            matches!(
+                v.kind(),
+                "arrow_function" | "function_expression" | "function"
+            )
+        })
+}
+
+/// A class field bound to a function is a method; a variable is a function.
+fn binding_kind(node: tree_sitter::Node<'_>) -> &'static str {
+    if node.kind() == "variable_declarator" {
+        "function"
+    } else {
+        "method"
+    }
 }
 
 pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
@@ -1097,6 +1142,9 @@ fn visit_node(
                 push_def(facts, "function", node, src)
             }
             "method_definition" => push_def(facts, "method", node, src),
+            "variable_declarator" | "field_definition" if is_named_function_binding(node) => {
+                push_def(facts, binding_kind(node), node, src)
+            }
             "class_declaration" => push_def(facts, "class", node, src),
             "import_statement" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
@@ -1107,6 +1155,11 @@ fn visit_node(
                 push_def(facts, "function", node, src)
             }
             "method_definition" => push_def(facts, "method", node, src),
+            "variable_declarator" | "public_field_definition"
+                if is_named_function_binding(node) =>
+            {
+                push_def(facts, binding_kind(node), node, src)
+            }
             "class_declaration" => push_def(facts, "class", node, src),
             "abstract_class_declaration" => push_def(facts, "class", node, src),
             "interface_declaration" => push_def(facts, "interface", node, src),
@@ -1881,6 +1934,48 @@ abstract class AC {}
         assert_eq!(owner, None);
         let (owner, _) = scope_of(src, &proof, "check()");
         assert!(owner.unwrap().starts_with("R {"));
+    }
+
+    #[test]
+    fn relationship_proof_keeps_calls_in_arrow_functions_unowned() {
+        let src = concat!(
+            "const outer = () => { first(); [1].map(() => second()); };
+",
+            "class K { m = () => third(); }
+",
+            "[1].map(() => fourth());
+",
+        );
+        let proof = super::relationship_proof(Language::JavaScript, src.as_bytes());
+        // A name bound to an arrow is a definition, but not an owner: an
+        // anonymous callable has no persisted named owner (M6 contract).
+        for call in ["first()", "second()", "third()", "fourth()"] {
+            let (owner, _) = scope_of(src, &proof, call);
+            assert_eq!(owner, None, "{call}");
+        }
+    }
+
+    #[test]
+    fn named_function_bindings_are_definitions_but_other_values_are_not() {
+        let src = "const f = () => 1;
+const g = function () {};
+const { a } = b;
+const n = 3;
+const h = k();
+class C { x = () => 1; y = 2; #p = function () {}; }
+";
+        let got = def_pairs(Language::JavaScript, src);
+        let names: Vec<_> = got.iter().map(|g| (g.0, g.1.as_str())).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("function", "f"),
+                ("function", "g"),
+                ("class", "C"),
+                ("method", "x"),
+                ("method", "#p"),
+            ]
+        );
     }
 
     #[test]

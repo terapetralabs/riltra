@@ -78,7 +78,7 @@
               "content_identity": "3def0ea7b9d32231",
               "id": 1,
               "provider": "corpus",
-              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>",
               "version": "1.0"
             }
           ],
@@ -117,7 +117,7 @@
     "snapshot": {
       "id": 1,
       "nonce": "<nonce>",
-      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>"
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>"
     },
     "truncated": false,
     "verification": "Unverified"
@@ -197,7 +197,7 @@
               "content_identity": "3def0ea7b9d32231",
               "id": 1,
               "provider": "corpus",
-              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>",
               "version": "1.0"
             }
           ],
@@ -233,7 +233,7 @@
     "snapshot": {
       "id": 1,
       "nonce": "<nonce>",
-      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>"
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>"
     },
     "truncated": false,
     "verification": "Unverified"
@@ -343,7 +343,7 @@
                   "content_identity": "3def0ea7b9d32231",
                   "id": 1,
                   "provider": "corpus",
-                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>",
                   "version": "1.0"
                 }
               ],
@@ -378,7 +378,7 @@
     "snapshot": {
       "id": 1,
       "nonce": "<nonce>",
-      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>"
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>"
     },
     "truncated": false,
     "unresolved": [
@@ -501,7 +501,7 @@
     "snapshot": {
       "id": 1,
       "nonce": "<nonce>",
-      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>"
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>"
     },
     "truncated": false,
     "verification": "Unverified"
@@ -587,7 +587,7 @@
     "snapshot": {
       "id": 1,
       "nonce": "<nonce>",
-      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>"
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>"
     },
     "truncated": false,
     "unresolved": [],
@@ -730,7 +730,7 @@
                   "content_identity": "3def0ea7b9d32231",
                   "id": 1,
                   "provider": "corpus",
-                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>",
                   "version": "1.0"
                 }
               ],
@@ -768,7 +768,7 @@
     "snapshot": {
       "id": 1,
       "nonce": "<nonce>",
-      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9f59619569a7bcd4|nonce=<nonce>"
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>"
     },
     "truncated": false,
     "unresolved": [

@@ -9,3 +9,4 @@ enum class K { A };
 using IntVec = std::vector<int>;
 int main() { D d; d.f(); twice<int>(1); auto l = [] { return 1; }; return l(); }
 class Fwd; struct Fs; Fs *fp;
+class EXPORT Hdr { int q; };

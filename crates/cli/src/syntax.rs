@@ -492,6 +492,29 @@ fn push_go_type(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     push_def(facts, kind, node, src);
 }
 
+/// `class EXPORT Name { ... };` with an unknown macro between the keyword and
+/// the name parses as a function definition: a return type `class EXPORT`, a bare
+/// identifier declarator `Name`, and the class body as the function body. A
+/// function definition as written has a parameter list, so a bare identifier declarator
+/// under a tag-specifier type without a body is a macro-headed class or struct.
+/// shortcut: members are recorded as plain functions (no class context), and a
+/// macro with arguments (`class API(1) Name`) still fails to parse.
+fn macro_headed_tag(node: tree_sitter::Node<'_>) -> Option<&'static str> {
+    let declarator = node.child_by_field_name("declarator")?;
+    if declarator.kind() != "identifier" {
+        return None;
+    }
+    let ty = node.child_by_field_name("type")?;
+    if ty.child_by_field_name("body").is_some() {
+        return None;
+    }
+    match ty.kind() {
+        "class_specifier" => Some("class"),
+        "struct_specifier" => Some("struct"),
+        _ => None,
+    }
+}
+
 fn push_c_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, src: &[u8]) {
     let (span, byte_start, byte_end) = span_of(node);
     facts.definitions.push(Fact {
@@ -1201,7 +1224,12 @@ fn visit_node(
             _ => {}
         },
         Language::C => match node.kind() {
-            "function_definition" => push_c_def(facts, "function", node, src),
+            "function_definition" => push_c_def(
+                facts,
+                macro_headed_tag(node).unwrap_or("function"),
+                node,
+                src,
+            ),
             "struct_specifier" => push_struct(facts, node, src),
             "enum_specifier" => push_enum(facts, node, src),
             "type_definition" => push_typedef(facts, node, src),
@@ -1210,7 +1238,12 @@ fn visit_node(
             _ => {}
         },
         Language::Cpp => match node.kind() {
-            "function_definition" => push_c_def(facts, "function", node, src),
+            "function_definition" => push_c_def(
+                facts,
+                macro_headed_tag(node).unwrap_or("function"),
+                node,
+                src,
+            ),
             "struct_specifier" => push_struct(facts, node, src),
             "class_specifier"
                 if node.child_by_field_name("body").is_some()
@@ -1760,6 +1793,27 @@ class Real {};
 ",
         );
         assert_eq!(facts.definitions.len(), 2);
+    }
+
+    #[test]
+    fn a_macro_between_the_class_keyword_and_name_is_still_a_class() {
+        let src = "class EXPORT Foo { int x; };
+struct EXPORT S { int a; };
+class EXPORT Fwd;
+class Plain {};
+int real(int v) { return v; }
+";
+        let got = def_pairs(Language::Cpp, src);
+        let names: Vec<_> = got.iter().map(|g| (g.0, g.1.as_str())).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("class", "Foo"),
+                ("struct", "S"),
+                ("class", "Plain"),
+                ("function", "real"),
+            ]
+        );
     }
 
     #[test]

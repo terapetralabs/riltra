@@ -4,6 +4,18 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- Syntax facts for Go (`.go`) and Java (`.java`): definitions, imports and
+  call candidates. Syntax-only; calls stay `POTENTIAL_CALL` and no SCIP or
+  language-server evidence is claimed. `PARSER_VERSION` is now 10, so existing
+  indexes rebuild.
+
+### Fixed
+
+- JavaScript and TypeScript `function*` declarations are extracted as function
+  definitions.
+
 ## [0.2.0-rc.1] - 2026-11-10
 
 ### Added

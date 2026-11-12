@@ -1377,6 +1377,38 @@ fn cli_callees_finds_scip_callees() {
 }
 
 #[test]
+fn cli_java_calls_have_owners_in_methods_and_constructors() {
+    let h = home("java-owner");
+    repo_with(
+        &h,
+        "sem",
+        &[(
+            "A.java",
+            "class A {
+    void target() {}
+    void caller() { target(); }
+    A() { target(); }
+}
+",
+        )],
+    );
+    do_index(&h);
+    // Anchor on the method `caller` (line 3, col 10) and the constructor (line 4, col 5).
+    for (line, col) in [("3", "10"), ("4", "5")] {
+        let (code, out, err) = run(
+            &h,
+            &[
+                "callees", "--repo", "sem", "--path", "A.java", "--line", line, "--col", col,
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("\"callee_name\":\"target\""), "{out}");
+        assert!(out.contains("POTENTIAL_CALL"), "syntax-only: {out}");
+        assert!(!out.contains("owner-unproven"), "{out}");
+    }
+}
+
+#[test]
 fn cli_syntax_fallback_without_scip() {
     let h = home("fallback");
     edge_repo(&h);

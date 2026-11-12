@@ -1,0 +1,1 @@
+{"defs": [["Point", 4], ["sum", 5], ["Color", 7], ["Tag", 8], ["Outer", 9], ["first", 10], ["chain", 11], ["Inner", 16], ["go", 16]], "imports": [3], "calls": [["get", 10], ["keySet", 12], ["stream", 12], ["count", 12], ["first", 13], ["first", 14], ["chain", 16]]}

@@ -21,6 +21,7 @@ pub enum Language {
     C,
     Cpp,
     Go,
+    Java,
 }
 
 pub fn language_name(lang: Language) -> &'static str {
@@ -33,6 +34,7 @@ pub fn language_name(lang: Language) -> &'static str {
         Language::C => "c",
         Language::Cpp => "cpp",
         Language::Go => "go",
+        Language::Java => "java",
     }
 }
 
@@ -48,6 +50,7 @@ pub fn grammar_version(lang: Language) -> &'static str {
         Language::C => "c:0.24.2",
         Language::Cpp => "cpp:0.23.4",
         Language::Go => "go:0.25.0",
+        Language::Java => "java:0.23.5",
     }
 }
 
@@ -77,6 +80,7 @@ pub fn classify(path: &Path) -> FileKind {
         Some("tsx") => FileKind::Supported(Language::Tsx),
         Some("rs") => FileKind::Supported(Language::Rust),
         Some("go") => FileKind::Supported(Language::Go),
+        Some("java") => FileKind::Supported(Language::Java),
         Some("c") => FileKind::Supported(Language::C),
         Some("h" | "hh" | "hpp" | "hxx" | "inl") => FileKind::Supported(Language::Cpp),
         Some("cc" | "cpp" | "cxx") => FileKind::Supported(Language::Cpp),
@@ -162,6 +166,7 @@ fn ts_language(lang: Language) -> tree_sitter::Language {
         Language::C => tree_sitter_c::LANGUAGE.into(),
         Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         Language::Go => tree_sitter_go::LANGUAGE.into(),
+        Language::Java => tree_sitter_java::LANGUAGE.into(),
     }
 }
 
@@ -283,6 +288,8 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
                 | "function_item"
                 | "method_definition"
                 | "method_declaration"
+                | "constructor_declaration"
+                | "compact_constructor_declaration"
         )
     }
     fn name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -358,7 +365,10 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
             proof.declarations.push((n.start_byte(), n.end_byte()));
         }
         let span = (node.start_byte(), node.end_byte());
-        if matches!(node.kind(), "call" | "call_expression") {
+        if matches!(
+            node.kind(),
+            "call" | "call_expression" | "method_invocation"
+        ) {
             proof.owners.insert(span, scope.owner);
             proof.call_blocks.insert(span, scope.block);
         }
@@ -695,6 +705,33 @@ fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     push_call_to(facts, node, node.child_by_field_name("function"), src);
 }
 
+/// Java `recv.name(args)` / `name(args)`. The call name is the source text from
+/// the receiver (if any) through the method name, as written; the callee span
+/// is the method name. `new T(...)` is not a call candidate here.
+fn push_java_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(name) = node.child_by_field_name("name") else {
+        return;
+    };
+    let start = node
+        .child_by_field_name("object")
+        .map_or(name.start_byte(), |o| o.start_byte());
+    let callee = src
+        .get(start..name.end_byte())
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .map(str::to_string);
+    let (span, byte_start, byte_end) = span_of(node);
+    facts.calls.push(Fact {
+        kind: "call",
+        name: callee,
+        text: None,
+        span,
+        byte_start,
+        byte_end,
+        callee: Some(callee_span_of(name)),
+        tcallee: Some(callee_span_of(name)),
+    });
+}
+
 /// Go call candidates. An explicit type argument hides the callee two ways:
 /// `F[int](1, 2)` is a call whose callee is an index expression (name
 /// `F[int]`), and `F[int](1)` parses as a `type_conversion_expression` with no
@@ -995,6 +1032,19 @@ fn visit_node(
             "type_spec" | "type_alias" => push_go_type(facts, node, src),
             "import_declaration" => push_import(facts, node, src),
             "call_expression" | "type_conversion_expression" => push_go_call(facts, node, src),
+            _ => {}
+        },
+        Language::Java => match node.kind() {
+            "class_declaration" | "record_declaration" => push_def(facts, "class", node, src),
+            "interface_declaration" | "annotation_type_declaration" => {
+                push_def(facts, "interface", node, src)
+            }
+            "enum_declaration" => push_def(facts, "type", node, src),
+            "method_declaration"
+            | "constructor_declaration"
+            | "compact_constructor_declaration" => push_def(facts, "method", node, src),
+            "import_declaration" => push_import(facts, node, src),
+            "method_invocation" => push_java_call(facts, node, src),
             _ => {}
         },
         Language::C => match node.kind() {
@@ -1395,10 +1445,56 @@ mod tests {
     }
 
     #[test]
+    fn extracts_java_definitions_imports_and_calls() {
+        let src = "import java.util.Map;
+record P(int x) {}
+enum E { A }
+@interface T {}
+interface I { void f(); }
+class C {
+  C() {}
+  void m() { a.b().c(); d(); new C(); }
+}
+record Q(int y) { Q {} }
+";
+        let facts = parse_source(Language::Java, src.as_bytes());
+        assert_eq!(facts.errors, 0);
+        let defs: Vec<_> = facts
+            .definitions
+            .iter()
+            .map(|d| (d.kind, d.name.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            defs,
+            vec![
+                ("class", "P"),
+                ("type", "E"),
+                ("interface", "T"),
+                ("interface", "I"),
+                ("method", "f"),
+                ("class", "C"),
+                ("method", "C"),
+                ("method", "m"),
+                ("class", "Q"),
+                ("method", "Q"),
+            ]
+        );
+        assert_eq!(facts.imports.len(), 1);
+        let calls: Vec<_> = facts
+            .calls
+            .iter()
+            .map(|c| c.name.as_deref().unwrap_or(""))
+            .collect();
+        // Chained calls keep the receiver as written; `new C()` is no call.
+        assert_eq!(calls, vec!["a.b().c", "a.b", "d"]);
+    }
+
+    #[test]
     fn grammar_versions_match_lockfile_entries() {
         assert_eq!(grammar_version(Language::Python), "python:0.25.0");
         assert_eq!(grammar_version(Language::Cpp), "cpp:0.23.4");
         assert_eq!(grammar_version(Language::Go), "go:0.25.0");
+        assert_eq!(grammar_version(Language::Java), "java:0.23.5");
     }
 
     #[test]
@@ -1528,6 +1624,32 @@ mod tests {
             .map(|&(from, to)| &src[from..to])
             .collect();
         assert_eq!(names, ["outer", "m"]);
+    }
+
+    #[test]
+    fn relationship_proof_attributes_java_calls_to_methods_and_constructors() {
+        let src = concat!(
+            "class A {
+",
+            "  A() { init(); }
+",
+            "  void m() { first(); Runnable r = () -> second(); }
+",
+            "}
+",
+            "record R(int x) { R { check(); } }
+",
+        );
+        let proof = super::relationship_proof(Language::Java, src.as_bytes());
+        let (owner, _) = scope_of(src, &proof, "init()");
+        assert!(owner.unwrap().starts_with("A() {"));
+        let (owner, _) = scope_of(src, &proof, "first()");
+        assert!(owner.unwrap().starts_with("void m()"));
+        // A lambda ends the owner chain, as in the other languages.
+        let (owner, _) = scope_of(src, &proof, "second()");
+        assert_eq!(owner, None);
+        let (owner, _) = scope_of(src, &proof, "check()");
+        assert!(owner.unwrap().starts_with("R {"));
     }
 
     #[test]

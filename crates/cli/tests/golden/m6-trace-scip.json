@@ -4,7 +4,7 @@
   "snapshot": {
     "id": 1,
     "nonce": "<nonce>",
-    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=91ff196d944504f7|nonce=<nonce>"
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=b37488e6136e1ddf|nonce=<nonce>"
   },
   "direction": "trace",
   "anchor": {
@@ -139,7 +139,7 @@
                 "provider": "trace",
                 "version": "1.0",
                 "artifact_id": "<artifact>",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=91ff196d944504f7|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=b37488e6136e1ddf|nonce=<nonce>",
                 "content_identity": "564596e4b180d905"
               }
             ]
@@ -203,7 +203,7 @@
                 "provider": "trace",
                 "version": "1.0",
                 "artifact_id": "<artifact>",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=91ff196d944504f7|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=b37488e6136e1ddf|nonce=<nonce>",
                 "content_identity": "564596e4b180d905"
               }
             ]

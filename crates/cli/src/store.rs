@@ -23,12 +23,14 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// 8: JS/TS/TSX `function*` declarations are extracted as function definitions.
 /// 9: Go files (`.go`) are extracted: functions, methods, struct/interface/type
 /// declarations, imports and calls (syntax facts only).
-pub const PARSER_VERSION: u32 = 9;
+/// 10: Java files (`.java`) are extracted: classes, records, enums, interfaces,
+/// methods, constructors, imports and method invocations (syntax facts only).
+pub const PARSER_VERSION: u32 = 10;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.
 pub fn grammar_versions() -> String {
-    "tree-sitter:0.25.10,python:0.25.0,javascript:0.25.0,typescript:0.23.2,tsx:0.23.2,rust:0.24.2,c:0.24.2,cpp:0.23.4,go:0.25.0"
+    "tree-sitter:0.25.10,python:0.25.0,javascript:0.25.0,typescript:0.23.2,tsx:0.23.2,rust:0.24.2,c:0.24.2,cpp:0.23.4,go:0.25.0,java:0.23.5"
         .to_string()
 }
 
@@ -3224,6 +3226,7 @@ mod tests {
             ("tree-sitter-c", "0.24.2"),
             ("tree-sitter-cpp", "0.23.4"),
             ("tree-sitter-go", "0.25.0"),
+            ("tree-sitter-java", "0.23.5"),
         ]
     }
 

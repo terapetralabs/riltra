@@ -28,7 +28,9 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// 11: calibration round 1: Rust enums, traits, trait method signatures and type
 /// aliases; C/C++ enums and typedefs; C++ `using` aliases; TS/TSX enums, type
 /// aliases and abstract classes are extracted as definitions.
-pub const PARSER_VERSION: u32 = 11;
+/// 12: JS/TS `const f = () => {}` / `const f = function () {}` and class fields
+/// bound to a function are definitions (their calls stay unowned).
+pub const PARSER_VERSION: u32 = 12;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.

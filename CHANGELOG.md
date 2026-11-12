@@ -21,6 +21,24 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   11 (Go and Java were 9 and 10), so existing indexes rebuild.
 - JavaScript and TypeScript `function*` declarations are extracted as function
   definitions.
+- JavaScript and TypeScript names bound to a function expression
+  (`const f = () => {}`, `const f = function () {}`, class fields such as
+  `m = () => {}`) are now definitions. Calls inside them stay without a named
+  owner: an anonymous callable has no persisted named owner. `PARSER_VERSION`
+  is now 12.
+
+### Known behaviour of the new definition kinds
+
+- `callers` anchored on a type, enum or trait now resolves and lists heuristic
+  `POTENTIAL_CALL` edges whose name matches (for example a TypeScript `type Foo`
+  beside a function `Foo`, or a C++ functional cast `V(3)` for `using V = int`).
+  `impact` and `trace` on such an anchor return nothing.
+- A Rust trait method signature and its impl in the same file are two
+  candidates, so calls can be labelled `ambiguous:2` instead of `dynamic`. Edge
+  counts do not change.
+- Existing knowledge bindings made at a bare `struct X *p;` or forward
+  declaration, or inside `typedef struct X {...} X;`, can read as unresolved
+  after the reindex because the definition they anchored on changed or moved.
 
 ## [0.2.0-rc.1] - 2026-11-10
 

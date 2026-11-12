@@ -1,0 +1,1 @@
+{"defs": [["free_fn", 3], ["Base", 4], ["field", 4], ["D", 5], ["f", 5], ["twice", 6], ["Base::f", 7], ["K", 8], ["IntVec", 9], ["main", 10]], "imports": [2], "calls": [["free_fn", 5], ["f", 10], ["twice<int>", 10], ["l", 10]]}

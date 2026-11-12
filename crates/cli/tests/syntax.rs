@@ -232,3 +232,129 @@ fn mmsp_subset_smoke_when_root_provided() {
         assert!(out.contains("\"status\":\"ok\""), "got: {out}");
     }
 }
+
+/// Hand-written syntax fixtures (`tests/fixtures/syntax/<lang>/<name>.<ext>` plus
+/// `<name>.expect.json`) must match `scan` exactly: no missing and no extra
+/// definitions, imports or calls. Same rules as `docs/benchmarks/syntax_bench.py`:
+/// a call matches when its name equals the expected text or ends with it after
+/// `.`, `::` or `->`.
+#[test]
+fn syntax_fixtures_match_hand_written_expectations() {
+    use serde_json::Value;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("syntax");
+    let mut langs: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    langs.sort();
+    assert!(langs.len() >= 8, "expected all language fixture dirs");
+    let mut problems = Vec::new();
+    let mut total = 0;
+    for dir in langs {
+        let lang = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let h = home(&format!("fx-{lang}"));
+        let repo = h.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut expected = Vec::new();
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".expect.json") {
+                let exp: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                let src = std::fs::read_dir(&dir)
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .find(|q| {
+                        let n = q.file_name().unwrap().to_string_lossy().into_owned();
+                        n.starts_with(&format!("{stem}.")) && !n.ends_with(".expect.json")
+                    })
+                    .expect("fixture source beside its expectation");
+                let src_name = src.file_name().unwrap().to_string_lossy().into_owned();
+                std::fs::copy(&src, repo.join(&src_name)).unwrap();
+                expected.push((src_name, exp));
+            }
+        }
+        assert!(!expected.is_empty(), "{lang}: no expectations found");
+        total += expected.len();
+        let (code, _, err) = run(
+            &h,
+            &["init", "--repo", repo.to_str().unwrap(), "--name", "fx"],
+        );
+        assert_eq!(code, 0, "init {lang}: {err}");
+        let (code, out, err) = run(&h, &["scan", "--repo", "fx"]);
+        assert_eq!(code, 0, "scan {lang}: {err}");
+        let scan: Value = serde_json::from_str(&out).unwrap();
+        for (file, exp) in expected {
+            let f = scan["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == file.as_str())
+                .unwrap_or_else(|| panic!("{file} missing from scan"));
+            assert_eq!(f["status"], "ok", "{file} not parsed");
+            let line = |v: &Value| v["span"]["start_line"].as_u64().unwrap();
+            let name = |v: &Value| v["name"].as_str().unwrap_or("").to_string();
+            let mut defs: Vec<(String, u64)> = f["definitions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| (name(d), line(d)))
+                .collect();
+            let mut imports: Vec<u64> = f["imports"].as_array().unwrap().iter().map(line).collect();
+            let mut calls: Vec<(String, u64)> = f["calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| (name(c), line(c)))
+                .collect();
+            for w in exp["defs"].as_array().unwrap() {
+                let want = (w[0].as_str().unwrap().to_string(), w[1].as_u64().unwrap());
+                match defs.iter().position(|d| *d == want) {
+                    Some(i) => {
+                        defs.remove(i);
+                    }
+                    None => problems.push(format!("{file} def FN {want:?}")),
+                }
+            }
+            for w in exp["imports"].as_array().unwrap() {
+                let want = w.as_u64().unwrap();
+                match imports.iter().position(|i| *i == want) {
+                    Some(i) => {
+                        imports.remove(i);
+                    }
+                    None => problems.push(format!("{file} import FN {want}")),
+                }
+            }
+            for w in exp["calls"].as_array().unwrap() {
+                let (text, ln) = (w[0].as_str().unwrap(), w[1].as_u64().unwrap());
+                let hit = calls.iter().position(|(n, l)| {
+                    *l == ln
+                        && (n == text
+                            || [".", "::", "->"]
+                                .iter()
+                                .any(|s| n.ends_with(&format!("{s}{text}"))))
+                });
+                match hit {
+                    Some(i) => {
+                        calls.remove(i);
+                    }
+                    None => problems.push(format!("{file} call FN ({text}, {ln})")),
+                }
+            }
+            problems.extend(defs.iter().map(|d| format!("{file} def FP {d:?}")));
+            problems.extend(imports.iter().map(|i| format!("{file} import FP {i}")));
+            problems.extend(calls.iter().map(|c| format!("{file} call FP {c:?}")));
+        }
+    }
+    assert!(total >= 12, "only {total} fixtures found");
+    assert!(
+        problems.is_empty(),
+        "fixture mismatches:\n{}",
+        problems.join("\n")
+    );
+}

@@ -500,7 +500,10 @@ fn push_import(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
 /// enclosing `type_definition` declarator, span of the whole declaration).
 fn push_struct(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     if node.child_by_field_name("name").is_some() {
-        push_def(facts, "struct", node, src);
+        // A bare `struct X *p;` or forward declaration is a use, not a definition.
+        if node.child_by_field_name("body").is_some() {
+            push_tagged(facts, "struct", node, src);
+        }
         return;
     }
     let Some(parent) = node.parent() else {
@@ -517,6 +520,97 @@ fn push_struct(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     facts.definitions.push(Fact {
         kind: "struct",
         name,
+        text: None,
+        span,
+        byte_start,
+        byte_end,
+        callee: None,
+        tcallee: None,
+    });
+}
+
+/// Whether a Rust item sits directly in an `impl` block.
+fn in_impl(node: tree_sitter::Node) -> bool {
+    node.parent()
+        .and_then(|p| p.parent())
+        .is_some_and(|g| g.kind() == "impl_item")
+}
+
+/// `enum X {...}` and `enum class X {...}` (a named enum with a body; a bare
+/// `enum X v;` is a use, not a definition).
+fn push_enum(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    if node.child_by_field_name("name").is_some() && node.child_by_field_name("body").is_some() {
+        push_tagged(facts, "type", node, src);
+    }
+}
+
+/// A tagged definition with a body (`struct X {...}`, `class X {...}`,
+/// `enum X {...}`). In `typedef struct X {...} X;` the alias repeats the tag:
+/// one fact covers the whole declaration, so the trailing alias name is also
+/// an anchor. A differing alias is its own fact (`push_typedef`).
+fn push_tagged(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, src: &[u8]) {
+    let tag = node
+        .child_by_field_name("name")
+        .and_then(|n| node_text(n, src));
+    let alias_node = node
+        .parent()
+        .filter(|p| p.kind() == "type_definition")
+        .and_then(|p| p.child_by_field_name("declarator").map(|d| (p, d)))
+        .filter(|(_, d)| node_text(*d, src) == tag);
+    let Some((typedef, _)) = alias_node else {
+        push_def(facts, kind, node, src);
+        return;
+    };
+    let (span, byte_start, byte_end) = span_of(typedef);
+    facts.definitions.push(Fact {
+        kind,
+        name: tag.map(|s| s.to_string()),
+        text: None,
+        span,
+        byte_start,
+        byte_end,
+        callee: None,
+        tcallee: None,
+    });
+}
+
+/// `typedef <type> Name;` with a plain name. A struct or enum defined in the
+/// same declaration is already recorded by `push_struct` / `push_enum` (an
+/// anonymous struct under the typedef name), so it is not recorded twice.
+/// shortcut: function-pointer and array typedefs are skipped rather than
+/// guessed, and `typedef int A, B;` records only `A` (the first declarator);
+/// upgrade at the first real project that needs them.
+fn push_typedef(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let alias = node
+        .child_by_field_name("declarator")
+        .and_then(|d| node_text(d, src));
+    // The tag's own fact already covers this declaration when the type has a
+    // body and either is anonymous (a struct, named by the alias) or repeats
+    // the alias as its tag.
+    let defines_itself = node.child_by_field_name("type").is_some_and(|t| {
+        let tag = t
+            .child_by_field_name("name")
+            .and_then(|n| node_text(n, src));
+        t.child_by_field_name("body").is_some()
+            && match t.kind() {
+                "struct_specifier" => tag.is_none() || tag == alias,
+                "class_specifier" | "enum_specifier" => tag.is_some() && tag == alias,
+                _ => false,
+            }
+    });
+    let Some(declarator) = node
+        .child_by_field_name("declarator")
+        .filter(|d| matches!(d.kind(), "identifier" | "type_identifier"))
+    else {
+        return;
+    };
+    if defines_itself {
+        return;
+    }
+    let (span, byte_start, byte_end) = span_of(node);
+    facts.definitions.push(Fact {
+        kind: "type",
+        name: node_text(declarator, src).map(|s| s.to_string()),
         text: None,
         span,
         byte_start,
@@ -1014,14 +1108,20 @@ fn visit_node(
             }
             "method_definition" => push_def(facts, "method", node, src),
             "class_declaration" => push_def(facts, "class", node, src),
+            "abstract_class_declaration" => push_def(facts, "class", node, src),
             "interface_declaration" => push_def(facts, "interface", node, src),
+            "type_alias_declaration" | "enum_declaration" => push_def(facts, "type", node, src),
             "import_statement" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
             _ => {}
         },
         Language::Rust => match node.kind() {
-            "function_item" => push_def(facts, "function", node, src),
+            "function_item" | "function_signature_item" => push_def(facts, "function", node, src),
             "struct_item" => push_def(facts, "struct", node, src),
+            "enum_item" => push_def(facts, "type", node, src),
+            // An associated type in an impl block is not a type alias.
+            "type_item" if !in_impl(node) => push_def(facts, "type", node, src),
+            "trait_item" => push_def(facts, "interface", node, src),
             "use_declaration" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
             _ => {}
@@ -1050,6 +1150,8 @@ fn visit_node(
         Language::C => match node.kind() {
             "function_definition" => push_c_def(facts, "function", node, src),
             "struct_specifier" => push_struct(facts, node, src),
+            "enum_specifier" => push_enum(facts, node, src),
+            "type_definition" => push_typedef(facts, node, src),
             "preproc_include" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
             _ => {}
@@ -1057,7 +1159,15 @@ fn visit_node(
         Language::Cpp => match node.kind() {
             "function_definition" => push_c_def(facts, "function", node, src),
             "struct_specifier" => push_struct(facts, node, src),
-            "class_specifier" => push_def(facts, "class", node, src),
+            "class_specifier"
+                if node.child_by_field_name("body").is_some()
+                    && node.child_by_field_name("name").is_some() =>
+            {
+                push_tagged(facts, "class", node, src)
+            }
+            "enum_specifier" => push_enum(facts, node, src),
+            "type_definition" => push_typedef(facts, node, src),
+            "alias_declaration" => push_def(facts, "type", node, src),
             "field_declaration" => push_field(facts, node, src),
             "preproc_include" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
@@ -1487,6 +1597,127 @@ record Q(int y) { Q {} }
             .collect();
         // Chained calls keep the receiver as written; `new C()` is no call.
         assert_eq!(calls, vec!["a.b().c", "a.b", "d"]);
+    }
+
+    fn def_pairs(lang: Language, src: &str) -> Vec<(&'static str, String)> {
+        parse_source(lang, src.as_bytes())
+            .definitions
+            .iter()
+            .map(|d| (d.kind, d.name.clone().unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn rust_enums_traits_and_type_aliases_are_definitions() {
+        let src = "enum E { A }
+trait T { fn t(&self); fn d(&self) {} }
+type A = u8;
+impl T for E { type Out = u8; fn t(&self) {} }
+";
+        let want = [
+            ("type", "E"),
+            ("interface", "T"),
+            ("function", "t"),
+            ("function", "d"),
+            ("type", "A"),
+            ("function", "t"),
+        ];
+        let got = def_pairs(Language::Rust, src);
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert_eq!((g.0, g.1.as_str()), w);
+        }
+    }
+
+    #[test]
+    fn c_and_cpp_enums_and_typedefs_are_definitions_but_uses_are_not() {
+        let c = "enum Color { RED };
+typedef int myint;
+typedef struct { int y; } Q;
+static struct P *gp;
+enum Color c2;
+typedef struct Node { int v; } Node;
+typedef enum Color2 { G } Color2;
+";
+        let got = def_pairs(Language::C, c);
+        let names: Vec<_> = got.iter().map(|g| (g.0, g.1.as_str())).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("type", "Color"),
+                ("type", "myint"),
+                ("struct", "Q"),
+                ("struct", "Node"),
+                ("type", "Color2"),
+            ]
+        );
+        let cpp = "enum class K { A };
+using V = int;
+class Fwd;
+struct Fs;
+Fs *fp;
+class Real {};
+";
+        let got = def_pairs(Language::Cpp, cpp);
+        let names: Vec<_> = got.iter().map(|g| (g.0, g.1.as_str())).collect();
+        assert_eq!(names, vec![("type", "K"), ("type", "V"), ("class", "Real")]);
+    }
+
+    #[test]
+    fn a_typedef_of_a_tagged_type_is_one_fact_or_two_by_alias_name() {
+        // Same alias as the tag: one fact whose span covers the whole
+        // declaration, so the trailing alias name is an anchor too.
+        let src = "typedef struct Node { int v; } Node;
+";
+        let facts = parse_source(Language::C, src.as_bytes());
+        assert_eq!(facts.definitions.len(), 1);
+        let d = &facts.definitions[0];
+        assert_eq!((d.kind, d.name.as_deref()), ("struct", Some("Node")));
+        assert_eq!((d.span.start_col, d.span.end_col), (1, 37));
+        // Different alias: the tag and the alias are separate definitions.
+        let src = "typedef struct node_s { int v; } node_t;
+";
+        let facts = parse_source(Language::C, src.as_bytes());
+        let mut got: Vec<_> = facts
+            .definitions
+            .iter()
+            .map(|d| (d.kind, d.name.as_deref().unwrap_or("")))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![("struct", "node_s"), ("type", "node_t")]);
+        // Enums and C++ classes follow the same rule.
+        let facts = parse_source(
+            Language::C,
+            b"typedef enum E1 { A } E1;
+",
+        );
+        assert_eq!(facts.definitions.len(), 1);
+        assert_eq!(facts.definitions[0].span.end_col, 26);
+        let facts = parse_source(
+            Language::Cpp,
+            b"typedef class K { } K;
+",
+        );
+        assert_eq!(facts.definitions.len(), 1);
+        assert_eq!(facts.definitions[0].kind, "class");
+        assert_eq!(facts.definitions[0].span.end_col, 23);
+        let facts = parse_source(
+            Language::Cpp,
+            b"typedef class K2 { } H;
+",
+        );
+        assert_eq!(facts.definitions.len(), 2);
+    }
+
+    #[test]
+    fn typescript_enums_type_aliases_and_abstract_classes_are_definitions() {
+        let src = "enum E { X }
+type A = string;
+abstract class AC {}
+";
+        let got = def_pairs(Language::TypeScript, src);
+        let names: Vec<_> = got.iter().map(|g| (g.0, g.1.as_str())).collect();
+        assert_eq!(names, vec![("type", "E"), ("type", "A"), ("class", "AC")]);
     }
 
     #[test]

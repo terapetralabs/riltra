@@ -1,0 +1,1 @@
+{"defs": [["P", 4], ["Color", 5], ["Q", 6], ["myint", 7], ["add", 8], ["main", 9]], "imports": [2, 3], "calls": [["printf", 9], ["add", 9], ["helper", 9]]}

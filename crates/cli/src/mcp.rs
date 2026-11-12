@@ -63,12 +63,19 @@ struct CodeSearchInput {
 struct EdgeInput {
     /// Registered repository name.
     repo: String,
-    /// Repository-relative path of the anchor position.
-    path: String,
-    /// 1-based line of the anchor position.
-    line: u32,
-    /// 1-based column of the anchor position.
-    col: u32,
+    /// Repository-relative path of the anchor position (required unless `target` is given).
+    path: Option<String>,
+    /// 1-based line of the anchor position (required unless `target` is given).
+    line: Option<u32>,
+    /// 1-based column of the anchor position (required unless `target` is given).
+    col: Option<u32>,
+    /// Exact definition name to anchor on instead of a position; an ambiguous or unknown name answers a document, never a guess.
+    target: Option<String>,
+    /// Repository-relative path that the `target` definition must be in.
+    #[serde(rename = "in")]
+    in_path: Option<String>,
+    /// Definition kind the `target` must have (for example `function`, `method`, `class`).
+    kind: Option<String>,
     /// Optional exact SCIP symbol identity to check against the position.
     symbol: Option<String>,
     /// Maximum edges to return (CLI default 50, maximum 1000).
@@ -83,12 +90,19 @@ struct EdgeInput {
 struct TraceInput {
     /// Registered repository name.
     repo: String,
-    /// Repository-relative path of the anchor position.
-    path: String,
-    /// 1-based line of the anchor position.
-    line: u32,
-    /// 1-based column of the anchor position.
-    col: u32,
+    /// Repository-relative path of the anchor position (required unless `target` is given).
+    path: Option<String>,
+    /// 1-based line of the anchor position (required unless `target` is given).
+    line: Option<u32>,
+    /// 1-based column of the anchor position (required unless `target` is given).
+    col: Option<u32>,
+    /// Exact definition name to anchor on instead of a position; an ambiguous or unknown name answers a document, never a guess.
+    target: Option<String>,
+    /// Repository-relative path that the `target` definition must be in.
+    #[serde(rename = "in")]
+    in_path: Option<String>,
+    /// Definition kind the `target` must have (for example `function`, `method`, `class`).
+    kind: Option<String>,
     /// Optional exact SCIP symbol identity to check against the position.
     symbol: Option<String>,
     /// Optional destination anchor `PATH:LINE:COL` (CLI `--to` grammar).
@@ -107,12 +121,19 @@ struct TraceInput {
 struct ImpactInput {
     /// Registered repository name.
     repo: String,
-    /// Repository-relative path of the anchor position.
-    path: String,
-    /// 1-based line of the anchor position.
-    line: u32,
-    /// 1-based column of the anchor position.
-    col: u32,
+    /// Repository-relative path of the anchor position (required unless `target` is given).
+    path: Option<String>,
+    /// 1-based line of the anchor position (required unless `target` is given).
+    line: Option<u32>,
+    /// 1-based column of the anchor position (required unless `target` is given).
+    col: Option<u32>,
+    /// Exact definition name to anchor on instead of a position; an ambiguous or unknown name answers a document, never a guess.
+    target: Option<String>,
+    /// Repository-relative path that the `target` definition must be in.
+    #[serde(rename = "in")]
+    in_path: Option<String>,
+    /// Definition kind the `target` must have (for example `function`, `method`, `class`).
+    kind: Option<String>,
     /// Optional exact SCIP symbol identity to check against the position.
     symbol: Option<String>,
     /// Maximum traversal depth (CLI default 3, 1-6). Impact takes no
@@ -130,12 +151,19 @@ struct ImpactInput {
 struct ContextInput {
     /// Registered repository name.
     repo: String,
-    /// Repository-relative path of the anchor position.
-    path: String,
-    /// 1-based line of the anchor position.
-    line: u32,
-    /// 1-based byte column of the anchor position.
-    col: u32,
+    /// Repository-relative path of the anchor position (required unless `target` is given).
+    path: Option<String>,
+    /// 1-based line of the anchor position (required unless `target` is given).
+    line: Option<u32>,
+    /// 1-based byte column of the anchor position (required unless `target` is given).
+    col: Option<u32>,
+    /// Exact definition name to anchor on instead of a position; an ambiguous or unknown name answers a document, never a guess.
+    target: Option<String>,
+    /// Repository-relative path that the `target` definition must be in.
+    #[serde(rename = "in")]
+    in_path: Option<String>,
+    /// Definition kind the `target` must have (for example `function`, `method`, `class`).
+    kind: Option<String>,
     /// Optional exact SCIP symbol identity to check against the position.
     symbol: Option<String>,
     /// Optional literal query over active knowledge records.
@@ -330,7 +358,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callers",
-        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. When to call: before changing a function or method, to see what appears to call it.",
+        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: before changing a function or method, to see what appears to call it.",
         annotations(
             title = "Find callers",
             read_only_hint = true,
@@ -347,7 +375,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callees",
-        description = "Symbols the anchor definition calls (same document as CLI `callees`). When to call: to see what a function or method appears to depend on.",
+        description = "Symbols the anchor definition calls (same document as CLI `callees`). A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to see what a function or method appears to depend on.",
         annotations(
             title = "Find callees",
             read_only_hint = true,
@@ -364,7 +392,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_trace",
-        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution. When to call: to check whether and how one symbol might reach another.",
+        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to check whether and how one symbol might reach another.",
         annotations(
             title = "Trace call paths",
             read_only_hint = true,
@@ -378,7 +406,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_impact",
-        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe.",
+        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe.",
         annotations(
             title = "Estimate impact",
             read_only_hint = true,
@@ -395,7 +423,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_context",
-        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. When to call: to inspect code impact and its recorded rationale together.",
+        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to inspect code impact and its recorded rationale together.",
         annotations(
             title = "Read graph context",
             read_only_hint = true,
@@ -960,6 +988,76 @@ fn parse_destination(to: &str) -> Result<(&str, u32, u32), CallToolResult> {
     Ok((path, line, col))
 }
 
+/// A graph or context call's anchor: a validated position, or a name that
+/// resolves once the repository is known.
+enum Anchor<'a> {
+    At { path: &'a str, line: u32, col: u32 },
+    Name(index::TargetQuery<'a>),
+}
+
+/// The `path/line/col` form or the `target` form of one call, never both.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
+fn anchor_of<'a>(
+    path: Option<&'a str>,
+    line: Option<u32>,
+    col: Option<u32>,
+    target: Option<&'a str>,
+    in_path: Option<&'a str>,
+    kind: Option<&'a str>,
+) -> Result<Anchor<'a>, CallToolResult> {
+    match (target, path, line, col) {
+        (Some(target), None, None, None)
+            if !target.trim().is_empty()
+                && in_path.is_none_or(|p| !p.trim().is_empty())
+                && kind.is_none_or(|k| !k.trim().is_empty()) =>
+        {
+            Ok(Anchor::Name(index::TargetQuery {
+                target,
+                in_path,
+                kind,
+            }))
+        }
+        (None, Some(path), Some(line), Some(col)) if in_path.is_none() && kind.is_none() => {
+            graph_anchor(line, col)?;
+            Ok(Anchor::At { path, line, col })
+        }
+        _ => Err(tool_error(
+            "invalid_input",
+            "give either path, line and col, or a non-empty target (with optional in and kind)",
+        )),
+    }
+}
+
+/// Resolve a `target` name on the stored snapshot with the CLI's store-state
+/// classes. Read-only: a missing index answers the `no-index` document.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
+fn resolve_name(
+    home: &Path,
+    repo: &str,
+    query: &index::TargetQuery,
+) -> Result<index::TargetResolution, CallToolResult> {
+    match store::open_read(&store::db_path(home, repo)) {
+        store::IndexRead::Missing => Ok(index::TargetResolution::Doc(
+            index::no_index_target_document(repo, query),
+        )),
+        store::IndexRead::Outdated(version) => Err(tool_error(
+            "schema_outdated",
+            &outdated_message(repo, version),
+        )),
+        store::IndexRead::Ahead(version) => Err(tool_error(
+            "schema_ahead",
+            &format!(
+                "database schema v{version} is newer than supported v{}",
+                store::SCHEMA_VERSION
+            ),
+        )),
+        store::IndexRead::Error(message) => Err(tool_error("store_error", &message)),
+        store::IndexRead::Ready(conn) => {
+            index::resolve_target(&conn, repo, query).map_err(|e| tool_error("store_error", &e))
+        }
+    }
+}
+
 /// Missing index or snapshot: the CLI's no-snapshot text, classified
 /// `no_index` (the read path never creates or migrates storage).
 fn missing_index() -> CallToolResult {
@@ -1043,9 +1141,7 @@ enum Prepared<'a> {
 #[allow(clippy::too_many_arguments)]
 fn graph_doc(
     repo: &str,
-    path: &str,
-    line: u32,
-    col: u32,
+    anchor: Anchor,
     symbol: Option<&str>,
     to: Option<&str>,
     depth: Option<usize>,
@@ -1053,9 +1149,6 @@ fn graph_doc(
     offset: Option<usize>,
     mode: GraphMode,
 ) -> CallToolResult {
-    if let Err(e) = graph_anchor(line, col) {
-        return e;
-    }
     let is_graph = matches!(mode, GraphMode::Trace | GraphMode::Impact);
     let depth = if is_graph {
         match graph_depth(depth) {
@@ -1077,11 +1170,26 @@ fn graph_doc(
         Ok(v) => v,
         Err(e) => return e,
     };
+    // A name answers before the query runs, so the destination is checked here
+    // exactly as the position form checks it (same refusal and class).
+    if let (Anchor::Name(_), Some((dest, _, _))) = (&anchor, destination) {
+        if let Err(e) = crate::semantic::validate_doc_path(&canon, dest) {
+            return tool_error("invalid_input", &e);
+        }
+    }
+    let (path, line, col) = match anchor {
+        Anchor::At { path, line, col } => (path.to_string(), line, col),
+        Anchor::Name(query) => match resolve_name(&home, repo, &query) {
+            Ok(index::TargetResolution::One { path, line, col }) => (path, line, col),
+            Ok(index::TargetResolution::Doc(answer)) => return doc(&answer),
+            Err(e) => return e,
+        },
+    };
     let prepared = match mode {
         GraphMode::Callers | GraphMode::Callees => {
             let request = index::EdgeRequest {
                 anchor: index::SpanQuery {
-                    rel: path,
+                    rel: &path,
                     line1: line,
                     col1: col,
                     refs: false,
@@ -1103,7 +1211,7 @@ fn graph_doc(
         GraphMode::Trace | GraphMode::Impact => {
             let request = index::TraceRequest {
                 source: index::SpanQuery {
-                    rel: path,
+                    rel: &path,
                     line1: line,
                     col1: col,
                     refs: false,
@@ -1167,11 +1275,20 @@ fn graph_doc(
 }
 
 fn edge_doc(input: &EdgeInput, mode: GraphMode) -> CallToolResult {
-    graph_doc(
-        &input.repo,
-        &input.path,
+    let anchor = match anchor_of(
+        input.path.as_deref(),
         input.line,
         input.col,
+        input.target.as_deref(),
+        input.in_path.as_deref(),
+        input.kind.as_deref(),
+    ) {
+        Ok(anchor) => anchor,
+        Err(e) => return e,
+    };
+    graph_doc(
+        &input.repo,
+        anchor,
         input.symbol.as_deref(),
         None,
         None,
@@ -1182,11 +1299,20 @@ fn edge_doc(input: &EdgeInput, mode: GraphMode) -> CallToolResult {
 }
 
 fn trace_doc(input: &TraceInput) -> CallToolResult {
-    graph_doc(
-        &input.repo,
-        &input.path,
+    let anchor = match anchor_of(
+        input.path.as_deref(),
         input.line,
         input.col,
+        input.target.as_deref(),
+        input.in_path.as_deref(),
+        input.kind.as_deref(),
+    ) {
+        Ok(anchor) => anchor,
+        Err(e) => return e,
+    };
+    graph_doc(
+        &input.repo,
+        anchor,
         input.symbol.as_deref(),
         input.to.as_deref(),
         input.depth,
@@ -1197,11 +1323,20 @@ fn trace_doc(input: &TraceInput) -> CallToolResult {
 }
 
 fn impact_doc(input: &ImpactInput) -> CallToolResult {
-    graph_doc(
-        &input.repo,
-        &input.path,
+    let anchor = match anchor_of(
+        input.path.as_deref(),
         input.line,
         input.col,
+        input.target.as_deref(),
+        input.in_path.as_deref(),
+        input.kind.as_deref(),
+    ) {
+        Ok(anchor) => anchor,
+        Err(e) => return e,
+    };
+    graph_doc(
+        &input.repo,
+        anchor,
         input.symbol.as_deref(),
         None,
         input.depth,
@@ -1212,9 +1347,17 @@ fn impact_doc(input: &ImpactInput) -> CallToolResult {
 }
 
 fn context_doc(input: &ContextInput) -> CallToolResult {
-    if let Err(e) = graph_anchor(input.line, input.col) {
-        return e;
-    }
+    let anchor = match anchor_of(
+        input.path.as_deref(),
+        input.line,
+        input.col,
+        input.target.as_deref(),
+        input.in_path.as_deref(),
+        input.kind.as_deref(),
+    ) {
+        Ok(anchor) => anchor,
+        Err(e) => return e,
+    };
     let depth = match graph_depth(input.depth) {
         Ok(depth) => depth,
         Err(e) => return e,
@@ -1241,15 +1384,32 @@ fn context_doc(input: &ContextInput) -> CallToolResult {
         Ok(value) => value,
         Err(e) => return e,
     };
+    if let Err(e) = context::validate_options(
+        depth,
+        limit,
+        max_bytes,
+        input.query.as_deref(),
+        input.semantic.unwrap_or(false),
+    ) {
+        return context_query_error(e);
+    }
+    let (path, line, col) = match anchor {
+        Anchor::At { path, line, col } => (path.to_string(), line, col),
+        Anchor::Name(query) => match resolve_name(&home, &input.repo, &query) {
+            Ok(index::TargetResolution::One { path, line, col }) => (path, line, col),
+            Ok(index::TargetResolution::Doc(answer)) => return doc(&answer),
+            Err(e) => return e,
+        },
+    };
     let entry = registry::RepoEntry {
         name: input.repo.clone(),
         root: canon.to_string_lossy().into_owned(),
         added_unix: 0,
     };
     let request = context::ContextRequest {
-        path: &input.path,
-        line: input.line,
-        col: input.col,
+        path: &path,
+        line,
+        col,
         symbol: input.symbol.as_deref(),
         query: input.query.as_deref(),
         semantic: input.semantic.unwrap_or(false),

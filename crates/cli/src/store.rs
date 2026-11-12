@@ -2240,6 +2240,78 @@ pub fn search_symbols(
     Ok((total, hits))
 }
 
+/// Definitions whose name equals `name` exactly, optionally narrowed by path
+/// and kind (SQL filters), ordered by (path, byte_start). Returns the total
+/// and at most `limit` rows.
+pub fn exact_symbols(
+    conn: &Connection,
+    snapshot_id: i64,
+    name: &str,
+    path: Option<&str>,
+    kind: Option<&str>,
+    limit: usize,
+) -> Result<(usize, Vec<Hit>), String> {
+    definitions_matching(conn, snapshot_id, "s.name = ?2", name, path, kind, limit)
+}
+
+/// Definitions whose name contains `term` as a true substring: SQLite LIKE with
+/// `%`, `_` and `\` escaped (ASCII case-insensitive), optionally narrowed by
+/// path and kind in SQL. Returns the exact total and at most `limit` rows.
+pub fn substring_symbols(
+    conn: &Connection,
+    snapshot_id: i64,
+    term: &str,
+    path: Option<&str>,
+    kind: Option<&str>,
+    limit: usize,
+) -> Result<(usize, Vec<Hit>), String> {
+    if term.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    definitions_matching(
+        conn,
+        snapshot_id,
+        "s.name LIKE ?2 ESCAPE '\\'",
+        &like_pattern(term),
+        path,
+        kind,
+        limit,
+    )
+}
+
+/// Definitions matching `condition` (a predicate on `s.name` bound to `?2`),
+/// ordered by (path, byte_start): the exact total and at most `limit` rows.
+fn definitions_matching(
+    conn: &Connection,
+    snapshot_id: i64,
+    condition: &str,
+    pattern: &str,
+    path: Option<&str>,
+    kind: Option<&str>,
+    limit: usize,
+) -> Result<(usize, Vec<Hit>), String> {
+    let filter = format!("FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.snapshot_id = ?1 AND {condition} AND (?3 IS NULL OR f.path = ?3) AND (?4 IS NULL OR s.kind = ?4)");
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) {filter}"),
+            params![snapshot_id, pattern, path, kind],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut statement = conn
+        .prepare(&format!("SELECT f.path, s.kind, s.name, s.start_line, s.start_col, s.end_line, s.end_col, s.byte_start, s.byte_end, s.provider, s.grammar, s.language {filter} ORDER BY f.path, s.byte_start LIMIT ?5"))
+        .map_err(|e| e.to_string())?;
+    let hits = statement
+        .query_map(
+            params![snapshot_id, pattern, path, kind, limit as i64],
+            |row| hit_from_row(snapshot_id, row),
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok((total as usize, hits))
+}
+
 /// One stored name occurrence joined with its file path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OccurrenceHit {

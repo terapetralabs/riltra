@@ -3071,6 +3071,215 @@ pub fn evaluate_snapshot(
     (status.to_string(), reasons)
 }
 
+/// Candidates a non-resolved by-name answer lists; `truncated` past this.
+pub const TARGET_CANDIDATE_LIMIT: usize = 20;
+
+/// A by-name anchor: a definition name, optionally narrowed by path and kind.
+pub struct TargetQuery<'a> {
+    pub target: &'a str,
+    pub in_path: Option<&'a str>,
+    pub kind: Option<&'a str>,
+}
+
+/// The position a by-name anchor resolves to, or the document that answers instead.
+pub enum TargetResolution {
+    One { path: String, line: u32, col: u32 },
+    Doc(String),
+}
+
+/// Resolve a by-name anchor on the latest snapshot of an open read connection.
+/// A unique exact name resolves; a substring match never does, so it is always
+/// `ambiguous` (or `not-found`), even when it is the only hit.
+pub fn resolve_target(
+    conn: &rusqlite::Connection,
+    repo: &str,
+    query: &TargetQuery,
+) -> Result<TargetResolution, String> {
+    let snapshot = match store::latest_snapshot(conn) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return Ok(TargetResolution::Doc(no_index_target_document(repo, query))),
+        Err(_) => return Err("index database unreadable; rebuild with `index`".to_string()),
+    };
+    let (exact_total, exact) = store::exact_symbols(
+        conn,
+        snapshot.id,
+        query.target,
+        query.in_path,
+        query.kind,
+        TARGET_CANDIDATE_LIMIT,
+    )?;
+    if exact_total == 1 {
+        let Some(hit) = exact.first() else {
+            return Err("index database unreadable; rebuild with `index`".to_string());
+        };
+        return Ok(TargetResolution::One {
+            path: hit.path.clone(),
+            line: hit.start_line,
+            col: hit.start_col,
+        });
+    }
+    if exact_total > 1 {
+        let doc = target_document(
+            repo,
+            query,
+            "ambiguous",
+            exact_total,
+            true,
+            &exact,
+            "exact-name",
+        );
+        return Ok(TargetResolution::Doc(doc));
+    }
+    // Substring matches never resolve. Only true substrings of the name count
+    // (LIKE, not FTS token prefixes), and the filters run in SQL, so `total` is
+    // every match that passes them and `not-found` means no match at all.
+    let (total, matches) = store::substring_symbols(
+        conn,
+        snapshot.id,
+        query.target,
+        query.in_path,
+        query.kind,
+        TARGET_CANDIDATE_LIMIT,
+    )?;
+    if total == 0 {
+        return Ok(TargetResolution::Doc(target_document(
+            repo,
+            query,
+            "not-found",
+            0,
+            true,
+            &[],
+            "name-contains",
+        )));
+    }
+    let doc = target_document(
+        repo,
+        query,
+        "ambiguous",
+        total,
+        true,
+        &matches,
+        "name-contains",
+    );
+    Ok(TargetResolution::Doc(doc))
+}
+
+/// The answer when no code index exists yet: nothing to resolve, nothing created.
+pub fn no_index_target_document(repo: &str, query: &TargetQuery) -> String {
+    target_document(repo, query, "no-index", 0, true, &[], "name-contains")
+}
+
+/// The non-resolved by-name document; key order is fixed for CLI and MCP alike.
+fn target_document(
+    repo: &str,
+    query: &TargetQuery,
+    status: &str,
+    total: usize,
+    total_exact: bool,
+    hits: &[store::Hit],
+    reason: &str,
+) -> String {
+    let candidates: Vec<String> = hits
+        .iter()
+        .take(TARGET_CANDIDATE_LIMIT)
+        .map(|hit| {
+            format!(
+                "{{\"path\":\"{}\",\"line\":{},\"col\":{},\"kind\":\"{}\",\"reason\":\"{reason}\"}}",
+                crate::json::escape(&hit.path),
+                hit.start_line,
+                hit.start_col,
+                crate::json::escape(&hit.kind)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"schema_version\":1,\"repo\":\"{}\",\"status\":\"{status}\",\"target\":\"{}\",\"in\":{},\"kind\":{},\"total\":{total},\"total_exact\":{total_exact},\"candidates\":[{}],\"truncated\":{}}}",
+        crate::json::escape(repo),
+        crate::json::escape(query.target),
+        json_optional(query.in_path),
+        json_optional(query.kind),
+        candidates.join(","),
+        total > TARGET_CANDIDATE_LIMIT
+    )
+}
+
+fn json_optional(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", crate::json::escape(value)),
+        None => "null".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::{no_index_target_document, target_document, TargetQuery, TARGET_CANDIDATE_LIMIT};
+    use crate::store::Hit;
+
+    fn hit(path: &str, kind: &str, line: u32) -> Hit {
+        Hit {
+            snapshot_id: 1,
+            path: path.to_string(),
+            kind: kind.to_string(),
+            name: Some("save".to_string()),
+            start_line: line,
+            start_col: 1,
+            end_line: line,
+            end_col: 9,
+            byte_start: 0,
+            byte_end: 8,
+            provider: "syntax".to_string(),
+            grammar: "g".to_string(),
+            language: "python".to_string(),
+        }
+    }
+
+    #[test]
+    fn document_keeps_key_order_and_escapes_the_target_and_paths() {
+        let query = TargetQuery {
+            target: "a\"b\\c",
+            in_path: Some("d\"e.py"),
+            kind: None,
+        };
+        let hits = [hit("d\"e.py", "method", 3)];
+        let doc = target_document("r", &query, "ambiguous", 2, false, &hits, "exact-name");
+        assert_eq!(
+            doc,
+            "{\"schema_version\":1,\"repo\":\"r\",\"status\":\"ambiguous\",\"target\":\"a\\\"b\\\\c\",\"in\":\"d\\\"e.py\",\"kind\":null,\"total\":2,\"total_exact\":false,\"candidates\":[{\"path\":\"d\\\"e.py\",\"line\":3,\"col\":1,\"kind\":\"method\",\"reason\":\"exact-name\"}],\"truncated\":false}"
+        );
+    }
+
+    #[test]
+    fn document_is_truncated_past_the_candidate_limit() {
+        let query = TargetQuery {
+            target: "save",
+            in_path: None,
+            kind: None,
+        };
+        let hits: Vec<Hit> = (1..=21).map(|line| hit("a.py", "function", line)).collect();
+        let doc = target_document("r", &query, "ambiguous", 21, true, &hits, "exact-name");
+        assert!(doc.contains("\"total\":21,\"total_exact\":true"), "{doc}");
+        assert!(doc.ends_with("\"truncated\":true}"), "{doc}");
+        assert_eq!(
+            doc.matches("\"reason\"").count(),
+            TARGET_CANDIDATE_LIMIT,
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn no_index_document_is_empty_and_exact() {
+        let query = TargetQuery {
+            target: "save",
+            in_path: None,
+            kind: Some("method"),
+        };
+        assert_eq!(
+            no_index_target_document("r", &query),
+            "{\"schema_version\":1,\"repo\":\"r\",\"status\":\"no-index\",\"target\":\"save\",\"in\":null,\"kind\":\"method\",\"total\":0,\"total_exact\":true,\"candidates\":[],\"truncated\":false}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

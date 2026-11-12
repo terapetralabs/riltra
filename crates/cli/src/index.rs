@@ -415,6 +415,7 @@ fn ingest_file(
     match &item.action {
         PlanAction::Parse(lang) => {
             let facts = parse_source(*lang, &bytes);
+            crate::progress::tick();
             let file_id = store::insert_file(
                 conn,
                 snapshot_id,

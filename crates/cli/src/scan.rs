@@ -189,6 +189,7 @@ fn render_planned(
         }
         PlanAction::Parse(lang) => {
             let facts = parse_source(*lang, &bytes);
+            crate::progress::tick();
             counters.processed += 1;
             counters.definitions += facts.definitions.len();
             counters.imports += facts.imports.len();

@@ -9,6 +9,9 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 - Syntax facts for Go (`.go`) and Java (`.java`): definitions, imports and
   call candidates. Syntax-only; calls stay `POTENTIAL_CALL` and no SCIP or
   language-server evidence is claimed.
+- Opt-in `--progress` flag for `scan` and `index`: prints live progress lines
+  (files parsed and elapsed seconds) to stderr only. The JSON on stdout is
+  unchanged, and the flag is off by default.
 
 ### Fixed
 

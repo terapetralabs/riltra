@@ -398,3 +398,71 @@ fn status_ignores_symlinked_ignore_outside_root() {
     assert_eq!(code, 0);
     assert!(out.contains("\"ignore\":{\"file\":false,\"rules\":0}"));
 }
+
+/// Index JSON carries wall-clock `timings_ms`, which differ between runs.
+/// Removes that object so the rest of the output can be compared byte-for-byte.
+fn without_timings(json: &str) -> String {
+    let key = "\"timings_ms\":";
+    let start = json.find(key).expect("index output has timings_ms");
+    let object_len = json[start..].find('}').expect("timings_ms object closes") + 1;
+    format!("{}{}", &json[..start], &json[start + object_len..])
+}
+
+fn progress_repo(h: &Path) -> PathBuf {
+    let target = mkrepo(h, "tiny");
+    std::fs::write(target.join("a.py"), "def f():\n    return 1\n").unwrap();
+    target
+}
+
+#[test]
+fn scan_progress_keeps_stdout_and_writes_stderr_only_with_flag() {
+    let h = home("scan-progress");
+    let target = progress_repo(&h);
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    let (code, plain_out, plain_err) = run(&h, &["scan", "--repo", "tiny"]);
+    assert_eq!(code, 0);
+    let (code, prog_out, prog_err) = run(&h, &["scan", "--repo", "tiny", "--progress"]);
+    assert_eq!(code, 0);
+    assert_eq!(plain_out, prog_out);
+    assert!(plain_err.is_empty(), "stderr without flag: {plain_err:?}");
+    assert!(
+        prog_err
+            .lines()
+            .any(|l| l.starts_with("progress: scan: done")),
+        "stderr with flag: {prog_err:?}"
+    );
+}
+
+#[test]
+fn index_progress_keeps_stdout_and_writes_stderr_only_with_flag() {
+    // Each run gets its own RILTRA_HOME so both builds are full rebuilds.
+    let plain_home = home("index-plain");
+    let prog_home = home("index-progress");
+    let target = progress_repo(&plain_home);
+    let target_arg = target.to_str().unwrap();
+    assert_eq!(run(&plain_home, &["init", "--repo", target_arg]).0, 0);
+    assert_eq!(run(&prog_home, &["init", "--repo", target_arg]).0, 0);
+    let (code, plain_out, plain_err) = run(&plain_home, &["index", "--repo", "tiny"]);
+    assert_eq!(code, 0);
+    let (code, prog_out, prog_err) = run(&prog_home, &["index", "--repo", "tiny", "--progress"]);
+    assert_eq!(code, 0);
+    assert!(plain_out.contains("\"timings_ms\":"));
+    assert_eq!(without_timings(&plain_out), without_timings(&prog_out));
+    assert!(plain_err.is_empty(), "stderr without flag: {plain_err:?}");
+    assert!(
+        prog_err
+            .lines()
+            .any(|l| l.starts_with("progress: index: done")),
+        "stderr with flag: {prog_err:?}"
+    );
+}
+
+#[test]
+fn index_status_rejects_progress_flag() {
+    let h = home("status-progress");
+    let target = progress_repo(&h);
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    let (code, out, _) = run(&h, &["index", "status", "--repo", "tiny", "--progress"]);
+    assert_eq!(code, 2);
+    assert!(out.is_empty());
+}

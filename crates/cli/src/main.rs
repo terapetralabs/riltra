@@ -28,6 +28,7 @@ mod knowledge_vector;
 mod lsp;
 mod mcp;
 mod paths;
+mod progress;
 mod registry;
 mod response;
 mod scan;
@@ -53,7 +54,7 @@ pub(crate) const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name> [--full]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
@@ -559,6 +560,21 @@ fn cmd_doctor(repo: Option<&str>, out: &mut String, err: &mut String) -> i32 {
     }
 }
 
+/// Runs one scan or index command, printing progress lines to stderr when
+/// `enabled` (the `--progress` flag). The final `done` line is written after
+/// the work on every return path, including error exits.
+fn with_progress(label: &str, enabled: bool, work: impl FnOnce() -> i32) -> i32 {
+    if enabled {
+        progress::enable();
+        progress::start(label);
+    }
+    let code = work();
+    if enabled {
+        progress::finish();
+    }
+    code
+}
+
 fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
     match cmd {
         Command::Help => {
@@ -581,8 +597,15 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             repo,
             paths,
             symbol,
-        } => cmd_scan(&repo, &paths, symbol.as_deref(), out, err),
-        Command::Index { repo, full } => cmd_index(&repo, full, out, err),
+            progress,
+        } => with_progress("scan", progress, || {
+            cmd_scan(&repo, &paths, symbol.as_deref(), out, err)
+        }),
+        Command::Index {
+            repo,
+            full,
+            progress,
+        } => with_progress("index", progress, || cmd_index(&repo, full, out, err)),
         Command::IndexStatus { repo } => cmd_index_status(&repo, out, err),
         Command::Search {
             repo,

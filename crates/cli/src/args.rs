@@ -22,10 +22,12 @@ pub enum Command {
         repo: String,
         paths: Vec<String>,
         symbol: Option<String>,
+        progress: bool,
     },
     Index {
         repo: String,
         full: bool,
+        progress: bool,
     },
     IndexStatus {
         repo: String,
@@ -301,9 +303,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut repo = None;
             let mut paths = Vec::new();
             let mut symbol = None;
+            let mut progress = false;
             let mut i = 1;
             while i < args.len() {
-                if let Some(v) = take_value(args, &mut i, "--repo") {
+                if args[i] == "--progress" {
+                    progress = true;
+                    i += 1;
+                } else if let Some(v) = take_value(args, &mut i, "--repo") {
                     repo = Some(v);
                 } else if let Some(v) = take_value(args, &mut i, "--path") {
                     paths.push(v);
@@ -318,6 +324,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     repo,
                     paths,
                     symbol,
+                    progress,
                 }),
                 None => Err(crate::usage()),
             }
@@ -329,9 +336,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             };
             let mut repo = None;
             let mut full = false;
+            let mut progress = false;
             while i < args.len() {
                 if args[i] == "--full" && !subcommand {
                     full = true;
+                    i += 1;
+                } else if args[i] == "--progress" && !subcommand {
+                    progress = true;
                     i += 1;
                 } else if let Some(v) = take_value(args, &mut i, "--repo") {
                     repo = Some(v);
@@ -341,7 +352,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             match repo {
                 Some(repo) if subcommand => Ok(Command::IndexStatus { repo }),
-                Some(repo) => Ok(Command::Index { repo, full }),
+                Some(repo) => Ok(Command::Index {
+                    repo,
+                    full,
+                    progress,
+                }),
                 None => Err(crate::usage()),
             }
         }
@@ -1129,14 +1144,41 @@ mod tests {
     fn parses_index_full_flag() {
         assert!(matches!(
             p(&["index", "--repo", "r", "--full"]),
-            Ok(Command::Index { repo, full: true }) if repo == "r"
+            Ok(Command::Index { repo, full: true, .. }) if repo == "r"
         ));
         assert!(matches!(
             p(&["index", "--repo", "r"]),
-            Ok(Command::Index { repo, full: false }) if repo == "r"
+            Ok(Command::Index { repo, full: false, .. }) if repo == "r"
         ));
         assert!(p(&["index", "--repo", "r", "--full=x"]).is_err());
         assert!(p(&["index", "--repo", "r", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_progress_flag_for_scan_and_index() {
+        assert!(matches!(
+            p(&["scan", "--repo", "r", "--progress"]),
+            Ok(Command::Scan { progress: true, .. })
+        ));
+        assert!(matches!(
+            p(&["scan", "--repo", "r"]),
+            Ok(Command::Scan {
+                progress: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            p(&["index", "--repo", "r", "--progress"]),
+            Ok(Command::Index { progress: true, .. })
+        ));
+        assert!(matches!(
+            p(&["index", "--repo", "r"]),
+            Ok(Command::Index {
+                progress: false,
+                ..
+            })
+        ));
+        assert!(p(&["index", "status", "--repo", "r", "--progress"]).is_err());
     }
 
     #[test]

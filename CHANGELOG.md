@@ -27,6 +27,15 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   owner: an anonymous callable has no persisted named owner. `PARSER_VERSION`
   is now 12.
 
+- C and C++ `class EXPORT Name {...}` and `struct EXPORT Name {...}` (an unknown
+  macro between the keyword and the name) are now class and struct definitions;
+  they were reported as a function named after the class. `PARSER_VERSION` is
+  now 13. Member functions with bodies of such a class are recorded as plain
+  functions; data members and member declarations are not recorded. A macro
+  with arguments (`class API(1) Name`) still fails to parse and is still
+  reported as a function. A macro that hides a parameter list can be read as a
+  struct.
+
 ### Known behaviour of the new definition kinds
 
 - `callers` anchored on a type, enum or trait now resolves and lists heuristic

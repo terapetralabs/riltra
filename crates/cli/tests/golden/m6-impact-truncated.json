@@ -5,7 +5,7 @@
   "snapshot": {
     "id": 1,
     "nonce": "<nonce>",
-    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>"
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
   },
   "direction": "impact",
   "anchor": {
@@ -125,7 +125,7 @@
                 "provider": "trace",
                 "version": "1.0",
                 "artifact_id": "<artifact>",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=6506261ec125dc79|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>",
                 "content_identity": "564596e4b180d905"
               }
             ]

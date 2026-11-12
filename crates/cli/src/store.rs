@@ -30,7 +30,9 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// aliases and abstract classes are extracted as definitions.
 /// 12: JS/TS `const f = () => {}` / `const f = function () {}` and class fields
 /// bound to a function are definitions (their calls stay unowned).
-pub const PARSER_VERSION: u32 = 12;
+/// 13: C/C++ `class EXPORT Name {...}` (a macro between the keyword and the name)
+/// is a class or struct definition, not a function.
+pub const PARSER_VERSION: u32 = 13;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.

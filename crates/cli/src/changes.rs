@@ -467,6 +467,10 @@ fn worktree(root: &Path, rel: &str) -> Read {
 
 /// `worktree` with its own size cap.
 fn worktree_capped(root: &Path, rel: &str, cap: u64) -> Read {
+    // Containment first: a link out of the root is refused before any metadata of the file is read.
+    if semantic::confined_path(root, rel).is_err() {
+        return Read::Unreadable;
+    }
     match std::fs::symlink_metadata(root.join(rel)) {
         Ok(meta) if !meta.file_type().is_file() => Read::Unreadable,
         Ok(meta) if meta.len() > cap => Read::TooLarge,
@@ -616,34 +620,44 @@ fn same_content(ctx: &Ctx, path: &str) -> Result<bool, Failure> {
     }
     let before = ctx.run_ok(&words(&["cat-file", "blob", spec.as_str()]))?;
     match worktree_capped(ctx.root, path, IDENTITY_MAX_BYTES) {
-        Read::Bytes(after) => Ok(no_index(ctx, &before, &after)?.0),
+        Read::Bytes(after) => Ok(no_index(ctx, &before, &after, true)?.0),
         Read::TooLarge | Read::Unreadable => Ok(false),
     }
 }
 
 /// `git diff --no-index` on two byte strings, run in a fresh temporary directory outside
-/// the repository. Returns whether the two are identical (exit 0 with no output) and the
-/// text of the diff. The child gets the repository's effective `core.autocrlf` and
-/// `core.safecrlf=false` as command-scope overrides, so the machine's system and global
-/// settings do not decide the comparison.
+/// the repository. With `quiet` git only reports whether the files differ (exit 0 when
+/// identical, 1 when not) and no diff text is produced, so the identity decision holds
+/// nothing large in memory. Without `quiet` the text of the diff comes back as well.
+/// Returns whether the two are identical and the text. The child gets the repository's
+/// effective `core.autocrlf` and `core.safecrlf=false` as command-scope overrides, so the
+/// machine's system and global settings do not decide the comparison.
 // shortcut: the duplicate-path identity and hunks use only the repository's core.autocrlf; .gitattributes text and eol rules are not applied here, upgrade when a repository depends on them
-fn no_index(ctx: &Ctx, before: &[u8], after: &[u8]) -> Result<(bool, String), Failure> {
+fn no_index(
+    ctx: &Ctx,
+    before: &[u8],
+    after: &[u8],
+    quiet: bool,
+) -> Result<(bool, String), Failure> {
     let dir = TempDir::create()?;
     std::fs::write(dir.path().join("old"), before)
         .map_err(|e| Failure::new(3, format!("cannot write a temp file: {e}")))?;
     std::fs::write(dir.path().join("new"), after)
         .map_err(|e| Failure::new(3, format!("cannot write a temp file: {e}")))?;
-    let args = words(&[
-        "diff",
-        "--no-index",
-        "-U0",
+    let mut args = words(&["diff", "--no-index"]);
+    if quiet {
+        args.push("--quiet".to_string());
+    } else {
+        args.push("-U0".to_string());
+    }
+    args.extend(words(&[
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
         "--",
         "old",
         "new",
-    ]);
+    ]));
     let run = ctx
         .git
         .run_in_with(
@@ -662,14 +676,51 @@ fn no_index(ctx: &Ctx, before: &[u8], after: &[u8]) -> Result<(bool, String), Fa
             format!("git diff --no-index failed: {}", run.stderr),
         ));
     }
-    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    let text = if quiet {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&run.stdout).into_owned()
+    };
     Ok((run.code == Some(0) && text.is_empty(), text))
 }
 
-/// Hunks between two byte strings, from `no_index`.
+/// Hunks between two byte strings, from `no_index` (the full diff text).
 fn no_index_hunks(ctx: &Ctx, before: &[u8], after: &[u8]) -> Result<Vec<Hunk>, Failure> {
-    let (_, text) = no_index(ctx, before, after)?;
+    let (_, text) = no_index(ctx, before, after, false)?;
     Ok(text.lines().filter_map(parse_hunk).collect())
+}
+
+/// Index paths with a directory component that leads out of the root (a link or junction on
+/// the way). Git follows such a link only in part, so whether git lists such a path depends on
+/// the outside content. Those paths are therefore listed as modified (and refused as
+/// unreadable) whether or not git lists them.
+fn escaped_index_paths(ctx: &Ctx) -> Result<BTreeSet<String>, Failure> {
+    let out = ctx.run_ok(&words(&["ls-files", "-z"]))?;
+    let mut inside: BTreeMap<String, bool> = BTreeMap::new();
+    let mut escaped = BTreeSet::new();
+    for name in out.split(|b| *b == 0).filter(|f| !f.is_empty()) {
+        let path = String::from_utf8_lossy(name).into_owned();
+        let parts: Vec<&str> = path.split('/').collect();
+        let mut prefix = String::new();
+        let mut leaves = false;
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            let ok = *inside
+                .entry(prefix.clone())
+                .or_insert_with(|| semantic::confined_path(ctx.root, &prefix).is_ok());
+            if !ok {
+                leaves = true;
+                break;
+            }
+        }
+        if leaves {
+            escaped.insert(path);
+        }
+    }
+    Ok(escaped)
 }
 
 /// The paths whose `filter` attribute names a driver (not `unspecified`, not `unset`).
@@ -959,6 +1010,9 @@ fn analyse(ctx: &Ctx, change: &Change) -> Result<FileOut, Failure> {
         Some("filter-managed")
     } else if change.unmerged {
         Some("unmerged")
+    } else if semantic::confined_path(ctx.root, &change.path).is_err() {
+        // Git follows a link in a directory of the path only in part: nothing under it is read or diffed.
+        Some("unreadable")
     } else {
         None
     };
@@ -1268,6 +1322,26 @@ pub fn document(home: &Path, repo: &str, root: &Path, req: &Request) -> Result<S
         }
     }
     let mut changes = reconcile(&ctx, changes, untracked_list)?;
+    let escaped = if req.scope == Scope::Staged {
+        BTreeSet::new()
+    } else {
+        escaped_index_paths(&ctx)?
+    };
+    for change in changes.iter_mut() {
+        if escaped.contains(&change.path) {
+            change.kind = Kind::Modified;
+        }
+    }
+    let listed: BTreeSet<String> = changes.iter().map(|c| c.path.clone()).collect();
+    for path in escaped.difference(&listed) {
+        changes.push(new_change(
+            Kind::Modified,
+            (path.clone(), true),
+            None,
+            false,
+            NO_FLAGS,
+        ));
+    }
     changes.sort_by(|a, b| a.path.cmp(&b.path));
     let total = changes.len();
     let truncated = total > req.limit;

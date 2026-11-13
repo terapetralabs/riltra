@@ -140,15 +140,22 @@ are listed. The attribute is read with `git check-attr`, which runs nothing. A c
 filter that is not idempotent can make git's own status disagree with this listing,
 while index freshness reads stale.
 
+Links in the repository. A path whose directories lead out of the repository through a
+link or junction is never read or diffed. It is listed as unsupported with reason
+`unreadable`, and it is listed as modified even when git itself would not list it, so the
+listing does not depend on the outside content. Index freshness (git status) is global,
+and git itself may follow such a directory: a registered repository whose tracked
+directories are links is not supported.
+
 The duplicate-path case (a path staged as deleted and re-created untracked, in the
 all and compare scopes) is reconciled before the count and the limit. The two sides
 are compared first with `git diff --no-index` on two temporary files written in a
-fresh directory under the system temporary directory. Exit 0 with no output means
+fresh directory under the system temporary directory. Exit 0 means
 identical, which gives no entry. The worktree side is read only through the same
 confined reader as every other worktree read: a link or junction that leads out of
 the repository is refused, so the entry is listed as unreadable whatever the outside
 file holds. Files over 64 MiB are not proven identical: their entry is listed
-(too-large) rather than omitted. Otherwise the hunks come from the same child. The
+(too-large) rather than omitted. Otherwise the hunks come from the same child, and only for files within the scan cap (1 MiB): a larger differing file is listed as too-large without hunks. The
 temporary directory is removed when the command ends; the removal is best effort, so
 a stray directory can be left behind if removal fails. The temporary files and the
 index's SQLite sidecar files are the only writes this feature makes. A read-only

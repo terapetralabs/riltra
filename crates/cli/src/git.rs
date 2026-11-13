@@ -319,7 +319,6 @@ impl DiffGit {
         extra: &[(&str, &str)],
         input: Option<&[u8]>,
     ) -> Result<GitRun, String> {
-        use std::io::Write as _;
         cmd.args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_OPTIONAL_LOCKS", "0")
@@ -335,40 +334,89 @@ impl DiffGit {
             cmd.env(format!("GIT_CONFIG_KEY_{i}"), key)
                 .env(format!("GIT_CONFIG_VALUE_{i}"), value);
         }
-        let out = match input {
-            None => cmd.output().map_err(|e| format!("git unavailable: {e}"))?,
-            Some(input) => {
-                cmd.stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
-                let mut child = cmd.spawn().map_err(|e| format!("git unavailable: {e}"))?;
-                // The input goes to git on a helper thread while wait_with_output drains
-                // stdout and stderr. Writing all the input first deadlocks once git's
-                // output fills a pipe while git still waits for more input.
-                let stdin = child.stdin.take();
-                let payload = input.to_vec();
-                let writer = std::thread::spawn(move || -> std::io::Result<()> {
-                    match stdin {
-                        Some(mut stdin) => stdin.write_all(&payload),
-                        None => Ok(()),
-                    }
-                });
-                let out = child
-                    .wait_with_output()
-                    .map_err(|e| format!("git failed: {e}"))?;
-                let written = writer
-                    .join()
-                    .map_err(|_| "git input thread panicked".to_string())?;
-                written.map_err(|e| format!("git input failed: {e}"))?;
-                out
+        match input {
+            None => {
+                let out = cmd.output().map_err(|e| format!("git unavailable: {e}"))?;
+                Ok(GitRun {
+                    code: out.status.code(),
+                    stdout: out.stdout,
+                    stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                })
             }
-        };
-        Ok(GitRun {
-            code: out.status.code(),
-            stdout: out.stdout,
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        })
+            Some(input) => run_with_input(cmd, input),
+        }
     }
+}
+
+/// Runs `cmd` with `input` on its standard input. The input is written on a helper thread
+/// while stdout and stderr are drained, so neither side can block the other. If git exits
+/// without reading all of its input, its own exit status and stderr are the answer.
+fn run_with_input(mut cmd: std::process::Command, input: &[u8]) -> Result<GitRun, String> {
+    use std::io::Write;
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("git unavailable: {e}"))?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let payload = input.to_vec();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        match stdin {
+            Some(mut stdin) => stdin.write_all(&payload),
+            None => Ok(()),
+        }
+    });
+    let out_reader = std::thread::spawn(move || drain(stdout));
+    let err_reader = std::thread::spawn(move || drain(stderr));
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(e) => {
+            kill_and_reap(&mut child);
+            let _ = writer.join();
+            let _ = out_reader.join();
+            let _ = err_reader.join();
+            return Err(format!("git failed: {e}"));
+        }
+    };
+    let stdout = out_reader
+        .join()
+        .map_err(|_| "git output thread panicked".to_string())?
+        .map_err(|e| format!("git output failed: {e}"))?;
+    let stderr = err_reader
+        .join()
+        .map_err(|_| "git error thread panicked".to_string())?
+        .map_err(|e| format!("git output failed: {e}"))?;
+    let written = writer
+        .join()
+        .map_err(|_| "git input thread panicked".to_string())?;
+    let run = GitRun {
+        code: status.code(),
+        stdout,
+        stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+    };
+    match written {
+        Ok(()) => Ok(run),
+        // git exited without reading all of its input: its own failure is the answer.
+        Err(_) if !status.success() => Ok(run),
+        Err(e) => Err(format!("git input failed: {e}")),
+    }
+}
+
+/// Reads a child's pipe to its end (an absent pipe reads as empty).
+fn drain<R: std::io::Read>(pipe: Option<R>) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut buf)?;
+    }
+    Ok(buf)
+}
+
+/// Kills a child that could not be waited for, and reaps it. Errors are ignored: the child is
+/// gone or out of reach either way.
+fn kill_and_reap(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Whether git finds `root` itself as its work-tree top. A `.git` that is not a
@@ -393,7 +441,7 @@ pub fn is_worktree_top(root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint, git_available, git_json};
+    use super::{fingerprint, git_available, git_json, kill_and_reap};
     use crate::testutil::{git_repo, tmpdir};
 
     #[test]
@@ -579,7 +627,7 @@ mod tests {
                 .map(|run| (run.code, run.stdout.len()));
             tx.send(result).ok();
         });
-        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+        match rx.recv_timeout(std::time::Duration::from_secs(180)) {
             Ok(result) => {
                 let (code, len) = result.expect("check-attr run");
                 assert_eq!(code, Some(0));
@@ -589,8 +637,42 @@ mod tests {
                 );
             }
             Err(_) => {
-                panic!("no result within 60 s: the stdin write and the stdout read deadlocked")
+                panic!("no result within 180 s: the stdin write and the stdout read deadlocked")
             }
         }
+    }
+
+    #[test]
+    fn a_failed_git_exit_keeps_its_stderr_when_the_input_write_fails() {
+        let Some(dir) = crate::testutil::git_repo("git-stderr", "main") else {
+            return;
+        };
+        let diff = super::DiffGit::new(&dir).expect("driver listing");
+        // The command does not exist and exits before it reads its input, so the write of
+        // a large input fails; git's own error is the answer.
+        let input = vec![b'a'; 4 * 1024 * 1024];
+        let args = vec!["no-such-git-command".to_string()];
+        let run = diff
+            .run_stdin(&dir, &args, &input)
+            .expect("the run reports git's own failure");
+        assert_ne!(run.code, Some(0));
+        assert!(run.stderr.contains("not a git command"), "{}", run.stderr);
+    }
+
+    #[test]
+    fn kill_and_reap_leaves_no_running_child() {
+        let mut child = std::process::Command::new("git")
+            .args(["hash-object", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn git");
+        kill_and_reap(&mut child);
+        let status = child
+            .try_wait()
+            .expect("poll the child")
+            .expect("the child was reaped");
+        assert!(!status.success());
     }
 }

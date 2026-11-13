@@ -274,6 +274,44 @@ pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
 /// and the semantic freshness check. Missing/unreadable/oversize/escaping
 /// files are errors with reasons; callers map them to skip or Stale.
 pub fn confined_read(root: &Path, rel: &str, cap_bytes: u64) -> Result<Vec<u8>, String> {
+    let (candidate, was_missing) = confined_path(root, rel)?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("repository root unavailable: {e}"))?;
+    // Containment is decided above, before any metadata of the file is read.
+    let meta = candidate
+        .metadata()
+        .map_err(|e| format!("cannot stat '{rel}': {e}"))?;
+    // A path that appeared after the missing check must still resolve inside.
+    if was_missing && !crate::paths::contains(&canonical_root, &candidate) {
+        return Err(format!("document path escapes repository: '{rel}'"));
+    }
+    let len = meta.len();
+    if len > cap_bytes {
+        return Err(format!("'{rel}' too large ({len} bytes > {cap_bytes})"));
+    }
+    // take(cap+1): the metadata check races file growth; the bounded read
+    // cannot be outrun.
+    let mut file =
+        std::fs::File::open(&candidate).map_err(|e| format!("cannot read '{rel}': {e}"))?;
+    let mut bytes = Vec::new();
+    use std::io::Read as _;
+    file.by_ref()
+        .take(cap_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read '{rel}': {e}"))?;
+    if bytes.len() as u64 > cap_bytes {
+        return Err(format!("'{rel}' too large (> {cap_bytes} bytes)"));
+    }
+    Ok(bytes)
+}
+
+/// The containment decision alone: `rel` must resolve inside the canonical `root`,
+/// with no link, junction or reparse point on the way out. It reads neither the
+/// file's content nor its size, so the answer cannot depend on either. Returns the
+/// candidate path and whether its leaf was missing (accepted through its ancestors;
+/// `confined_read` re-checks it once the file exists).
+pub fn confined_path(root: &Path, rel: &str) -> Result<(std::path::PathBuf, bool), String> {
     let mut candidate = root.to_path_buf();
     for part in rel.split('/') {
         if part.is_empty() || part == "." || part == ".." {
@@ -313,31 +351,7 @@ pub fn confined_read(root: &Path, rel: &str, cap_bytes: u64) -> Result<Vec<u8>, 
     if !contained {
         return Err(format!("document path escapes repository: '{rel}'"));
     }
-    let meta = candidate
-        .metadata()
-        .map_err(|e| format!("cannot stat '{rel}': {e}"))?;
-    // A path that appeared after the missing check must still resolve inside.
-    if was_missing && !crate::paths::contains(&canonical_root, &candidate) {
-        return Err(format!("document path escapes repository: '{rel}'"));
-    }
-    let len = meta.len();
-    if len > cap_bytes {
-        return Err(format!("'{rel}' too large ({len} bytes > {cap_bytes})"));
-    }
-    // take(cap+1): the metadata check races file growth; the bounded read
-    // cannot be outrun.
-    let mut file =
-        std::fs::File::open(&candidate).map_err(|e| format!("cannot read '{rel}': {e}"))?;
-    let mut bytes = Vec::new();
-    use std::io::Read as _;
-    file.by_ref()
-        .take(cap_bytes + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read '{rel}': {e}"))?;
-    if bytes.len() as u64 > cap_bytes {
-        return Err(format!("'{rel}' too large (> {cap_bytes} bytes)"));
-    }
-    Ok(bytes)
+    Ok((candidate, was_missing))
 }
 
 /// Single shared document-path validator for both providers. Enforces the

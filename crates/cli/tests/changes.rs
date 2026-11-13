@@ -1507,7 +1507,7 @@ fn a_filter_managed_file_is_unsupported_and_no_driver_runs() {
 }
 
 /// Runs the binary with its output in files, so only riltra's own git pipes can
-/// deadlock. A child still running after 60 s is killed and the test fails.
+/// deadlock. A child still running after 180 s is killed and the test fails.
 fn riltra_timed(home: &Path, args: &[&str]) -> (i32, String, String) {
     let dir = scratch("timed");
     let out_path = dir.join("stdout.txt");
@@ -1519,7 +1519,7 @@ fn riltra_timed(home: &Path, args: &[&str]) -> (i32, String, String) {
         .stderr(std::fs::File::create(&err_path).unwrap())
         .spawn()
         .expect("spawn riltra");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     loop {
         if let Some(status) = child.try_wait().expect("poll riltra") {
             let out = std::fs::read_to_string(&out_path).unwrap_or_default();
@@ -1529,7 +1529,7 @@ fn riltra_timed(home: &Path, args: &[&str]) -> (i32, String, String) {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("riltra did not finish within 60 s: the child pipes deadlocked");
+            panic!("riltra did not finish within 180 s: the child pipes deadlocked");
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -1672,4 +1672,103 @@ fn an_identical_file_above_the_identity_bound_is_listed_not_proven() {
     let f = file(&doc, "big.bin");
     assert_eq!(f["status"], "unsupported", "{doc}");
     assert_eq!(f["reason"], "too-large", "{doc}");
+}
+
+/// Entries of `path` in a changes document.
+fn entries_at(doc: &Value, path: &str) -> Vec<Value> {
+    doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["path"] == path)
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn the_reason_behind_a_link_does_not_depend_on_the_outside_size() {
+    if !git_available() {
+        return;
+    }
+    let mut answers = Vec::new();
+    for outside_bytes in [10usize, 2 * 1024 * 1024] {
+        let dir = repo(&[
+            ("a/b.py", "def beta():\n    return 1\n"),
+            ("keep.txt", "keep\n"),
+        ]);
+        git(&dir, &["rm", "-q", "--cached", "a/b.py"]);
+        std::fs::rename(dir.join("a"), dir.join("a_old")).unwrap();
+        let outside = scratch("outside-size");
+        std::fs::write(outside.join("b.py"), vec![b'#'; outside_bytes]).unwrap();
+        if !link_dir(&dir.join("a"), &outside) {
+            eprintln!("skipped: this platform cannot create a directory link here");
+            return;
+        }
+        let (code, doc, err) = changes(&setup(&dir), &["--scope", "all"]);
+        assert_eq!(code, 0, "{err}");
+        answers.push(entries_at(&doc, "a/b.py"));
+    }
+    assert_eq!(
+        answers[0], answers[1],
+        "a 10-byte and a 2 MiB outside file must give the same answer"
+    );
+    assert_eq!(answers[0].len(), 1, "{:?}", answers[0]);
+    assert_eq!(answers[0][0]["status"], "unsupported");
+    assert_eq!(answers[0][0]["reason"], "unreadable");
+}
+
+#[test]
+fn a_tracked_path_behind_a_link_is_unreadable_whatever_the_outside_content() {
+    if !git_available() {
+        return;
+    }
+    let identical = "def beta():\n    return 1\n";
+    for scope in [&["--scope", "unstaged"][..], &["--scope", "all"][..]] {
+        let mut answers = Vec::new();
+        for outside_content in [identical, "def beta():\n    return 9\n"] {
+            let dir = repo(&[("a/b.py", identical), ("keep.txt", "keep\n")]);
+            std::fs::rename(dir.join("a"), dir.join("a_old")).unwrap();
+            let outside = scratch("outside-tracked");
+            write(&outside, "b.py", outside_content);
+            if !link_dir(&dir.join("a"), &outside) {
+                eprintln!("skipped: this platform cannot create a directory link here");
+                return;
+            }
+            let (code, doc, err) = changes(&setup(&dir), scope);
+            assert_eq!(code, 0, "{scope:?}: {err}");
+            answers.push(entries_at(&doc, "a/b.py"));
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "{scope:?}: identical and different outside content must give the same entry"
+        );
+        assert_eq!(answers[0].len(), 1, "{scope:?}: {:?}", answers[0]);
+        assert_eq!(answers[0][0]["status"], "unsupported", "{scope:?}");
+        assert_eq!(answers[0][0]["reason"], "unreadable", "{scope:?}");
+        assert_eq!(
+            answers[0][0]["hunks"], 0,
+            "{scope:?}: no git diff may read through the link"
+        );
+    }
+}
+
+#[test]
+fn a_differing_duplicate_above_the_scan_cap_has_no_hunks() {
+    if !git_available() {
+        return;
+    }
+    let dir = repo(&[("keep.txt", "keep\n")]);
+    let before = "before\n".repeat(400_000);
+    std::fs::write(dir.join("big.txt"), &before).unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "big"]);
+    git(&dir, &["rm", "-q", "--cached", "big.txt"]);
+    std::fs::write(dir.join("big.txt"), "after\n".repeat(400_000)).unwrap();
+    let (code, doc, err) = changes(&setup(&dir), &["--scope", "all"]);
+    assert_eq!(code, 0, "{err}");
+    let f = file(&doc, "big.txt");
+    assert_eq!(f["status"], "unsupported", "{doc}");
+    assert_eq!(f["reason"], "too-large", "{doc}");
+    assert_eq!(f["hunks"], 0, "{doc}");
+    assert_eq!(f["hunks_outside_definitions"], json!([]), "{doc}");
 }

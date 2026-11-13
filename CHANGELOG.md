@@ -21,6 +21,12 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   and methods are `function`; Go, JavaScript, TypeScript and Java methods are
   `method`).
 
+- `impact --summary` and `--include-tests` (MCP: `summary`, `include_tests`) add a counted summary of the impact traversal: totals by distance and basis, distinct dependent files, and a labelled test-path heuristic. The summary describes this traversal, `--limit` also caps candidates per node (so a small limit can lower the counts; `candidates_complete: false` says so), and `paths` is never filtered. `summary.verdict` and `summary.unresolved` are copied from the document, so they can differ with `--offset` or `--limit` (the counts do not depend on `--offset`); `candidates_complete` is also false after a path or edge budget stop, not only after the candidate cap.
+
+### Changed
+
+- `impact` now lists name-matched callers as paths with `basis: "candidate-name"`, without following them further. Each impact path gains a `basis` key (`proven`, `unproven` or `candidate-name`), and the answer gains a `candidates` object. The verdict is unchanged and stays `UNKNOWN` while a candidate path exists; `completeness` counts and `visits.edges` include the candidate paths and rows.
+
 ### Fixed
 
 - Syntax calibration against hand-written fixtures: Rust enums, traits, trait

@@ -280,7 +280,7 @@ pub(crate) fn trace_query_json(o: &index::TraceQueryOut) -> String {
         let edges=p.edges.iter().map(edge_hit_json).collect::<Vec<_>>().join(",");
         let distance = p.edges.len();
         let scope = if distance == 1 { "direct" } else { "transitive" };
-        let impact = if o.impact_verdict.is_some() { format!("\"distance\":{distance},\"scope\":\"{scope}\",") } else { String::new() };
+        let impact = if o.impact_verdict.is_some() { format!("\"distance\":{distance},\"scope\":\"{scope}\",\"basis\":\"{}\",", p.basis) } else { String::new() };
         format!("{{{impact}\"edges\":[{edges}],\"cycle\":{},\"truncated\":{},\"verification\":{},\"unresolved\":{}}}",p.cycle,p.truncated,edge_string(&p.verification),edge_strings(&p.unresolved))
     }).collect::<Vec<_>>().join(",");
     let bridges = o
@@ -304,7 +304,30 @@ pub(crate) fn trace_query_json(o: &index::TraceQueryOut) -> String {
         .map(|(k, v)| format!("{}:{v}", edge_string(k)))
         .collect::<Vec<_>>()
         .join(",");
-    format!("{{{verdict}\"schema_version\":1,\"repo\":{},\"snapshot\":{{\"id\":{},\"nonce\":{},\"revision\":{}}},\"direction\":\"{direction}\",\"anchor\":{},\"destination\":{},\"freshness\":{{\"status\":{},\"reasons\":{}}},\"verification\":{},\"completeness\":{{\"status\":{},\"covered\":{},\"total\":{},\"total_exact\":{},\"denominator\":{{{denominator}}},\"unresolved\":{}}},\"paths\":[{paths}],\"bridges\":[{bridges}],\"visits\":{{\"nodes\":{},\"edges\":{}}},\"budgets\":{{\"depth\":{},\"max_depth\":6,\"nodes\":500,\"edges\":3000,\"paths\":1000,\"mappings\":500,\"time_ms\":2000}},\"limits\":{{\"limit\":{},\"offset\":{},\"next_offset\":{}}},\"cycle\":{},\"truncated\":{},\"unresolved\":{},\"disclaimer\":\"{disclaimer}\"}}",
+    let candidates = o
+        .candidates
+        .as_ref()
+        .map(|c| {
+            let total = c.total.map_or("null".to_string(), |t| t.to_string());
+            format!("\"candidates\":{{\"scope\":\"anchor-and-proven-nodes\",\"followed\":false,\"nodes\":{},\"returned\":{},\"complete\":{},\"total\":{total},\"per_node_limit\":{}}},", c.nodes, c.returned, c.complete, c.per_node_limit)
+        })
+        .unwrap_or_default();
+    let summary = o
+        .summary
+        .as_ref()
+        .map(|s| {
+            let by_depth = s
+                .by_depth
+                .iter()
+                .map(|(d, n, p, u, c)| {
+                    format!("{{\"distance\":{d},\"paths\":{n},\"proven\":{p},\"unproven\":{u},\"candidate-name\":{c}}}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("\"summary\":{{\"scope\":\"traversal-paths\",\"classifier\":\"path-heuristic\",\"include_tests\":{},\"total\":{},\"by_depth\":[{by_depth}],\"distinct_files\":{},\"tests\":{{\"count\":{},\"included\":{}}},\"candidates_complete\":{},\"verdict\":{},\"unresolved\":{}}},", s.include_tests, s.total, s.distinct_files, s.tests, s.include_tests, s.candidates_complete, edge_string(s.verdict), edge_strings(&s.unresolved))
+        })
+        .unwrap_or_default();
+    format!("{{{verdict}\"schema_version\":1,\"repo\":{},\"snapshot\":{{\"id\":{},\"nonce\":{},\"revision\":{}}},\"direction\":\"{direction}\",\"anchor\":{},\"destination\":{},\"freshness\":{{\"status\":{},\"reasons\":{}}},\"verification\":{},\"completeness\":{{\"status\":{},\"covered\":{},\"total\":{},\"total_exact\":{},\"denominator\":{{{denominator}}},\"unresolved\":{}}},\"paths\":[{paths}],\"bridges\":[{bridges}],\"visits\":{{\"nodes\":{},\"edges\":{}}},\"budgets\":{{\"depth\":{},\"max_depth\":6,\"nodes\":500,\"edges\":3000,\"paths\":1000,\"mappings\":500,\"time_ms\":2000}},\"limits\":{{\"limit\":{},\"offset\":{},\"next_offset\":{}}},\"cycle\":{},\"truncated\":{},\"unresolved\":{},{candidates}{summary}\"disclaimer\":\"{disclaimer}\"}}",
         edge_string(&o.repo),o.snapshot.id,edge_string(&o.snapshot.nonce),edge_string(&o.revision),trace_anchor_json(&o.anchor),o.destination.as_ref().map(trace_anchor_json).unwrap_or_else(||"null".to_string()),edge_string(&o.freshness),edge_strings(&o.freshness_reasons),edge_string(&o.verification),edge_string(&o.completeness.status),o.completeness.covered,o.completeness.total,o.total_exact,edge_strings(&o.completeness.unresolved),o.nodes,o.edge_visits,o.depth,o.limit,o.offset,edge_number(o.next_offset),o.cycle,o.truncated,edge_strings(&o.unresolved))
 }
 
@@ -1537,6 +1560,8 @@ mod tests {
         let snap = snapshot();
         let out = index::TraceQueryOut {
             impact_verdict: None,
+            candidates: None,
+            summary: None,
             repo: "demo".to_string(),
             snapshot: snap,
             revision: "r1".to_string(),
@@ -1553,6 +1578,7 @@ mod tests {
                 truncated: false,
                 unresolved: Vec::new(),
                 verification: "Unverified".to_string(),
+                basis: "",
             }],
             bridges: Vec::new(),
             nodes: 1,
@@ -1576,6 +1602,8 @@ mod tests {
         let snap = snapshot();
         let out = index::TraceQueryOut {
             impact_verdict: Some("plausible-impact"),
+            candidates: None,
+            summary: None,
             repo: "demo".to_string(),
             snapshot: snap,
             revision: "r1".to_string(),
@@ -1592,6 +1620,7 @@ mod tests {
                 truncated: true,
                 unresolved: vec!["u".to_string()],
                 verification: "Unverified".to_string(),
+                basis: "proven",
             }],
             bridges: Vec::new(),
             nodes: 2,
@@ -1606,7 +1635,7 @@ mod tests {
         };
         assert_eq!(
             trace_query_json(&out),
-            r#"{"verdict":"plausible-impact","schema_version":1,"repo":"demo","snapshot":{"id":7,"nonce":"n","revision":"r1"},"direction":"impact","anchor":{"kind":"syntax-fallback","path":"lib.py","line":1,"col":6,"symbol_uri":null,"import_id":null,"precision":"Heuristic","anchor_uncertainty":"syntax-only anchor: no semantic identity at this position","span":[0,26],"endpoint":{"type":"syntax_def","import_id":null,"symbol_uri":null,"doc":null,"path":"lib.py","byte_start":0,"byte_end":26}},"destination":{"kind":"syntax-fallback","path":"lib.py","line":1,"col":6,"symbol_uri":null,"import_id":null,"precision":"Heuristic","anchor_uncertainty":"syntax-only anchor: no semantic identity at this position","span":[0,26],"endpoint":{"type":"syntax_def","import_id":null,"symbol_uri":null,"doc":null,"path":"lib.py","byte_start":0,"byte_end":26}},"freshness":{"status":"fresh","reasons":[]},"verification":"Unverified","completeness":{"status":"partial","covered":1,"total":1,"total_exact":false,"denominator":{"observed_edges":1},"unresolved":["no-overlap"]},"paths":[{"distance":0,"scope":"transitive","edges":[],"cycle":true,"truncated":true,"verification":"Unverified","unresolved":["u"]}],"bridges":[],"visits":{"nodes":2,"edges":2},"budgets":{"depth":2,"max_depth":6,"nodes":500,"edges":3000,"paths":1000,"mappings":500,"time_ms":2000},"limits":{"limit":1,"offset":4,"next_offset":5},"cycle":true,"truncated":true,"unresolved":["u"],"disclaimer":"plausible-impact-not-execution"}"#
+            r#"{"verdict":"plausible-impact","schema_version":1,"repo":"demo","snapshot":{"id":7,"nonce":"n","revision":"r1"},"direction":"impact","anchor":{"kind":"syntax-fallback","path":"lib.py","line":1,"col":6,"symbol_uri":null,"import_id":null,"precision":"Heuristic","anchor_uncertainty":"syntax-only anchor: no semantic identity at this position","span":[0,26],"endpoint":{"type":"syntax_def","import_id":null,"symbol_uri":null,"doc":null,"path":"lib.py","byte_start":0,"byte_end":26}},"destination":{"kind":"syntax-fallback","path":"lib.py","line":1,"col":6,"symbol_uri":null,"import_id":null,"precision":"Heuristic","anchor_uncertainty":"syntax-only anchor: no semantic identity at this position","span":[0,26],"endpoint":{"type":"syntax_def","import_id":null,"symbol_uri":null,"doc":null,"path":"lib.py","byte_start":0,"byte_end":26}},"freshness":{"status":"fresh","reasons":[]},"verification":"Unverified","completeness":{"status":"partial","covered":1,"total":1,"total_exact":false,"denominator":{"observed_edges":1},"unresolved":["no-overlap"]},"paths":[{"distance":0,"scope":"transitive","basis":"proven","edges":[],"cycle":true,"truncated":true,"verification":"Unverified","unresolved":["u"]}],"bridges":[],"visits":{"nodes":2,"edges":2},"budgets":{"depth":2,"max_depth":6,"nodes":500,"edges":3000,"paths":1000,"mappings":500,"time_ms":2000},"limits":{"limit":1,"offset":4,"next_offset":5},"cycle":true,"truncated":true,"unresolved":["u"],"disclaimer":"plausible-impact-not-execution"}"#
         );
     }
 

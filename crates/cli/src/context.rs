@@ -188,6 +188,7 @@ fn query_conn_inner(
         Instant::now(),
         pinned,
         true,
+        false,
     )?;
     let mut graph = context_nodes(&trace);
     let omitted_nodes = graph.len().saturating_sub(request.limit);
@@ -575,6 +576,8 @@ fn trace_request<'a>(request: &ContextRequest<'a>) -> index::TraceRequest<'a> {
         },
         symbol: request.symbol,
         destination: None,
+        summary: false,
+        include_tests: false,
         depth: request.depth,
         // Keep the original impact coverage independent from the output node
         // limit; the existing traversal still enforces its 1000-path budget.

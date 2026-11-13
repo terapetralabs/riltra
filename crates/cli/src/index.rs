@@ -1734,12 +1734,37 @@ struct CallerCandidates {
     aliases: Vec<(String, String)>,
 }
 
+/// The snapshot-wide inputs every caller seed reads. Loaded once per query.
+pub(crate) struct CallerInputs {
+    id_map: BTreeMap<String, (i64, String)>,
+    imports: Vec<store::ImportRow>,
+}
+
+impl CallerInputs {
+    pub(crate) fn load(tx: &rusqlite::Connection, snapshot_id: i64) -> Result<Self, String> {
+        Ok(Self {
+            id_map: store::file_id_map(tx, snapshot_id)?,
+            imports: store::imports_for(tx, snapshot_id)?,
+        })
+    }
+}
+
 fn caller_candidate_paths(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
     anchor: &EdgeAnchor,
 ) -> Result<CallerCandidates, String> {
-    let id_map = store::file_id_map(tx, snapshot_id)?;
+    let inputs = CallerInputs::load(tx, snapshot_id)?;
+    caller_candidate_paths_with(tx, snapshot_id, &inputs, anchor)
+}
+
+fn caller_candidate_paths_with(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    inputs: &CallerInputs,
+    anchor: &EdgeAnchor,
+) -> Result<CallerCandidates, String> {
+    let id_map = &inputs.id_map;
     let paths: BTreeMap<i64, &str> = id_map
         .iter()
         .map(|(p, (id, _))| (*id, p.as_str()))
@@ -1758,9 +1783,9 @@ fn caller_candidate_paths(
     }
     // Local SCIP identities never gain cross-document name candidates.
     if anchor.doc.is_none() {
-        let imports = store::imports_for(tx, snapshot_id)?;
+        let imports = &inputs.imports;
         if let Some(target_name) = anchor.candidate_display.as_deref().map(called_name) {
-            for import in &imports {
+            for import in imports {
                 if import.language == "python" {
                     if let (Some(path), Some(text)) =
                         (paths.get(&import.file_id), import.text.as_deref())
@@ -1779,13 +1804,13 @@ fn caller_candidate_paths(
             tx,
             snapshot_id,
             anchor,
-            &imports,
-            &id_map,
+            imports,
+            id_map,
             &paths,
         )?);
         for target in &targets {
             linked.insert(target.clone());
-            link_includers(&mut linked, &imports, &id_map, &paths, target);
+            link_includers(&mut linked, imports, id_map, &paths, target);
         }
     }
     Ok(CallerCandidates {
@@ -2412,6 +2437,105 @@ pub struct TraceRequest<'a> {
     pub depth: usize,
     pub limit: usize,
     pub offset: usize,
+    /// Impact only: add the `summary` object (over all traversal paths).
+    pub summary: bool,
+    /// With `summary`: count test-file paths too.
+    pub include_tests: bool,
+}
+
+/// Labelled path heuristic, not a language analysis: a directory named `test`,
+/// `tests`, `__tests__` or `spec`, or a file name matching a listed test pattern.
+/// Other conventions (`.tsx`, `_spec.rb`) are not covered.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    let mut parts: Vec<&str> = path.split('/').collect();
+    let name = parts.pop().unwrap_or("");
+    let in_test_dir = parts
+        .iter()
+        .any(|d| matches!(*d, "test" | "tests" | "__tests__" | "spec"));
+    let test_file = (name.starts_with("test_") && name.ends_with(".py"))
+        || name.ends_with("_test.go")
+        || name.ends_with(".test.ts")
+        || name.ends_with(".spec.ts")
+        || name.ends_with("Test.java");
+    in_test_dir || test_file
+}
+
+/// One traversal path as the summary counts it.
+struct PathRow {
+    distance: usize,
+    basis: &'static str,
+    file: String,
+    test: bool,
+}
+
+/// A path's dependent file: the caller file of its LAST edge.
+fn dependent_file(edges: &[store::EdgeRow]) -> String {
+    edges
+        .last()
+        .map_or_else(String::new, |e| e.caller_path.clone())
+}
+
+/// One traversal path as the summary counts it: distance is its edge count.
+fn path_row(path: &crate::edges::TracePath) -> PathRow {
+    let file = dependent_file(&path.edges);
+    PathRow {
+        distance: path.edges.len(),
+        basis: path.basis,
+        test: is_test_path(&file),
+        file,
+    }
+}
+
+/// Impact's summary (`--summary`): counts over all traversal paths, before paging.
+pub struct SummaryOut {
+    pub include_tests: bool,
+    pub total: usize,
+    /// (distance, paths, proven, unproven, candidate-name), ascending by distance.
+    pub by_depth: Vec<(usize, usize, usize, usize, usize)>,
+    pub distinct_files: usize,
+    pub tests: usize,
+    /// The per-node cap or another budget may have lowered the counts.
+    pub candidates_complete: bool,
+    pub verdict: &'static str,
+    pub unresolved: Vec<String>,
+}
+
+fn summarize(
+    rows: &[PathRow],
+    include_tests: bool,
+    candidates_complete: bool,
+    verdict: &'static str,
+    unresolved: &[String],
+) -> SummaryOut {
+    let counted: Vec<&PathRow> = rows.iter().filter(|r| include_tests || !r.test).collect();
+    // (paths, proven, unproven, candidate-name) per distance.
+    let mut depths: BTreeMap<usize, (usize, usize, usize, usize)> = BTreeMap::new();
+    for r in &counted {
+        let e = depths.entry(r.distance).or_default();
+        e.0 += 1;
+        match r.basis {
+            "proven" => e.1 += 1,
+            "unproven" => e.2 += 1,
+            _ => e.3 += 1,
+        }
+    }
+    SummaryOut {
+        include_tests,
+        total: counted.len(),
+        by_depth: depths
+            .into_iter()
+            .map(|(d, (n, p, u, c))| (d, n, p, u, c))
+            .collect(),
+        distinct_files: counted
+            .iter()
+            .map(|r| r.file.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        tests: rows.iter().filter(|r| r.test).count(),
+        candidates_complete,
+        verdict,
+        unresolved: unresolved.to_vec(),
+    }
 }
 
 pub struct TracePathOut {
@@ -2420,10 +2544,22 @@ pub struct TracePathOut {
     pub truncated: bool,
     pub unresolved: Vec<String>,
     pub verification: String,
+    pub basis: &'static str,
+}
+
+/// Impact's candidate summary. `total` is `Some` only when every candidate was counted.
+pub struct CandidatesOut {
+    pub nodes: usize,
+    pub returned: usize,
+    pub complete: bool,
+    pub total: Option<usize>,
+    pub per_node_limit: usize,
 }
 
 pub struct TraceQueryOut {
     pub impact_verdict: Option<&'static str>,
+    pub candidates: Option<CandidatesOut>,
+    pub summary: Option<SummaryOut>,
     pub repo: String,
     pub snapshot: store::Snapshot,
     pub revision: String,
@@ -2463,7 +2599,7 @@ fn trace_query_inner(
     request: &TraceRequest<'_>,
     pinned: impl FnOnce(),
 ) -> Result<TraceQueryOut, String> {
-    graph_query_inner(home, name, root, request, pinned, false)
+    graph_query_inner(home, name, root, request, pinned, false, false)
 }
 
 pub fn impact_query(
@@ -2475,7 +2611,7 @@ pub fn impact_query(
     if request.destination.is_some() {
         return Err("impact does not accept a destination".to_string());
     }
-    graph_query_inner(home, name, root, request, || {}, true)
+    graph_query_inner(home, name, root, request, || {}, true, true)
 }
 
 fn graph_query_inner(
@@ -2485,6 +2621,7 @@ fn graph_query_inner(
     request: &TraceRequest<'_>,
     pinned: impl FnOnce(),
     impact: bool,
+    candidates: bool,
 ) -> Result<TraceQueryOut, String> {
     let started = Instant::now();
     let (canon, rel, dest_path) = validated_trace_anchor(root, request)?;
@@ -2499,6 +2636,7 @@ fn graph_query_inner(
         started,
         pinned,
         impact,
+        candidates,
     )
 }
 
@@ -2544,6 +2682,7 @@ pub(crate) fn graph_query_conn(
     started: Instant,
     pinned: impl FnOnce(),
     impact: bool,
+    candidates: bool,
 ) -> Result<TraceQueryOut, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
@@ -2594,13 +2733,32 @@ pub(crate) fn graph_query_conn(
             }
         }
     }
-    let budget = crate::edges::TraceBudget::new(request.depth, started);
+    let mut budget = crate::edges::TraceBudget::new(request.depth, started);
     let traversal = if impact {
-        crate::edges::traverse_impact(&tx, snapshot.id, &start, &budget)?
+        if candidates {
+            budget.candidates = request.limit;
+            // Loaded once per query: every node's seed reads the same inputs.
+            let inputs = CallerInputs::load(&tx, snapshot.id)?;
+            let seed_of = |endpoint: &store::EdgeEndpoint| {
+                candidate_seed(&tx, snapshot.id, &inputs, &anchor, &start, endpoint)
+            };
+            crate::edges::traverse_impact(&tx, snapshot.id, &start, &budget, Some(&seed_of))?
+        } else {
+            crate::edges::traverse_impact(&tx, snapshot.id, &start, &budget, None)?
+        }
     } else {
         crate::edges::traverse(&tx, snapshot.id, &start, target.as_ref(), &budget)?
     };
     let total = traversal.paths.len();
+    let candidate_summary = candidates.then(|| CandidatesOut {
+        nodes: traversal.candidate_nodes,
+        returned: traversal.candidates_returned,
+        complete: traversal.candidates_complete,
+        total: traversal
+            .candidates_complete
+            .then_some(traversal.candidates_returned),
+        per_node_limit: budget.candidates,
+    });
     let impact_verdict = impact.then(|| {
         crate::edges::impact_verdict(
             &traversal,
@@ -2616,6 +2774,9 @@ pub(crate) fn graph_query_conn(
                 || total > request.limit,
         )
     });
+    // Summary rows come from all traversal paths, before the page is cut.
+    let summary_rows: Option<Vec<PathRow>> =
+        (impact && request.summary).then(|| traversal.paths.iter().map(path_row).collect());
     let mut paths = Vec::new();
     for path in traversal
         .paths
@@ -2644,6 +2805,7 @@ pub(crate) fn graph_query_conn(
             truncated: path.truncated,
             unresolved: path.unresolved,
             verification: path_verification,
+            basis: path.basis,
         });
     }
     let next = request.offset + paths.len();
@@ -2681,8 +2843,21 @@ pub(crate) fn graph_query_conn(
         }
     }
     let complete = reasons.is_empty() && !truncated && paths.len() == total;
+    let candidates_complete = traversal.candidates_complete;
+    let summary = summary_rows.zip(impact_verdict).map(|(rows, verdict)| {
+        let unresolved: Vec<String> = reasons.iter().cloned().collect();
+        summarize(
+            &rows,
+            request.include_tests,
+            candidates_complete,
+            verdict,
+            &unresolved,
+        )
+    });
     Ok(TraceQueryOut {
         impact_verdict,
+        candidates: candidate_summary,
+        summary,
         repo: name.to_string(),
         snapshot,
         revision,
@@ -2711,6 +2886,76 @@ pub(crate) fn graph_query_conn(
         offset: request.offset,
         next_offset: more.then_some(next),
     })
+}
+
+/// The name seed of a syntax definition on the impact walk. The anchor gets the
+/// seed `callers` builds for it; another definition gets the same selection from
+/// its own name and file. A data-member anchor takes no call by name (`NoName`);
+/// other data fields reached on the walk are not callable, so they get `Missing`;
+/// no derivable name is `Missing`, a gap the answer states.
+fn candidate_seed(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    inputs: &CallerInputs,
+    anchor: &EdgeAnchor,
+    start: &store::EdgeEndpoint,
+    endpoint: &store::EdgeEndpoint,
+) -> Result<crate::edges::NameSeed, String> {
+    use crate::edges::NameSeed;
+    if crate::edges::unify(endpoint, start) {
+        if anchor.data_member {
+            return Ok(NameSeed::NoName);
+        }
+        let Some(display) = anchor.candidate_display.as_deref() else {
+            return Ok(NameSeed::Missing);
+        };
+        let found = caller_candidate_paths_with(tx, snapshot_id, inputs, anchor)?;
+        return Ok(NameSeed::Named(crate::edges::CandidateSeed {
+            name: called_name(display).to_string(),
+            paths: found.paths,
+            aliases: found.aliases,
+        }));
+    }
+    let store::EdgeEndpoint::SyntaxDef {
+        path,
+        byte_start,
+        byte_end,
+    } = endpoint
+    else {
+        return Ok(NameSeed::Missing);
+    };
+    let symbol = store::symbols_at(tx, snapshot_id, path)?
+        .into_iter()
+        .find(|s| {
+            s.byte_start == *byte_start
+                && s.byte_end == *byte_end
+                && (s.kind == "function" || s.kind == "method")
+        });
+    let Some(name) = symbol.and_then(|s| s.name) else {
+        return Ok(NameSeed::Missing);
+    };
+    // shortcut: C++ owner/declaring-header linkage is not applied to non-anchor nodes, upgrade when proven-reached nodes need it
+    let minimal = EdgeAnchor {
+        kind: AnchorKind::SyntaxFallback,
+        path: path.clone(),
+        line1: 1,
+        col1: 1,
+        symbol_uri: None,
+        import_id: None,
+        doc: None,
+        display: None,
+        candidate_display: Some(name.clone()),
+        span_bytes: Some((*byte_start, *byte_end)),
+        precision: "Heuristic".to_string(),
+        uncertainty: None,
+        data_member: false,
+    };
+    let found = caller_candidate_paths_with(tx, snapshot_id, inputs, &minimal)?;
+    Ok(NameSeed::Named(crate::edges::CandidateSeed {
+        name: called_name(&name).to_string(),
+        paths: found.paths,
+        aliases: found.aliases,
+    }))
 }
 
 /// Single-hop live LSP query with an explicit server path. Ephemeral
@@ -5103,6 +5348,8 @@ mod tests {
             depth: 3,
             limit: 50,
             offset: 0,
+            summary: false,
+            include_tests: false,
         };
         let changed = b"def f():\n    different()\n";
         let pinned = super::trace_query_inner(&home, "r", &repo, &request, || {
@@ -5157,6 +5404,8 @@ mod tests {
             depth: 3,
             limit: 50,
             offset: 0,
+            summary: false,
+            include_tests: false,
         };
         let pinned = super::graph_query_inner(
             &home,
@@ -5175,6 +5424,7 @@ mod tests {
                 .unwrap();
             },
             true,
+            false,
         )
         .unwrap();
         let next = super::impact_query(&home, "r", &repo, &request).unwrap();
@@ -5186,5 +5436,120 @@ mod tests {
         assert_eq!(pinned.verification, "Stale");
         assert_eq!(next.freshness, "fresh");
         assert!(pinned.paths.is_empty() && next.paths.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_path_classifier {
+    use super::is_test_path;
+
+    #[test]
+    fn listed_test_paths_are_classified_and_near_misses_are_not() {
+        for path in [
+            "tests/a.py",
+            "src/test/x.rs",
+            "a/__tests__/b.ts",
+            "pkg/spec/c.rb",
+            "test_lib.py",
+            "pkg/test_x.py",
+            "pkg/a_test.go",
+            "web/x.test.ts",
+            "web/x.spec.ts",
+            "src/FooTest.java",
+        ] {
+            assert!(is_test_path(path), "{path}");
+        }
+        for path in [
+            "contest.py",
+            "latest/foo.py",
+            "src/spectrum/a.py",
+            "test.py",
+            "src/Foo_test.java",
+            "x.test.js",
+            "web/x.tsx",
+            "pkg/a_spec.rb",
+        ] {
+            assert!(!is_test_path(path), "{path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod summary_rules {
+    use super::{path_row, summarize, PathRow};
+    use crate::edges::TracePath;
+    use crate::store::EdgeRow;
+
+    fn edge(caller_path: &str) -> EdgeRow {
+        EdgeRow {
+            snapshot_id: 1,
+            file_id: 1,
+            caller: None,
+            caller_path: caller_path.to_string(),
+            caller_span_bytes: (0, 1),
+            callee: None,
+            callee_name: "f".to_string(),
+            edge_kind: "POTENTIAL_CALL".to_string(),
+            precision: "Heuristic".to_string(),
+            provider: "syntax".to_string(),
+            evidence: "{}".to_string(),
+            unresolved: None,
+        }
+    }
+
+    fn row(files: &[&str], basis: &'static str) -> PathRow {
+        path_row(&TracePath {
+            edges: files.iter().map(|f| edge(f)).collect(),
+            cycle: false,
+            truncated: false,
+            unresolved: Vec::new(),
+            basis,
+        })
+    }
+
+    /// Two proven-or-unproven paths at distance 1 (one proven, two unproven, so a
+    /// swapped bucket changes a count), a candidate at distances 2 and 3 whose first
+    /// edge is in another file (so first-edge and last-edge disagree), and one test path.
+    fn fixture() -> Vec<PathRow> {
+        vec![
+            row(&["a.py"], "proven"),
+            row(&["b.py"], "unproven"),
+            row(&["e.py"], "unproven"),
+            row(&["x.py", "c.py"], "candidate-name"),
+            row(&["x.py", "y.py", "d.py"], "candidate-name"),
+            row(&["tests/t.py"], "candidate-name"),
+        ]
+    }
+
+    #[test]
+    fn test_paths_are_excluded_from_counts_unless_included() {
+        let s = summarize(&fixture(), false, true, "UNKNOWN", &[]);
+        assert_eq!(s.total, 5);
+        assert_eq!(
+            s.by_depth,
+            vec![(1, 3, 1, 2, 0), (2, 1, 0, 0, 1), (3, 1, 0, 0, 1)]
+        );
+        assert_eq!(s.distinct_files, 5);
+        assert_eq!(s.tests, 1, "tests.count is reported either way");
+    }
+
+    #[test]
+    fn include_tests_counts_every_path() {
+        let s = summarize(&fixture(), true, true, "UNKNOWN", &[]);
+        assert_eq!(s.total, 6);
+        assert_eq!(
+            s.by_depth,
+            vec![(1, 4, 1, 2, 1), (2, 1, 0, 0, 1), (3, 1, 0, 0, 1)]
+        );
+        assert_eq!(s.distinct_files, 6);
+        assert_eq!(s.tests, 1);
+    }
+
+    #[test]
+    fn dependent_file_is_the_last_edge_and_distance_its_edge_count() {
+        let r = row(&["x.py", "c.py"], "candidate-name");
+        assert_eq!(r.file, "c.py");
+        assert_eq!(r.distance, 2);
+        assert!(!r.test);
     }
 }

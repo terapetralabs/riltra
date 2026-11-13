@@ -272,6 +272,15 @@
       "paths": 1000,
       "time_ms": 2000
     },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 1,
+      "per_node_limit": 50,
+      "returned": 0,
+      "scope": "anchor-and-proven-nodes",
+      "total": 0
+    },
     "completeness": {
       "covered": 1,
       "denominator": {
@@ -314,6 +323,7 @@
     },
     "paths": [
       {
+        "basis": "proven",
         "cycle": false,
         "distance": 1,
         "edges": [
@@ -539,6 +549,15 @@
       "nodes": 500,
       "paths": 1000,
       "time_ms": 2000
+    },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 1,
+      "per_node_limit": 50,
+      "returned": 0,
+      "scope": "anchor-and-proven-nodes",
+      "total": 0
     },
     "completeness": {
       "covered": 0,

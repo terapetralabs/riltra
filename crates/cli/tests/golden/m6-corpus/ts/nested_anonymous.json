@@ -217,13 +217,22 @@
       "paths": 1000,
       "time_ms": 2000
     },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 1,
+      "per_node_limit": 50,
+      "returned": 1,
+      "scope": "anchor-and-proven-nodes",
+      "total": 1
+    },
     "completeness": {
-      "covered": 0,
+      "covered": 1,
       "denominator": {
         "ambiguous_calls": 0,
         "dynamic_calls": 0,
         "missing_provider_files": 0,
-        "observed_edges": 0,
+        "observed_edges": 1,
         "parse_error_files": 0,
         "skipped_files": 0,
         "stale_imports": 0,
@@ -233,12 +242,15 @@
         "unsupported_files": 0
       },
       "status": "partial",
-      "total": 0,
+      "total": 1,
       "total_exact": true,
       "unresolved": [
-        "empty-result-not-coverage-proof",
+        "candidate-name-not-followed",
         "graph-completeness-unproven",
         "insufficient-impact-evidence",
+        "owner-unproven",
+        "unproven-relation",
+        "unresolved-owner",
         "unresolved-relations",
         "unresolved_owner",
         "unresolved_target"
@@ -257,7 +269,68 @@
       "next_offset": null,
       "offset": 0
     },
-    "paths": [],
+    "paths": [
+      {
+        "basis": "candidate-name",
+        "cycle": false,
+        "distance": 1,
+        "edges": [
+          {
+            "callee": null,
+            "callee_name": "target",
+            "caller": null,
+            "caller_path": "nested_anonymous.ts",
+            "caller_span": [
+              122,
+              130
+            ],
+            "evidence": {
+              "callee_span": [
+                122,
+                128
+              ],
+              "digest": "30c5a1fe2204d8fe",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "b78941eeeac4b59a",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "nested_anonymous.ts",
+              "provider": "scip-import",
+              "reference_span": null,
+              "span": [
+                122,
+                130
+              ],
+              "terminal_span": [
+                122,
+                128
+              ]
+            },
+            "import_id": 1,
+            "kind": "POTENTIAL_CALL",
+            "precision": "Heuristic",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": "owner-unproven",
+            "verification": "Unverified"
+          }
+        ],
+        "scope": "direct",
+        "truncated": false,
+        "unresolved": [
+          "owner-unproven",
+          "unproven-relation",
+          "unresolved-owner"
+        ],
+        "verification": "Unverified"
+      }
+    ],
     "repo": "sem",
     "schema_version": 1,
     "snapshot": {
@@ -266,11 +339,16 @@
       "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
     },
     "truncated": false,
-    "unresolved": [],
+    "unresolved": [
+      "candidate-name-not-followed",
+      "owner-unproven",
+      "unproven-relation",
+      "unresolved-owner"
+    ],
     "verdict": "UNKNOWN",
     "verification": "Unverified",
     "visits": {
-      "edges": 0,
+      "edges": 1,
       "nodes": 1
     }
   },
@@ -379,13 +457,22 @@
       "paths": 1000,
       "time_ms": 2000
     },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 1,
+      "per_node_limit": 50,
+      "returned": 1,
+      "scope": "anchor-and-proven-nodes",
+      "total": 1
+    },
     "completeness": {
-      "covered": 0,
+      "covered": 1,
       "denominator": {
         "ambiguous_calls": 0,
         "dynamic_calls": 0,
         "missing_provider_files": 1,
-        "observed_edges": 0,
+        "observed_edges": 1,
         "parse_error_files": 0,
         "skipped_files": 0,
         "stale_imports": 0,
@@ -395,14 +482,17 @@
         "unsupported_files": 0
       },
       "status": "partial",
-      "total": 0,
+      "total": 1,
       "total_exact": true,
       "unresolved": [
-        "empty-result-not-coverage-proof",
+        "candidate-name-not-followed",
         "graph-completeness-unproven",
         "insufficient-impact-evidence",
         "missing_provider_files",
+        "owner-unproven",
         "syntax-anchor-uncertain",
+        "unproven-relation",
+        "unresolved-owner",
         "unresolved-relations",
         "unresolved_owner",
         "unresolved_target"
@@ -421,7 +511,59 @@
       "next_offset": null,
       "offset": 0
     },
-    "paths": [],
+    "paths": [
+      {
+        "basis": "candidate-name",
+        "cycle": false,
+        "distance": 1,
+        "edges": [
+          {
+            "callee": null,
+            "callee_name": "target",
+            "caller": null,
+            "caller_path": "nested_anonymous.ts",
+            "caller_span": [
+              122,
+              130
+            ],
+            "evidence": {
+              "callee_span": [
+                122,
+                128
+              ],
+              "digest": "30c5a1fe2204d8fe",
+              "imports": [],
+              "path": "nested_anonymous.ts",
+              "provider": "syntax",
+              "reference_span": null,
+              "span": [
+                122,
+                130
+              ],
+              "terminal_span": [
+                122,
+                128
+              ]
+            },
+            "import_id": null,
+            "kind": "POTENTIAL_CALL",
+            "precision": "Heuristic",
+            "provider": "syntax",
+            "tool": null,
+            "unresolved": "owner-unproven",
+            "verification": "Unverified"
+          }
+        ],
+        "scope": "direct",
+        "truncated": false,
+        "unresolved": [
+          "owner-unproven",
+          "unproven-relation",
+          "unresolved-owner"
+        ],
+        "verification": "Unverified"
+      }
+    ],
     "repo": "sem",
     "schema_version": 1,
     "snapshot": {
@@ -430,11 +572,16 @@
       "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
     },
     "truncated": false,
-    "unresolved": [],
+    "unresolved": [
+      "candidate-name-not-followed",
+      "owner-unproven",
+      "unproven-relation",
+      "unresolved-owner"
+    ],
     "verdict": "UNKNOWN",
     "verification": "Unverified",
     "visits": {
-      "edges": 0,
+      "edges": 1,
       "nodes": 1
     }
   },

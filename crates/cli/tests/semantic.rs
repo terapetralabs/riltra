@@ -355,6 +355,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "common/mock_lsp.rs"]
+mod mock_lsp;
+
 static COUNTER: AtomicU64 = AtomicU64::new(10_000);
 
 fn home(tag: &str) -> PathBuf {
@@ -1439,18 +1442,8 @@ fn cli_lsp_live_query_gated() {
         repodir.to_string_lossy().replace('\\', "/"),
     );
     do_index(&h);
-    let mut mock = std::env::current_exe().unwrap();
-    mock.pop();
-    mock.pop();
-    mock.push("examples");
-    mock.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
     // The mock example binary is built on demand so it can never go stale.
-    let status = Command::new("cargo")
-        .args(["build", "--offline", "--example", "mock_lsp"])
-        .status()
-        .expect("cargo build mock server");
-    assert!(status.success(), "mock server must build");
-    assert!(mock.is_file(), "mock server missing: {}", mock.display());
+    let mock = mock_lsp::mock_lsp_bin();
     let (code, out, err) = run(
         &h,
         &[

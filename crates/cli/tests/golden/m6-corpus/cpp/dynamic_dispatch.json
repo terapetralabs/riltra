@@ -65,6 +65,8 @@
           146,
           159
         ],
+        "candidate_scope": "same-file",
+        "candidates": 1,
         "evidence": {
           "callee_span": [
             146,
@@ -187,6 +189,8 @@
           146,
           159
         ],
+        "candidate_scope": "same-file",
+        "candidates": 1,
         "evidence": {
           "callee_span": [
             146,
@@ -376,6 +380,8 @@
               146,
               159
             ],
+            "candidate_scope": "same-file",
+            "candidates": 1,
             "evidence": {
               "callee_span": [
                 146,
@@ -511,6 +517,8 @@
           146,
           159
         ],
+        "candidate_scope": "same-file",
+        "candidates": 1,
         "evidence": {
           "callee_span": [
             146,
@@ -669,6 +677,8 @@
               146,
               159
             ],
+            "candidate_scope": "same-file",
+            "candidates": 1,
             "evidence": {
               "callee_span": [
                 146,
@@ -847,6 +857,8 @@
               146,
               159
             ],
+            "candidate_scope": "same-file",
+            "candidates": 1,
             "evidence": {
               "callee_span": [
                 146,

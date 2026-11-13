@@ -635,6 +635,8 @@
           97,
           105
         ],
+        "candidate_scope": "same-file",
+        "candidates": 1,
         "evidence": {
           "callee_span": [
             97,
@@ -792,6 +794,8 @@
               63,
               71
             ],
+            "candidate_scope": "same-file",
+            "candidates": 1,
             "evidence": {
               "callee_span": [
                 63,
@@ -851,6 +855,8 @@
               97,
               105
             ],
+            "candidate_scope": "same-file",
+            "candidates": 1,
             "evidence": {
               "callee_span": [
                 97,

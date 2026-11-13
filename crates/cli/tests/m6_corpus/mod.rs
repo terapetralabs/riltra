@@ -262,6 +262,84 @@ fn candidate_truth(
     }
 }
 
+/// Non-callable definition occurrences of the target name that appear in the
+/// manifests and change the expected count. The manifests carry no kind field, so
+/// each entry is read from the fixture source (`<lang>/<case>`). The table does not
+/// claim to list every non-callable item in the fixtures: an item the manifests do
+/// not list is irrelevant to the arithmetic. A reviewer checks each entry against
+/// its fixture.
+const NON_CALLABLE_DEFINITION_OCCURRENCES: &[(&str, usize)] = &[
+    // Struct fields holding a function pointer, `struct A { int (*target)(void); }`.
+    ("c/competing_targets", 2),
+    ("c/same_name", 2),
+    // A parameter named `target` inside the function `target`.
+    ("c/same_name_binding", 1),
+    ("cpp/same_name_binding", 1),
+    ("py/same_name_binding", 1),
+    ("rs/same_name_binding", 1),
+    ("ts/same_name_binding", 1),
+];
+
+/// The `same_name` cases with no POTENTIAL_CALL edge named after the target, so the
+/// `>= 2` check has nothing to bite there. `c/same_name` defines `target` only as
+/// two struct fields holding a function pointer (`struct A { int (*target)(void); }`),
+/// which the index does not count as a callable definition, and no call in the
+/// case is named `target`. Every other `same_name` case must produce at least one
+/// checked edge; `corpus` asserts both directions.
+const SAME_NAME_WITHOUT_EDGE: &[&str] = &["c/same_name"];
+
+/// Copies of the case document that `corpus` writes into the repository. The
+/// `local_scope` case adds one mirror copy beside the file (see `files` in `corpus`).
+fn written_copies(case: &str) -> usize {
+    if case == "local_scope" {
+        2
+    } else {
+        1
+    }
+}
+
+/// Every POTENTIAL_CALL edge named `name` carries the number of function and
+/// method definitions the repository holds with that name: the manifest's
+/// definitions with that text, minus the table's non-callable occurrences, times
+/// the written copies. Never read from a golden or CLI output.
+fn check_candidate_labels(
+    lang: &str,
+    case: &str,
+    manifest: &Value,
+    name: &str,
+    copies: usize,
+    edges: &[&Value],
+) -> usize {
+    let defined = manifest["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["definition"] == true && o["text"] == name)
+        .count();
+    let key = format!("{lang}/{case}");
+    let non_callable = NON_CALLABLE_DEFINITION_OCCURRENCES
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(0, |(_, n)| *n);
+    assert!(
+        defined >= non_callable,
+        "{key}: table exceeds the definitions"
+    );
+    let expected = (defined - non_callable) * copies;
+    let mut checked = 0;
+    for edge in edges {
+        if edge["kind"] == "POTENTIAL_CALL" && edge["callee_name"] == name {
+            assert_eq!(edge["candidates"], expected, "{key}: {edge}");
+            assert!(edge["candidate_scope"].is_string(), "{key}: {edge}");
+            if case == "same_name" {
+                assert!(edge["candidates"].as_u64().unwrap() >= 2, "{key}: {edge}");
+            }
+            checked += 1;
+        }
+    }
+    checked
+}
+
 fn corpus(lang: &str, case: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let fixture = root.join("fixtures/m6").join(lang);
@@ -284,6 +362,8 @@ fn corpus(lang: &str, case: &str) {
     };
     let h = home(&format!("corpus-{lang}-{case}"));
     let mirror = format!("other_{file}");
+    // The same case rule that builds `files` below; the expected count reads it too.
+    let copies = written_copies(case);
     let files = if case == "local_scope" {
         vec![(file, source.as_str()), (mirror.as_str(), source.as_str())]
     } else {
@@ -312,6 +392,36 @@ fn corpus(lang: &str, case: &str) {
         bundle[key] = v;
     }
     let symbols = manifest["symbols"].as_array().unwrap();
+    // Syntax-only callers, read before the import; not stored in the bundle.
+    let syntax_callers = query(&h, "callers", file, definition(target));
+    check_evidence(&syntax_callers, &source, &manifest, false);
+    let target_name = symbols.iter().find(|s| s["id"] == target).unwrap()["name"]
+        .as_str()
+        .unwrap();
+    let caller_edges: Vec<&Value> = syntax_callers["edges"].as_array().unwrap().iter().collect();
+    let mut checked =
+        check_candidate_labels(lang, case, &manifest, target_name, copies, &caller_edges);
+    let impact_edges: Vec<&Value> = bundle["syntax_impact"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["edges"].as_array().unwrap().iter())
+        .collect();
+    checked += check_candidate_labels(lang, case, &manifest, target_name, copies, &impact_edges);
+    if case == "same_name" {
+        let key = format!("{lang}/{case}");
+        if SAME_NAME_WITHOUT_EDGE.contains(&key.as_str()) {
+            assert_eq!(
+                checked, 0,
+                "{key}: an edge named target now exists; update SAME_NAME_WITHOUT_EDGE"
+            );
+        } else {
+            assert!(
+                checked > 0,
+                "{key}: no POTENTIAL_CALL edge named target, so the >= 2 check is a no-op"
+            );
+        }
+    }
     let occ: Vec<_> = occurrences
         .iter()
         .map(|o| {

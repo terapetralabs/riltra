@@ -1085,3 +1085,208 @@ fn include_tests_needs_summary_and_summary_is_impact_only() {
     );
     assert_eq!(code, 0, "{err}");
 }
+
+// --- Candidate scope on POTENTIAL_CALL edges (`candidates`, `candidate_scope`) ---
+
+/// The edges of a by-position `cmd` query at `path:line:col`.
+fn edges_at(home: &Path, cmd: &str, path: &str, line: &str, col: &str) -> Vec<Value> {
+    let span = (path.to_string(), line.to_string(), col.to_string());
+    let (code, out, err) = run(home, &position_args(cmd, "c", &span));
+    assert_eq!(code, 0, "{err}");
+    json_of(&out)["edges"].as_array().unwrap().clone()
+}
+
+#[test]
+fn candidate_scope_same_file_labels_the_potential_edge() {
+    let h = home("scope-same");
+    let same = "def target():\n    return 1\n\n\ndef user():\n    target()\n";
+    indexed_files(&h, "c", &[("a.py", same)]);
+    let edges = edges_at(&h, "callers", "a.py", "1", "1");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "same-file", "{edges:?}");
+}
+
+#[test]
+fn candidate_scope_imported_file_labels_the_potential_edge() {
+    let h = home("scope-imported");
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("b.py", CALLER_B)]);
+    let edges = edges_at(&h, "callers", "a.py", "1", "1");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "imported-file", "{edges:?}");
+}
+
+#[test]
+fn candidate_scope_other_file_for_an_unimported_call() {
+    // callers does not link an unimported call site, so the edge is read from
+    // the callees of its caller `run` instead.
+    let h = home("scope-other");
+    let run_src = "def run():\n    target()\n";
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("c.py", run_src)]);
+    let edges = edges_at(&h, "callees", "c.py", "1", "1");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "other-file", "{edges:?}");
+}
+
+#[test]
+fn two_definitions_count_two_and_keep_the_unresolved_value() {
+    let h = home("scope-two");
+    let d_src = "def target():\n    return 2\n";
+    indexed_files(
+        &h,
+        "c",
+        &[("a.py", TARGET_A), ("d.py", d_src), ("b.py", CALLER_B)],
+    );
+    let edges = edges_at(&h, "callers", "a.py", "1", "1");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 2, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "imported-file", "{edges:?}");
+    // Baseline recorded from the unchanged code path: no-overlap.
+    assert_eq!(edges[0]["unresolved"], "no-overlap", "{edges:?}");
+}
+
+#[test]
+fn a_call_with_no_definition_is_scope_none() {
+    let h = home("scope-none");
+    indexed_files(&h, "c", &[("e.py", "def user():\n    missing()\n")]);
+    let edges = edges_at(&h, "callees", "e.py", "1", "1");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["callee_name"], "missing", "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 0, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "none", "{edges:?}");
+}
+
+#[test]
+fn an_alias_is_not_counted_and_stays_a_potential_call() {
+    let h = home("scope-alias");
+    let f_src = "from a import target as t\n\n\ndef user():\n    t()\n";
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("f.py", f_src)]);
+    let edges = edges_at(&h, "callees", "f.py", "4", "1");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["kind"], "POTENTIAL_CALL", "{edges:?}");
+    assert_eq!(edges[0]["callee_name"], "t", "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 0, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "none", "{edges:?}");
+    assert_eq!(edges[0]["unresolved"], "alias", "{edges:?}");
+}
+
+#[test]
+fn candidate_keys_are_the_last_two_keys_of_the_edge() {
+    let h = home("scope-order");
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("b.py", CALLER_B)]);
+    let span = ("a.py".to_string(), "1".to_string(), "1".to_string());
+    let (code, out, err) = run(&h, &position_args("callers", "c", &span));
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("]},\"candidates\":1,\"candidate_scope\":\"imported-file\"}]"),
+        "{out}"
+    );
+}
+
+#[test]
+fn impact_paths_carry_the_candidate_keys() {
+    let h = home("scope-impact");
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("b.py", CALLER_B)]);
+    let (raw, doc) = impact_of_target(&h, &[]);
+    let edge = &doc["paths"][0]["edges"][0];
+    assert_eq!(edge["kind"], "POTENTIAL_CALL", "{raw}");
+    assert_eq!(edge["candidates"], 1, "{raw}");
+    assert_eq!(edge["candidate_scope"], "imported-file", "{raw}");
+}
+
+/// The edges of `callees --target <name>` in repo `c`.
+fn callees_of(home: &Path, name: &str) -> Vec<Value> {
+    let (code, out, err) = run(home, &["callees", "--repo", "c", "--target", name]);
+    assert_eq!(code, 0, "{err}");
+    json_of(&out)["edges"].as_array().unwrap().clone()
+}
+
+#[test]
+fn candidate_scope_rust_same_crate_is_imported_file() {
+    let h = home("scope-rust-crate");
+    let a = "pub fn target() -> u8 {\n    1\n}\n";
+    let b = "pub fn user() -> u8 {\n    target()\n}\n";
+    indexed_files(&h, "c", &[("src/a.rs", a), ("src/b.rs", b)]);
+    let edges = callees_of(&h, "user");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "imported-file", "{edges:?}");
+}
+
+#[test]
+fn candidate_scope_c_include_is_imported_file() {
+    let h = home("scope-c-include");
+    let d = "int target(void) {\n    return 1;\n}\n";
+    let a = "#include \"d.h\"\n\nint user(void) {\n    return target();\n}\n";
+    indexed_files(&h, "c", &[("d.h", d), ("a.c", a)]);
+    let edges = callees_of(&h, "user");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "imported-file", "{edges:?}");
+}
+
+#[test]
+fn candidate_scope_c_include_root_suffix_is_imported_file() {
+    // The include literal names the header below a root the repository does
+    // not record; callers links it by the unique path suffix, and so must the label.
+    let h = home("scope-c-suffix");
+    let d = "int target(void) {\n    return 1;\n}\n";
+    let a = "#include \"include/d.h\"\n\nint user(void) {\n    return target();\n}\n";
+    indexed_files(&h, "c", &[("lib/include/d.h", d), ("a.c", a)]);
+    let edges = callees_of(&h, "user");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "imported-file", "{edges:?}");
+}
+
+#[test]
+fn a_class_named_like_the_callee_is_not_a_candidate() {
+    // Only function and method definitions are counted; a class with the same name is not.
+    let h = home("scope-class");
+    let a = "class target:\n    pass\n";
+    let b = "from a import target\n\n\ndef user():\n    target()\n";
+    indexed_files(&h, "c", &[("a.py", a), ("b.py", b)]);
+    let edges = callees_of(&h, "user");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 0, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "none", "{edges:?}");
+}
+
+#[test]
+fn candidate_names_match_exactly_and_underscore_is_literal() {
+    // `_` is a single-character wildcard in LIKE; `a_b` must not count `axb`.
+    let h = home("scope-underscore");
+    let a = "def a_b():\n    return 1\n";
+    let b = "def axb():\n    return 2\n";
+    let c = "from a import a_b\n\n\ndef user():\n    a_b()\n";
+    indexed_files(&h, "c", &[("a.py", a), ("b.py", b), ("c.py", c)]);
+    let edges = callees_of(&h, "user");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["callee_name"], "a_b", "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "imported-file", "{edges:?}");
+}
+
+#[test]
+fn a_cpp_qualified_definition_counts_for_its_terminal_name_only() {
+    // `Widget::run` is the stored name of an out-of-line definition; `run` counts it, `running` does not.
+    let h = home("scope-qualified");
+    let w = "void Widget::run() {\n}\n";
+    let v = "void Widget::running() {\n}\n";
+    let m = "void drive() {\n    run();\n}\n";
+    indexed_files(
+        &h,
+        "c",
+        &[("widget.cpp", w), ("widget_more.cpp", v), ("main.cpp", m)],
+    );
+    let edges = callees_of(&h, "drive");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["callee_name"], "run", "{edges:?}");
+    assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
+    assert_eq!(edges[0]["candidate_scope"], "other-file", "{edges:?}");
+}

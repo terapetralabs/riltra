@@ -65,6 +65,8 @@
           104,
           113
         ],
+        "candidate_scope": "none",
+        "candidates": 0,
         "evidence": {
           "callee_span": [
             104,
@@ -356,6 +358,8 @@
           104,
           113
         ],
+        "candidate_scope": "none",
+        "candidates": 0,
         "evidence": {
           "callee_span": [
             104,
@@ -623,6 +627,8 @@
               104,
               113
             ],
+            "candidate_scope": "none",
+            "candidates": 0,
             "evidence": {
               "callee_span": [
                 104,

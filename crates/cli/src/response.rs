@@ -222,8 +222,22 @@ pub(crate) fn edge_endpoint_json(endpoint: &Option<store::EdgeEndpoint>) -> Stri
     }
 }
 
+/// The read-time keys of a POTENTIAL_CALL edge, appended after `evidence`; empty otherwise.
+fn edge_candidate_json(candidate: Option<&index::CandidateLabel>) -> String {
+    candidate
+        .map(|c| {
+            format!(
+                ",\"candidates\":{},\"candidate_scope\":{}",
+                c.count,
+                edge_string(c.scope)
+            )
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn edge_hit_json(hit: &index::EdgeHitOut) -> String {
     let e = &hit.edge;
+    let candidate = edge_candidate_json(hit.candidate.as_ref());
     let imports = hit.evidence.imports.iter().map(|(id, i)| format!("{{\"id\":{id},\"provider\":{},\"version\":{},\"artifact_id\":{},\"source_revision\":{},\"content_identity\":{}}}", edge_string(&i.provider_name), edge_string(&i.provider_version), edge_string(&i.artifact_id), edge_string(&i.source_revision), edge_string(&i.content_identity))).collect::<Vec<_>>().join(",");
     // Legacy convenience fields retain only a UNIQUE proven import, never an
     // arbitrary first overlap. Complete provenance is in evidence.imports.
@@ -232,7 +246,7 @@ pub(crate) fn edge_hit_json(hit: &index::EdgeHitOut) -> String {
     } else {
         None
     };
-    format!("{{\"kind\":{},\"precision\":{},\"caller\":{},\"callee\":{},\"caller_path\":{},\"caller_span\":{},\"callee_name\":{},\"provider\":{},\"import_id\":{},\"tool\":{},\"verification\":{},\"unresolved\":{},\"evidence\":{{\"path\":{},\"span\":{},\"callee_span\":{},\"terminal_span\":{},\"reference_span\":{},\"digest\":{},\"provider\":{},\"imports\":[{imports}]}}}}",
+    format!("{{\"kind\":{},\"precision\":{},\"caller\":{},\"callee\":{},\"caller_path\":{},\"caller_span\":{},\"callee_name\":{},\"provider\":{},\"import_id\":{},\"tool\":{},\"verification\":{},\"unresolved\":{},\"evidence\":{{\"path\":{},\"span\":{},\"callee_span\":{},\"terminal_span\":{},\"reference_span\":{},\"digest\":{},\"provider\":{},\"imports\":[{imports}]}}{candidate}}}",
         edge_string(&e.edge_kind), edge_string(&e.precision), edge_endpoint_json(&e.caller), edge_endpoint_json(&e.callee), edge_string(&e.caller_path), edge_span(Some(e.caller_span_bytes)), edge_string(&e.callee_name), edge_string(&e.provider), edge_number(unique.map(|(id,_)| id)), edge_optional(unique.map(|(_,i)| i.provider_name.as_str())), edge_string(&hit.verification), edge_optional(e.unresolved.as_deref()),
         edge_string(&e.caller_path), edge_span(Some(e.caller_span_bytes)), edge_span(hit.evidence.callee_span), edge_span(hit.evidence.terminal_span), edge_span(hit.evidence.reference_span), edge_string(&hit.evidence.digest), edge_string(&e.provider))
 }
@@ -1543,6 +1557,7 @@ mod tests {
                     reference_span: None,
                     imports: vec![(3, import)],
                 },
+                candidate: None,
             }],
             truncated: true,
             limit: 1,
@@ -1931,5 +1946,64 @@ mod tests {
             repo_status_json("de\"mo", "C:\\repo", &g, &ig),
             r#"{"name":"de\"mo","root":"C:\\repo","git":{"present":true,"valid":false,"head":null,"branch":"main","dirty":true,"untracked":3,"toplevel":null,"worktree":true},"ignore":{"file":false,"rules":0}}"#
         );
+    }
+}
+
+#[cfg(test)]
+mod potential_candidate_keys {
+    use super::*;
+
+    /// A POTENTIAL_CALL edge in `hit`'s shape; only the candidate label varies.
+    fn potential_hit(candidate: Option<index::CandidateLabel>) -> index::EdgeHitOut {
+        index::EdgeHitOut {
+            edge: store::EdgeRow {
+                snapshot_id: 1,
+                file_id: 2,
+                caller: None,
+                caller_path: "b.py".to_string(),
+                caller_span_bytes: (39, 47),
+                callee: None,
+                callee_name: "target".to_string(),
+                edge_kind: "POTENTIAL_CALL".to_string(),
+                precision: "Heuristic".to_string(),
+                provider: "syntax".to_string(),
+                evidence: "{}".to_string(),
+                unresolved: Some("no-overlap".to_string()),
+            },
+            verification: "Unverified".to_string(),
+            evidence: index::EdgeEvidence {
+                digest: "d".to_string(),
+                callee_span: Some((39, 45)),
+                terminal_span: Some((39, 45)),
+                reference_span: None,
+                imports: Vec::new(),
+            },
+            candidate,
+        }
+    }
+
+    #[test]
+    fn potential_edge_appends_candidate_keys_after_evidence() {
+        let hit = potential_hit(Some(index::CandidateLabel {
+            count: 2,
+            scope: "imported-file",
+        }));
+        let out = edge_hit_json(&hit);
+        assert!(
+            out.ends_with(
+                "\"imports\":[]},\"candidates\":2,\"candidate_scope\":\"imported-file\"}"
+            ),
+            "{out}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["candidates"], 2, "{out}");
+        assert_eq!(value["candidate_scope"], "imported-file", "{out}");
+    }
+
+    #[test]
+    fn potential_edge_without_a_label_is_byte_unchanged() {
+        let out = edge_hit_json(&potential_hit(None));
+        assert!(out.ends_with("\"imports\":[]}}"), "{out}");
+        assert!(!out.contains("candidates"), "{out}");
     }
 }

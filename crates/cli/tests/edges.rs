@@ -2536,20 +2536,14 @@ fn task4_full_json_goldens() {
     do_index(&h);
     let check = |direction, path, extra: &[&str], golden: &str| {
         let actual = normalized_edge_json(query_json(&h, direction, path, extra));
-        let expected: serde_json::Value = serde_json::from_str(golden).unwrap();
-        assert_eq!(actual, expected, "{direction} {path}");
+        impact_golden(golden, &actual);
     };
-    check(
-        "callers",
-        "lib.py",
-        &[],
-        include_str!("golden/m6-callers-syntax.json"),
-    );
+    check("callers", "lib.py", &[], "m6-callers-syntax.json");
     check(
         "callees",
         "main.py",
         &["--line", "3"],
-        include_str!("golden/m6-callees-syntax.json"),
+        "m6-callees-syntax.json",
     );
     let scip = scip_for(&dir);
     let (code, _, err) = run(
@@ -2557,17 +2551,12 @@ fn task4_full_json_goldens() {
         &["semantic", "import", "--repo", "sem", "--scip", &scip],
     );
     assert_eq!(code, 0, "{err}");
-    check(
-        "callers",
-        "lib.py",
-        &[],
-        include_str!("golden/m6-callers-scip.json"),
-    );
+    check("callers", "lib.py", &[], "m6-callers-scip.json");
     check(
         "callees",
         "main.py",
         &["--line", "3"],
-        include_str!("golden/m6-callees-scip.json"),
+        "m6-callees-scip.json",
     );
 }
 
@@ -3018,16 +3007,12 @@ fn task5_trace_full_json_goldens() {
     );
     do_index(&syntax_home);
     let syntax = normalized_edge_json(trace_json(&syntax_home, 1, &[]));
-    let expected: serde_json::Value =
-        serde_json::from_str(include_str!("golden/m6-trace-syntax.json")).unwrap();
-    assert_eq!(syntax, expected);
+    impact_golden("m6-trace-syntax.json", &syntax);
 
     let semantic_home = home("trace-golden-scip");
     trace_fixture(&semantic_home, &[vec![1], vec![2], vec![]]);
     let semantic = normalized_edge_json(trace_json(&semantic_home, 1, &["--to", "graph.py:7:6"]));
-    let expected: serde_json::Value =
-        serde_json::from_str(include_str!("golden/m6-trace-scip.json")).unwrap();
-    assert_eq!(semantic, expected);
+    impact_golden("m6-trace-scip.json", &semantic);
 }
 
 fn impact_json(h: &Path, line: usize, extra: &[&str]) -> serde_json::Value {
@@ -3420,7 +3405,7 @@ fn task6_impact_full_json_goldens() {
     }
 }
 
-/// The task7 golden contract: after the truth assertions, `RILTRA_UPDATE_M6_GOLDENS=1`
+/// The golden contract for the M6 and task4-6 files: after the truth assertions, `RILTRA_UPDATE_M6_GOLDENS=1`
 /// rewrites the file (same writer as the M6 corpus), then the file is compared.
 fn impact_golden(name: &str, actual: &serde_json::Value) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3860,4 +3845,55 @@ fn semantic_empty_display_does_not_link_same_name_in_unrelated_file() {
             .all(|e| e["caller_path"] == "a.ts" && e["kind"] != "CALLS"),
         "{v}"
     );
+}
+
+/// The raw text of the first `CALLS` edge object in a callers document.
+fn first_calls_edge_text(out: &str) -> &str {
+    let start = out.find("{\"kind\":\"CALLS\"").expect("a CALLS edge");
+    let mut stream =
+        serde_json::Deserializer::from_str(&out[start..]).into_iter::<serde_json::Value>();
+    stream.next().unwrap().unwrap();
+    &out[start..start + stream.byte_offset()]
+}
+
+/// Replaces every `artifact_id` value with `<artifact>`, as `normalized_edge_json` does.
+fn mask_artifact(text: &str) -> String {
+    const KEY: &str = "\"artifact_id\":\"";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        let (head, tail) = rest.split_at(at + KEY.len());
+        out.push_str(head);
+        out.push_str("<artifact>");
+        rest = &tail[tail.find('"').expect("closing quote of artifact_id")..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The CALLS edge of the SCIP fixture as the a54fd1e tree (before the candidate
+/// keys existed) printed it, with the run nonce masked as `normalized_edge_json` masks it.
+const CALLS_EDGE_AT_A54FD1E: &str = r##"{"kind":"CALLS","precision":"Exact","caller":{"type":"scip","import_id":1,"symbol_uri":"scip-test test test-pkg 1.0.0 main.py/caller().","doc":null,"path":null,"byte_start":null,"byte_end":null},"callee":{"type":"scip","import_id":1,"symbol_uri":"scip-test test test-pkg 1.0.0 lib.py/target().","doc":null,"path":null,"byte_start":null,"byte_end":null},"caller_path":"main.py","caller_span":[49,57],"callee_name":"target","provider":"scip-import","import_id":1,"tool":"scip-test","verification":"Unverified","unresolved":null,"evidence":{"path":"main.py","span":[49,57],"callee_span":[49,55],"terminal_span":[49,55],"reference_span":[49,55],"digest":"efdc560edb1437c7","provider":"scip-import","imports":[{"id":1,"provider":"scip-test","version":"1.0","artifact_id":"<artifact>","source_revision":"head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>","content_identity":"9a80fe22347c0ef3"}]}}"##;
+
+#[test]
+fn candidate_keys_are_never_added_to_scip_edges() {
+    let h = home("candidate-scip");
+    scip_imported(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let doc: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+    let edges = doc["edges"].as_array().unwrap();
+    assert!(edges.iter().any(|e| e["kind"] == "CALLS"), "{out}");
+    let nonce = doc["snapshot"]["nonce"].as_str().unwrap();
+    let calls = mask_artifact(&first_calls_edge_text(&out).replace(nonce, "<nonce>"));
+    assert_eq!(calls, CALLS_EDGE_AT_A54FD1E, "the CALLS edge bytes changed");
+    for edge in edges.iter().filter(|e| e["kind"] != "POTENTIAL_CALL") {
+        assert!(edge.get("candidates").is_none(), "{edge}");
+        assert!(edge.get("candidate_scope").is_none(), "{edge}");
+    }
 }

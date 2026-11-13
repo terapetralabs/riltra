@@ -1988,10 +1988,19 @@ pub struct EdgeEvidence {
     pub imports: Vec<(i64, store::SemanticImport)>,
 }
 
+/// How many definitions share a POTENTIAL_CALL edge's callee name, and where they
+/// sit relative to the caller. A count, never a resolution: no target is chosen.
+pub struct CandidateLabel {
+    pub count: usize,
+    pub scope: &'static str,
+}
+
 pub struct EdgeHitOut {
     pub edge: store::EdgeRow,
     pub verification: String,
     pub evidence: EdgeEvidence,
+    /// Some only for POTENTIAL_CALL edges; derived at read time, never stored.
+    pub candidate: Option<CandidateLabel>,
 }
 
 pub struct CompletenessOut {
@@ -2028,6 +2037,12 @@ struct EdgeRead<'a> {
     canon: &'a Path,
     source_fresh: bool,
     memo: BTreeMap<i64, (String, String, String)>,
+    /// Definition paths per callee name: one query per distinct name.
+    definitions: BTreeMap<String, Vec<String>>,
+    /// The snapshot-wide caller inputs, loaded once per query on first use.
+    inputs: Option<CallerInputs>,
+    /// Caller-linked paths per (definition path, name): one linkage per pair.
+    linked: BTreeMap<(String, String), BTreeSet<String>>,
 }
 
 impl EdgeRead<'_> {
@@ -2126,9 +2141,15 @@ impl EdgeRead<'_> {
             Some(found) => found,
             None => (evidence_span("callee_span"), evidence_span("terminal_span")),
         };
+        let candidate = if edge.edge_kind == "POTENTIAL_CALL" {
+            Some(self.candidate(&edge)?)
+        } else {
+            None
+        };
         Ok(EdgeHitOut {
             edge,
             verification,
+            candidate,
             evidence: EdgeEvidence {
                 digest,
                 callee_span,
@@ -2138,6 +2159,112 @@ impl EdgeRead<'_> {
             },
         })
     }
+
+    /// Counts the function and method definitions with the callee's terminal
+    /// name and places them against the caller file. Name equality only.
+    fn candidate(&mut self, edge: &store::EdgeRow) -> Result<CandidateLabel, String> {
+        if !self.definitions.contains_key(&edge.callee_name) {
+            let found = definition_paths(self.tx, self.snapshot.id, &edge.callee_name)?;
+            self.definitions.insert(edge.callee_name.clone(), found);
+        }
+        let defs = self
+            .definitions
+            .get(&edge.callee_name)
+            .cloned()
+            .ok_or_else(|| "callee definitions not recorded".to_string())?;
+        let caller = edge.caller_path.as_str();
+        let scope = if defs.is_empty() {
+            "none"
+        } else if defs.iter().any(|d| d == caller) {
+            "same-file"
+        } else if self.linked_to_caller(&defs, &edge.callee_name, caller)? {
+            "imported-file"
+        } else {
+            "other-file"
+        };
+        Ok(CandidateLabel {
+            count: defs.len(),
+            scope,
+        })
+    }
+
+    /// The snapshot-wide caller inputs, loaded on first use in this query.
+    fn inputs(&mut self) -> Result<&CallerInputs, String> {
+        if self.inputs.is_none() {
+            self.inputs = Some(CallerInputs::load(self.tx, self.snapshot.id)?);
+        }
+        self.inputs
+            .as_ref()
+            .ok_or_else(|| "caller inputs not loaded".to_string())
+    }
+
+    /// Whether a counted definition's file links to the caller file by the
+    /// linkage `callers` uses: the caller paths of a minimal anchor for it.
+    fn linked_to_caller(
+        &mut self,
+        defs: &[String],
+        name: &str,
+        caller: &str,
+    ) -> Result<bool, String> {
+        let (tx, snapshot_id) = (self.tx, self.snapshot.id);
+        for def in defs {
+            let key = (def.clone(), name.to_string());
+            if !self.linked.contains_key(&key) {
+                // shortcut: C++ declaring-header linkage is not applied (no qualifier), upgrade when qualified names reach this label
+                let anchor = minimal_anchor(def, name, None);
+                let inputs = self.inputs()?;
+                let found = caller_candidate_paths_with(tx, snapshot_id, inputs, &anchor)?;
+                self.linked
+                    .insert(key.clone(), found.paths.into_iter().collect());
+            }
+            let Some(paths) = self.linked.get(&key) else {
+                return Err("caller linkage not recorded".to_string());
+            };
+            if paths.contains(caller) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// The minimal anchor of a syntax definition on the name-seed path: its file and
+/// callable name, with no position, owner or document.
+fn minimal_anchor(path: &str, name: &str, span: Option<(usize, usize)>) -> EdgeAnchor {
+    EdgeAnchor {
+        kind: AnchorKind::SyntaxFallback,
+        path: path.to_string(),
+        line1: 1,
+        col1: 1,
+        symbol_uri: None,
+        import_id: None,
+        doc: None,
+        display: None,
+        candidate_display: Some(name.to_string()),
+        span_bytes: span,
+        precision: "Heuristic".to_string(),
+        uncertainty: None,
+        data_member: false,
+    }
+}
+
+/// Paths of the function and method definitions whose terminal name is `name`,
+/// one entry per definition. Matched in SQL with bound parameters only.
+fn definition_paths(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    name: &str,
+) -> Result<Vec<String>, String> {
+    let mut statement = tx
+        .prepare(
+            "SELECT f.path FROM symbols s JOIN files f ON f.id = s.file_id AND f.snapshot_id = s.snapshot_id WHERE s.snapshot_id = ?1 AND s.kind IN ('function', 'method') AND (s.name = ?2 OR substr(s.name, -(length(?2) + 2)) = '::' || ?2)",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![snapshot_id, name], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 struct QueryCoverage {
@@ -2356,6 +2483,9 @@ pub(crate) fn edge_query_conn(
         canon,
         source_fresh: freshness == "fresh",
         memo: BTreeMap::new(),
+        definitions: BTreeMap::new(),
+        inputs: None,
+        linked: BTreeMap::new(),
     };
     let mut verification = if read.source_fresh {
         "Unverified"
@@ -2723,6 +2853,9 @@ pub(crate) fn graph_query_conn(
         canon,
         source_fresh: freshness == "fresh",
         memo: BTreeMap::new(),
+        definitions: BTreeMap::new(),
+        inputs: None,
+        linked: BTreeMap::new(),
     };
     let coverage = read.coverage()?;
     let mut verification = coverage.verification;
@@ -2935,21 +3068,7 @@ fn candidate_seed(
         return Ok(NameSeed::Missing);
     };
     // shortcut: C++ owner/declaring-header linkage is not applied to non-anchor nodes, upgrade when proven-reached nodes need it
-    let minimal = EdgeAnchor {
-        kind: AnchorKind::SyntaxFallback,
-        path: path.clone(),
-        line1: 1,
-        col1: 1,
-        symbol_uri: None,
-        import_id: None,
-        doc: None,
-        display: None,
-        candidate_display: Some(name.clone()),
-        span_bytes: Some((*byte_start, *byte_end)),
-        precision: "Heuristic".to_string(),
-        uncertainty: None,
-        data_member: false,
-    };
+    let minimal = minimal_anchor(path, &name, Some((*byte_start, *byte_end)));
     let found = caller_candidate_paths_with(tx, snapshot_id, inputs, &minimal)?;
     Ok(NameSeed::Named(crate::edges::CandidateSeed {
         name: called_name(&name).to_string(),
@@ -5551,5 +5670,61 @@ mod summary_rules {
         assert_eq!(r.file, "c.py");
         assert_eq!(r.distance, 2);
         assert!(!r.test);
+    }
+}
+
+#[cfg(test)]
+mod name_matching {
+    use super::*;
+
+    /// Inserts one file and one function definition named `name` in it; the
+    /// counting query reads only these columns.
+    fn define(conn: &rusqlite::Connection, path: &str, name: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO files (snapshot_id, path, language, bytes, digest, errors) VALUES (1, ?1, 'python', 1, 'd', 0)",
+            rusqlite::params![path],
+        )
+        .unwrap();
+        let file_id: i64 = conn
+            .query_row(
+                "SELECT id FROM files WHERE snapshot_id = 1 AND path = ?1",
+                rusqlite::params![path],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO symbols (snapshot_id, file_id, kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language) VALUES (1, ?1, 'function', ?2, 1, 1, 1, 1, 0, 1, 'syntax', 'g', 'python')",
+            rusqlite::params![file_id, name],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn names_match_exactly_with_sql_metacharacters_and_quotes() {
+        let conn = store::open_memory().unwrap();
+        for (path, name) in [
+            ("a.py", "a_b"),
+            ("b.py", "axb"),
+            ("c.py", "a%b"),
+            ("d.py", "a'b"),
+        ] {
+            define(&conn, path, name);
+        }
+        assert_eq!(definition_paths(&conn, 1, "a_b").unwrap(), vec!["a.py"]);
+        assert_eq!(definition_paths(&conn, 1, "a%b").unwrap(), vec!["c.py"]);
+        assert_eq!(definition_paths(&conn, 1, "a'b").unwrap(), vec!["d.py"]);
+        assert!(definition_paths(&conn, 1, "a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_qualified_name_matches_its_terminal_name_only() {
+        let conn = store::open_memory().unwrap();
+        define(&conn, "w.cpp", "Widget::run");
+        define(&conn, "v.cpp", "Widget::running");
+        assert_eq!(definition_paths(&conn, 1, "run").unwrap(), vec!["w.cpp"]);
+        assert_eq!(
+            definition_paths(&conn, 1, "running").unwrap(),
+            vec!["v.cpp"]
+        );
     }
 }

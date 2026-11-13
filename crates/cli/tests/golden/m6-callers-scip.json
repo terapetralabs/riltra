@@ -1,44 +1,29 @@
 {
-  "schema_version": 1,
-  "repo": "sem",
-  "snapshot": {
-    "id": 1,
-    "nonce": "<nonce>",
-    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
-  },
-  "direction": "callers",
   "anchor": {
-    "kind": "semantic",
-    "path": "lib.py",
-    "line": 1,
-    "col": 6,
-    "symbol_uri": "scip-test test test-pkg 1.0.0 lib.py/target().",
-    "import_id": 1,
-    "precision": "Heuristic",
     "anchor_uncertainty": null,
+    "col": 6,
+    "endpoint": {
+      "byte_end": null,
+      "byte_start": null,
+      "doc": null,
+      "import_id": 1,
+      "path": null,
+      "symbol_uri": "scip-test test test-pkg 1.0.0 lib.py/target().",
+      "type": "scip"
+    },
+    "import_id": 1,
+    "kind": "semantic",
+    "line": 1,
+    "path": "lib.py",
+    "precision": "Heuristic",
     "span": [
       4,
       10
     ],
-    "endpoint": {
-      "type": "scip",
-      "import_id": 1,
-      "symbol_uri": "scip-test test test-pkg 1.0.0 lib.py/target().",
-      "doc": null,
-      "path": null,
-      "byte_start": null,
-      "byte_end": null
-    }
+    "symbol_uri": "scip-test test test-pkg 1.0.0 lib.py/target()."
   },
-  "freshness": {
-    "status": "fresh",
-    "reasons": []
-  },
-  "verification": "Unverified",
   "completeness": {
-    "status": "partial",
     "covered": 1,
-    "total": 1,
     "denominator": {
       "ambiguous_calls": 0,
       "dynamic_calls": 0,
@@ -52,80 +37,95 @@
       "unresolved_target": 0,
       "unsupported_files": 1
     },
+    "status": "partial",
+    "total": 1,
     "unresolved": [
       "unsupported_files"
     ]
   },
+  "direction": "callers",
   "edges": [
     {
-      "kind": "CALLS",
-      "precision": "Exact",
-      "caller": {
-        "type": "scip",
-        "import_id": 1,
-        "symbol_uri": "scip-test test test-pkg 1.0.0 main.py/caller().",
-        "doc": null,
-        "path": null,
-        "byte_start": null,
-        "byte_end": null
-      },
       "callee": {
-        "type": "scip",
-        "import_id": 1,
-        "symbol_uri": "scip-test test test-pkg 1.0.0 lib.py/target().",
-        "doc": null,
-        "path": null,
+        "byte_end": null,
         "byte_start": null,
-        "byte_end": null
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test test-pkg 1.0.0 lib.py/target().",
+        "type": "scip"
+      },
+      "callee_name": "target",
+      "caller": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test test-pkg 1.0.0 main.py/caller().",
+        "type": "scip"
       },
       "caller_path": "main.py",
       "caller_span": [
         49,
         57
       ],
-      "callee_name": "target",
-      "provider": "scip-import",
-      "import_id": 1,
-      "tool": "scip-test",
-      "verification": "Unverified",
-      "unresolved": null,
       "evidence": {
-        "path": "main.py",
-        "span": [
-          49,
-          57
-        ],
         "callee_span": [
           49,
           55
         ],
-        "terminal_span": [
-          49,
-          55
+        "digest": "efdc560edb1437c7",
+        "imports": [
+          {
+            "artifact_id": "<artifact>",
+            "content_identity": "9a80fe22347c0ef3",
+            "id": 1,
+            "provider": "scip-test",
+            "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>",
+            "version": "1.0"
+          }
         ],
+        "path": "main.py",
+        "provider": "scip-import",
         "reference_span": [
           49,
           55
         ],
-        "digest": "efdc560edb1437c7",
-        "provider": "scip-import",
-        "imports": [
-          {
-            "id": 1,
-            "provider": "scip-test",
-            "version": "1.0",
-            "artifact_id": "<artifact>",
-            "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>",
-            "content_identity": "9a80fe22347c0ef3"
-          }
+        "span": [
+          49,
+          57
+        ],
+        "terminal_span": [
+          49,
+          55
         ]
-      }
+      },
+      "import_id": 1,
+      "kind": "CALLS",
+      "precision": "Exact",
+      "provider": "scip-import",
+      "tool": "scip-test",
+      "unresolved": null,
+      "verification": "Unverified"
     }
   ],
-  "truncated": false,
+  "freshness": {
+    "reasons": [],
+    "status": "fresh"
+  },
   "limits": {
     "limit": 50,
-    "offset": 0,
-    "next_offset": null
-  }
+    "next_offset": null,
+    "offset": 0
+  },
+  "repo": "sem",
+  "schema_version": 1,
+  "snapshot": {
+    "id": 1,
+    "nonce": "<nonce>",
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
+  },
+  "truncated": false,
+  "verification": "Unverified"
 }

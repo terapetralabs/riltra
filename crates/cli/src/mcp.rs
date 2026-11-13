@@ -364,7 +364,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callers",
-        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: before changing a function or method, to see what appears to call it.",
+        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: before changing a function or method, to see what appears to call it.",
         annotations(
             title = "Find callers",
             read_only_hint = true,
@@ -381,7 +381,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callees",
-        description = "Symbols the anchor definition calls (same document as CLI `callees`). A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to see what a function or method appears to depend on.",
+        description = "Symbols the anchor definition calls (same document as CLI `callees`). A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to see what a function or method appears to depend on.",
         annotations(
             title = "Find callees",
             read_only_hint = true,
@@ -398,7 +398,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_trace",
-        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to check whether and how one symbol might reach another.",
+        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to check whether and how one symbol might reach another.",
         annotations(
             title = "Trace call paths",
             read_only_hint = true,
@@ -412,7 +412,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_impact",
-        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe. Name-matched callers are listed as `candidate-name` paths and never followed further. `summary` adds counts over this traversal (a small `limit` caps candidates per node and can lower them); `include_tests` needs `summary`.",
+        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe. Name-matched callers are listed as `candidate-name` paths and never followed further. `summary` adds counts over this traversal (a small `limit` caps candidates per node and can lower them); `include_tests` needs `summary`.",
         annotations(
             title = "Estimate impact",
             read_only_hint = true,
@@ -429,7 +429,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_context",
-        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to inspect code impact and its recorded rationale together.",
+        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to inspect code impact and its recorded rationale together.",
         annotations(
             title = "Read graph context",
             read_only_hint = true,

@@ -6162,3 +6162,93 @@ fn target_substring_is_a_true_substring_over_mcp() {
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 }
+
+// --- Candidate labels through MCP: the same keys and document as the CLI ---
+
+#[test]
+fn candidate_labels_mcp_matches_cli_on_all_five_tools() {
+    let h = home("candidates-parity");
+    let src = home("candidates-parity-src");
+    std::fs::write(src.join("a.py"), "def target():\n    return 1\n").unwrap();
+    std::fs::write(
+        src.join("b.py"),
+        "from a import target\n\n\ndef user():\n    target()\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &src, "c");
+    let mut s = ready(&h);
+
+    let d = graph_doc(
+        &mut s,
+        2,
+        "riltra_code_callers",
+        &json!({"repo": "c", "path": "a.py", "line": 1, "col": 1}),
+    );
+    assert_graph_parity(
+        &h,
+        &d,
+        &[
+            "callers", "--repo", "c", "--path", "a.py", "--line", "1", "--col", "1",
+        ],
+    );
+    assert_eq!(d["edges"][0]["candidates"], 1, "{d}");
+    assert_eq!(d["edges"][0]["candidate_scope"], "imported-file", "{d}");
+
+    let d = graph_doc(
+        &mut s,
+        3,
+        "riltra_code_callees",
+        &json!({"repo": "c", "path": "b.py", "line": 4, "col": 1}),
+    );
+    assert_graph_parity(
+        &h,
+        &d,
+        &[
+            "callees", "--repo", "c", "--path", "b.py", "--line", "4", "--col", "1",
+        ],
+    );
+    assert_eq!(d["edges"][0]["candidate_scope"], "imported-file", "{d}");
+
+    let d = graph_doc(
+        &mut s,
+        4,
+        "riltra_code_impact",
+        &json!({"repo": "c", "path": "a.py", "line": 1, "col": 1}),
+    );
+    assert_graph_parity(
+        &h,
+        &d,
+        &[
+            "impact", "--repo", "c", "--path", "a.py", "--line", "1", "--col", "1",
+        ],
+    );
+    assert_eq!(
+        d["paths"][0]["edges"][0]["candidate_scope"], "imported-file",
+        "{d}"
+    );
+
+    let d = graph_doc(
+        &mut s,
+        5,
+        "riltra_context",
+        &json!({"repo": "c", "target": "target"}),
+    );
+    assert_graph_parity(&h, &d, &["context", "--repo", "c", "--target", "target"]);
+
+    let d = graph_doc(
+        &mut s,
+        6,
+        "riltra_code_trace",
+        &json!({"repo": "c", "target": "user", "to": "a.py:1:1"}),
+    );
+    assert_graph_parity(
+        &h,
+        &d,
+        &[
+            "trace", "--repo", "c", "--target", "user", "--to", "a.py:1:1",
+        ],
+    );
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}

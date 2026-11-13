@@ -66,6 +66,8 @@
           200,
           213
         ],
+        "candidate_scope": "same-file",
+        "candidates": 2,
         "evidence": {
           "callee_span": [
             200,
@@ -189,6 +191,8 @@
           200,
           213
         ],
+        "candidate_scope": "same-file",
+        "candidates": 2,
         "evidence": {
           "callee_span": [
             200,
@@ -379,6 +383,8 @@
               200,
               213
             ],
+            "candidate_scope": "same-file",
+            "candidates": 2,
             "evidence": {
               "callee_span": [
                 200,
@@ -514,6 +520,8 @@
           200,
           213
         ],
+        "candidate_scope": "same-file",
+        "candidates": 2,
         "evidence": {
           "callee_span": [
             200,
@@ -672,6 +680,8 @@
               200,
               213
             ],
+            "candidate_scope": "same-file",
+            "candidates": 2,
             "evidence": {
               "callee_span": [
                 200,
@@ -851,6 +861,8 @@
               200,
               213
             ],
+            "candidate_scope": "same-file",
+            "candidates": 2,
             "evidence": {
               "callee_span": [
                 200,

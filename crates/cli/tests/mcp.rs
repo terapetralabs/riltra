@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+#[path = "common/mock_lsp.rs"]
+mod mock_lsp;
 #[path = "common/rust_alias.rs"]
 mod rust_alias;
 
@@ -5065,26 +5067,7 @@ fn t5_knowledge_hostile_or_corrupt_store_fails_closed() {
 
 // --- M9: the semantic tool ----------------------------------------------------
 
-/// The mock language server binary, built once per test process. `testutil`
-/// is `#[cfg(test)]`-only, so an integration test cannot call it and repeats
-/// the build/locate logic `tests/semantic.rs` already uses.
-fn mock_lsp_bin() -> PathBuf {
-    static BUILD: std::sync::Once = std::sync::Once::new();
-    BUILD.call_once(|| {
-        let status = std::process::Command::new("cargo")
-            .args(["build", "--offline", "--example", "mock_lsp"])
-            .status()
-            .expect("cargo build mock server");
-        assert!(status.success(), "mock server must build");
-    });
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // test binary
-    p.pop(); // deps
-    p.push("examples");
-    p.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
-    assert!(p.is_file(), "mock server missing: {}", p.display());
-    p
-}
+use mock_lsp::mock_lsp_bin;
 
 /// A repository the mock can answer about. Line 2 carries a non-ASCII
 /// character, so a UTF-16 column and a byte column differ: the UTF-16

@@ -51,22 +51,8 @@ pub fn git_repo(tag: &str, branch: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+#[path = "../tests/common/mock_lsp.rs"]
+mod mock_lsp;
 /// The mock language server binary, built once per test process so it can
 /// never go stale. A missing binary fails loudly, never skips.
-pub fn mock_lsp_bin() -> PathBuf {
-    static BUILD: std::sync::Once = std::sync::Once::new();
-    BUILD.call_once(|| {
-        let status = std::process::Command::new("cargo")
-            .args(["build", "--offline", "--example", "mock_lsp"])
-            .status()
-            .expect("cargo build mock server");
-        assert!(status.success(), "mock server must build");
-    });
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // test binary
-    p.pop(); // deps
-    p.push("examples");
-    p.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
-    assert!(p.is_file(), "mock server missing: {}", p.display());
-    p
-}
+pub use mock_lsp::mock_lsp_bin;

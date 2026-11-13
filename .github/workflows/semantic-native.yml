@@ -149,7 +149,8 @@ jobs:
         env:
           CARGO_NET_OFFLINE: 'true'
         run: |
-          $testExe = $env:RILTRA_NATIVE_TEST_EXE
+          # Cargo may report the executable with mixed separators; netsh rejects them.
+          $testExe = [System.IO.Path]::GetFullPath($env:RILTRA_NATIVE_TEST_EXE)
           if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) { throw "native test executable missing: $testExe" }
           $enabledProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object { $_.Enabled -eq $true })
           if ($enabledProfiles.Count -eq 0) { throw 'Windows Firewall is not enabled for any active profile' }

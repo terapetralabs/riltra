@@ -2703,6 +2703,12 @@ fn task4_binary_source_is_an_explicit_coverage_gap() {
 }
 
 fn trace_fixture(h: &Path, graph: &[Vec<usize>]) -> Vec<usize> {
+    trace_fixture_with(h, graph, &[])
+}
+
+/// `trace_fixture` plus `extra` files that are indexed but left out of the SCIP
+/// import, so their calls keep syntax-only `POTENTIAL_CALL` rows.
+fn trace_fixture_with(h: &Path, graph: &[Vec<usize>], extra: &[(&str, &str)]) -> Vec<usize> {
     let names: Vec<String> = (0..graph.len()).map(|i| format!("f{i}")).collect();
     let uris: Vec<String> = names
         .iter()
@@ -2741,7 +2747,9 @@ fn trace_fixture(h: &Path, graph: &[Vec<usize>]) -> Vec<usize> {
         src.push('\n');
         line += 1;
     }
-    let dir = repo_with(h, "sem", &[("graph.py", &src)]);
+    let mut files = vec![("graph.py", src.as_str())];
+    files.extend_from_slice(extra);
+    let dir = repo_with(h, "sem", &files);
     do_index(h);
     let symbols: Vec<_> = uris
         .iter()
@@ -3077,29 +3085,38 @@ fn task6_impact_direct_and_transitive_are_proven_without_reindex() {
 
 #[test]
 fn task6_impact_zero_false_safe_syntax_corpus() {
+    // The third field counts the calls to `f0` in the source: each is one candidate.
     let cases = [
-        ("leaf", "def f0():\n    pass\n"),
-        ("recursion", "def f0():\n    f0()\n"),
-        ("cycle", "def f0():\n    f1()\n\ndef f1():\n    f0()\n"),
-        ("dynamic", "def f0():\n    obj.run()\n"),
-        ("missing", "def f0():\n    missing()\n"),
+        ("leaf", "def f0():\n    pass\n", 0),
+        ("recursion", "def f0():\n    f0()\n", 1),
+        ("cycle", "def f0():\n    f1()\n\ndef f1():\n    f0()\n", 1),
+        ("dynamic", "def f0():\n    obj.run()\n", 0),
+        ("missing", "def f0():\n    missing()\n", 0),
         (
             "same-name",
             "def f0():\n    pass\n\nclass C:\n    def f0(self):\n        pass\n",
+            0,
         ),
-        ("owner-unproven", "def f0():\n    pass\n\nf0()\n"),
-        ("alias", "def f0():\n    pass\n\na = f0\na()\n"),
+        ("owner-unproven", "def f0():\n    pass\n\nf0()\n", 1),
+        ("alias", "def f0():\n    pass\n\na = f0\na()\n", 0),
     ];
-    for (name, source) in cases {
+    for (name, source, f0_calls) in cases {
         let h = home(&format!("impact-corpus-{name}"));
         repo_with(&h, "sem", &[("graph.py", source)]);
         do_index(&h);
         let v = impact_json(&h, 1, &[]);
         assert_unknown_impact(&v);
         assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+        // A name alone may list candidates (`candidate-name`), never a proven link.
+        let paths = v["paths"].as_array().unwrap();
         assert!(
-            v["paths"].as_array().unwrap().is_empty(),
-            "no name linking: {v}"
+            paths.iter().all(|p| p["basis"] == "candidate-name"),
+            "no proven name linking: {v}"
+        );
+        assert_eq!(
+            paths.len(),
+            f0_calls,
+            "{name}: one candidate per call to f0: {v}"
         );
     }
 }
@@ -3272,7 +3289,11 @@ fn task6_impact_ambiguous_semantic_dispatch_counts_unknowns() {
     assert_unknown_impact(&v);
     assert_eq!(v["completeness"]["denominator"]["ambiguous_calls"], 1);
     assert_eq!(v["completeness"]["denominator"]["unresolved_target"], 1);
-    assert_eq!(v["paths"], serde_json::json!([]));
+    // The ambiguous call is the one name-matched candidate (C1 lists SCIP
+    // anchors' candidates); no proven or unproven path may come from it.
+    let paths = v["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1, "{v}");
+    assert_eq!(paths[0]["basis"], "candidate-name", "{v}");
 }
 
 #[test]
@@ -3382,22 +3403,115 @@ fn task6_impact_full_json_goldens() {
     );
     do_index(&h);
     let syntax = normalized_edge_json(impact_json(&h, 7, &[]));
-    let expected: serde_json::Value =
-        serde_json::from_str(include_str!("golden/m6-impact-syntax.json")).unwrap();
-    assert_eq!(syntax, expected);
+    // Truth first: the syntax-only caller f1 is a name-matched candidate, never proven.
+    assert_eq!(syntax["verdict"], "UNKNOWN", "{syntax}");
+    let paths = syntax["paths"].as_array().unwrap();
+    assert!(!paths.is_empty(), "{syntax}");
+    assert!(
+        paths.iter().all(|p| p["basis"] == "candidate-name"),
+        "{syntax}"
+    );
+    impact_golden("m6-impact-syntax.json", &syntax);
     let h = home("impact-golden-scip");
     trace_fixture(&h, &[vec![1], vec![2], vec![]]);
-    for (extra, golden) in [
-        (vec![], include_str!("golden/m6-impact-scip.json")),
-        (
-            vec!["--depth", "1"],
-            include_str!("golden/m6-impact-truncated.json"),
-        ),
+    for (extra, name) in [
+        (vec![], "m6-impact-scip.json"),
+        (vec!["--depth", "1"], "m6-impact-truncated.json"),
     ] {
         let actual = normalized_edge_json(impact_json(&h, 7, &extra));
-        let expected: serde_json::Value = serde_json::from_str(golden).unwrap();
-        assert_eq!(actual, expected);
+        // Truth first: the SCIP chain is proven and lists no candidates.
+        let paths = actual["paths"].as_array().unwrap();
+        assert!(paths.iter().all(|p| p["basis"] == "proven"), "{actual}");
+        assert_eq!(actual["candidates"]["returned"], 0, "{actual}");
+        impact_golden(name, &actual);
     }
+}
+
+/// The task7 golden contract: after the truth assertions, `RILTRA_UPDATE_M6_GOLDENS=1`
+/// rewrites the file (same writer as the M6 corpus), then the file is compared.
+fn impact_golden(name: &str, actual: &serde_json::Value) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    if std::env::var_os("RILTRA_UPDATE_M6_GOLDENS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        std::fs::write(&path, serde_json::to_string_pretty(actual).unwrap() + "\n").unwrap();
+    }
+    let expected: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(actual, &expected, "{name} differs");
+}
+
+// --- Task 3A: candidates from a SCIP-resolved anchor and at the depth boundary ---
+
+#[test]
+fn task3a_scip_anchor_lists_its_name_matched_callers_as_candidates() {
+    let h = home("task3a-scip-anchor");
+    let lines = trace_fixture_with(
+        &h,
+        &[vec![1], vec![2], vec![]],
+        &[("extra.py", "from graph import f2\n\n\ndef g():\n    f2()\n")],
+    );
+    let line = lines[2].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let callers: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        callers["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "POTENTIAL_CALL" && e["caller_path"] == "extra.py"),
+        "precondition: callers lists the name-matched call: {out}"
+    );
+    let v = impact_json(&h, lines[2], &[]);
+    assert_eq!(v["anchor"]["kind"], "semantic", "{v}");
+    let paths = v["paths"].as_array().unwrap();
+    assert!(
+        paths
+            .iter()
+            .any(|p| p["basis"] == "candidate-name" && p["edges"][0]["caller_path"] == "extra.py"),
+        "the SCIP anchor must list its name-matched caller: {v}"
+    );
+    assert!(paths.iter().any(|p| p["basis"] == "proven"), "{v}");
+}
+
+#[test]
+fn task3a_depth_boundary_probe_states_a_candidate_beyond_depth() {
+    let h = home("task3a-depth-boundary");
+    // f1 is proven to call f2; g calls f1 by name only, so the chain reaches
+    // beyond `--depth 1` through a candidate edge alone.
+    let lines = trace_fixture_with(
+        &h,
+        &[vec![], vec![2], vec![]],
+        &[("extra.py", "from graph import f1\n\n\ndef g():\n    f1()\n")],
+    );
+    let full = impact_json(&h, lines[2], &[]);
+    assert!(
+        full["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["basis"] == "candidate-name" && p["distance"] == 2),
+        "precondition: g is a candidate two hops out: {full}"
+    );
+    let v = impact_json(&h, lines[2], &["--depth", "1"]);
+    assert_eq!(v["paths"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["paths"][0]["basis"], "proven", "{v}");
+    assert_eq!(v["candidates"]["complete"], false, "{v}");
+    assert!(v["candidates"]["total"].is_null(), "{v}");
+    assert!(
+        v["unresolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "depth-budget"),
+        "{v}"
+    );
 }
 
 // --- M9 CP3: E8 - C/C++ include resolution in the candidate scope ---------

@@ -409,7 +409,18 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
                 "target", "to",
             ],
             "riltra_code_impact" => &[
-                "col", "depth", "in", "kind", "limit", "line", "offset", "path", "repo", "symbol",
+                "col",
+                "depth",
+                "in",
+                "include_tests",
+                "kind",
+                "limit",
+                "line",
+                "offset",
+                "path",
+                "repo",
+                "summary",
+                "symbol",
                 "target",
             ],
             _ => &[
@@ -3541,6 +3552,92 @@ fn t4_impact_rejects_a_destination_parameter() {
     );
     assert_eq!(d["direction"], "impact", "{d}");
     assert_eq!(d["destination"], Value::Null, "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn t3a_impact_target_matches_the_cli_and_labels_candidates() {
+    let h = home("t3a-impact");
+    let r = home("t3a-impact-repo");
+    std::fs::create_dir_all(&r).unwrap();
+    std::fs::write(r.join("a.py"), "def target():\n    return 1\n").unwrap();
+    std::fs::write(
+        r.join("b.py"),
+        "from a import target\n\n\ndef user():\n    target()\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &r, "t3a");
+    let mut s = ready(&h);
+    let mcp = graph_doc(
+        &mut s,
+        2,
+        "riltra_code_impact",
+        &json!({"repo": "t3a", "target": "target"}),
+    );
+    let (code, out, err) = run_cli(&h, &["impact", "--repo", "t3a", "--target", "target"]);
+    assert_eq!(code, 0, "{err}");
+    let cli: Value = serde_json::from_str(out.trim_end()).unwrap();
+    assert_eq!(mcp, cli);
+    assert_eq!(mcp["paths"][0]["basis"], "candidate-name", "{mcp}");
+    assert_eq!(mcp["candidates"]["returned"], 1, "{mcp}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn t3b_impact_summary_matches_the_cli_and_include_tests_needs_summary() {
+    let h = home("t3b-impact");
+    let r = home("t3b-impact-repo");
+    std::fs::create_dir_all(r.join("tests")).unwrap();
+    std::fs::write(r.join("lib.py"), "def target():\n    return 1\n").unwrap();
+    std::fs::write(
+        r.join("user.py"),
+        "from lib import target\n\n\ndef user():\n    target()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        r.join("tests").join("test_lib.py"),
+        "from lib import target\n\n\ndef test_target():\n    target()\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &r, "t3b");
+    let mut s = ready(&h);
+    let mcp = graph_doc(
+        &mut s,
+        2,
+        "riltra_code_impact",
+        &json!({"repo": "t3b", "target": "target", "summary": true}),
+    );
+    let (code, out, err) = run_cli(
+        &h,
+        &["impact", "--repo", "t3b", "--target", "target", "--summary"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let cli: Value = serde_json::from_str(out.trim_end()).unwrap();
+    assert_eq!(mcp, cli);
+    assert_eq!(mcp["summary"]["total"], 1, "{mcp}");
+    // include_tests without summary is refused as invalid input.
+    let bad = call_tool(
+        &mut s,
+        3,
+        "riltra_code_impact",
+        &json!({"repo": "t3b", "target": "target", "include_tests": true}),
+    );
+    assert!(is_error(&bad), "{bad}");
+    assert_eq!(bad["structuredContent"]["kind"], "invalid_input", "{bad}");
+    // Unknown parameters stay rejected.
+    s.send(
+        &json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "riltra_code_impact", "arguments":
+                {"repo": "t3b", "target": "target", "bogus": 1}}
+        })
+        .to_string(),
+    );
+    let v = s.recv();
+    let rejected = v.get("error").is_some() || v.get("result").is_some_and(is_error);
+    assert!(rejected, "unknown field must be rejected: {v}");
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 }

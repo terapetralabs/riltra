@@ -1,47 +1,48 @@
 {
-  "verdict": "UNKNOWN",
-  "schema_version": 1,
-  "repo": "sem",
-  "snapshot": {
-    "id": 1,
-    "nonce": "<nonce>",
-    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
-  },
-  "direction": "impact",
   "anchor": {
-    "kind": "semantic",
-    "path": "graph.py",
-    "line": 7,
-    "col": 6,
-    "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f2().",
-    "import_id": 1,
-    "precision": "Heuristic",
     "anchor_uncertainty": null,
+    "col": 6,
+    "endpoint": {
+      "byte_end": null,
+      "byte_start": null,
+      "doc": null,
+      "import_id": 1,
+      "path": null,
+      "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f2().",
+      "type": "scip"
+    },
+    "import_id": 1,
+    "kind": "semantic",
+    "line": 7,
+    "path": "graph.py",
+    "precision": "Heuristic",
     "span": [
       44,
       46
     ],
-    "endpoint": {
-      "type": "scip",
-      "import_id": 1,
-      "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f2().",
-      "doc": null,
-      "path": null,
-      "byte_start": null,
-      "byte_end": null
-    }
+    "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f2()."
   },
-  "destination": null,
-  "freshness": {
-    "status": "fresh",
-    "reasons": []
+  "bridges": [],
+  "budgets": {
+    "depth": 1,
+    "edges": 3000,
+    "mappings": 500,
+    "max_depth": 6,
+    "nodes": 500,
+    "paths": 1000,
+    "time_ms": 2000
   },
-  "verification": "Unverified",
+  "candidates": {
+    "complete": false,
+    "followed": false,
+    "nodes": 1,
+    "per_node_limit": 50,
+    "returned": 0,
+    "scope": "anchor-and-proven-nodes",
+    "total": null
+  },
   "completeness": {
-    "status": "partial",
     "covered": 1,
-    "total": 1,
-    "total_exact": false,
     "denominator": {
       "ambiguous_calls": 0,
       "dynamic_calls": 0,
@@ -55,6 +56,9 @@
       "unresolved_target": 0,
       "unsupported_files": 0
     },
+    "status": "partial",
+    "total": 1,
+    "total_exact": false,
     "unresolved": [
       "depth-budget",
       "graph-completeness-unproven",
@@ -62,105 +66,111 @@
       "truncated_branches"
     ]
   },
+  "cycle": false,
+  "destination": null,
+  "direction": "impact",
+  "disclaimer": "plausible-impact-not-execution",
+  "freshness": {
+    "reasons": [],
+    "status": "fresh"
+  },
+  "limits": {
+    "limit": 50,
+    "next_offset": null,
+    "offset": 0
+  },
   "paths": [
     {
+      "basis": "proven",
+      "cycle": false,
       "distance": 1,
-      "scope": "direct",
       "edges": [
         {
-          "kind": "CALLS",
-          "precision": "Exact",
-          "caller": {
-            "type": "scip",
-            "import_id": 1,
-            "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f1().",
-            "doc": null,
-            "path": null,
-            "byte_start": null,
-            "byte_end": null
-          },
           "callee": {
-            "type": "scip",
-            "import_id": 1,
-            "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f2().",
-            "doc": null,
-            "path": null,
+            "byte_end": null,
             "byte_start": null,
-            "byte_end": null
+            "doc": null,
+            "import_id": 1,
+            "path": null,
+            "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f2().",
+            "type": "scip"
+          },
+          "callee_name": "f2",
+          "caller": {
+            "byte_end": null,
+            "byte_start": null,
+            "doc": null,
+            "import_id": 1,
+            "path": null,
+            "symbol_uri": "scip-test test test-pkg 1.0.0 graph.py/f1().",
+            "type": "scip"
           },
           "caller_path": "graph.py",
           "caller_span": [
             34,
             38
           ],
-          "callee_name": "f2",
-          "provider": "scip-import",
-          "import_id": 1,
-          "tool": "trace",
-          "verification": "Unverified",
-          "unresolved": null,
           "evidence": {
-            "path": "graph.py",
-            "span": [
-              34,
-              38
-            ],
             "callee_span": [
               34,
               36
             ],
-            "terminal_span": [
-              34,
-              36
+            "digest": "590fddd26c9b5cfc",
+            "imports": [
+              {
+                "artifact_id": "<artifact>",
+                "content_identity": "564596e4b180d905",
+                "id": 1,
+                "provider": "trace",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>",
+                "version": "1.0"
+              }
             ],
+            "path": "graph.py",
+            "provider": "scip-import",
             "reference_span": [
               34,
               36
             ],
-            "digest": "590fddd26c9b5cfc",
-            "provider": "scip-import",
-            "imports": [
-              {
-                "id": 1,
-                "provider": "trace",
-                "version": "1.0",
-                "artifact_id": "<artifact>",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>",
-                "content_identity": "564596e4b180d905"
-              }
+            "span": [
+              34,
+              38
+            ],
+            "terminal_span": [
+              34,
+              36
             ]
-          }
+          },
+          "import_id": 1,
+          "kind": "CALLS",
+          "precision": "Exact",
+          "provider": "scip-import",
+          "tool": "trace",
+          "unresolved": null,
+          "verification": "Unverified"
         }
       ],
-      "cycle": false,
+      "scope": "direct",
       "truncated": false,
-      "verification": "Unverified",
-      "unresolved": []
+      "unresolved": [],
+      "verification": "Unverified"
     }
   ],
-  "bridges": [],
-  "visits": {
-    "nodes": 2,
-    "edges": 1
+  "repo": "sem",
+  "schema_version": 1,
+  "snapshot": {
+    "id": 1,
+    "nonce": "<nonce>",
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
   },
-  "budgets": {
-    "depth": 1,
-    "max_depth": 6,
-    "nodes": 500,
-    "edges": 3000,
-    "paths": 1000,
-    "mappings": 500,
-    "time_ms": 2000
-  },
-  "limits": {
-    "limit": 50,
-    "offset": 0,
-    "next_offset": null
-  },
-  "cycle": false,
   "truncated": true,
   "unresolved": [
     "depth-budget"
   ],
-  "disclaimer": "plausible-impact-not-execution"
+  "verdict": "UNKNOWN",
+  "verification": "Unverified",
+  "visits": {
+    "edges": 1,
+    "nodes": 2
+  }
 }

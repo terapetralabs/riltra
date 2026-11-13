@@ -143,6 +143,12 @@ struct ImpactInput {
     limit: Option<usize>,
     /// Paths to skip before returning results (default 0).
     offset: Option<usize>,
+    /// Add the `summary` object, counted over all traversal paths (not the page).
+    #[serde(default)]
+    summary: bool,
+    /// With `summary`: count test-file paths too (a path heuristic, see the docs).
+    #[serde(default)]
+    include_tests: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -406,7 +412,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_impact",
-        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe.",
+        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe. Name-matched callers are listed as `candidate-name` paths and never followed further. `summary` adds counts over this traversal (a small `limit` caps candidates per node and can lower them); `include_tests` needs `summary`.",
         annotations(
             title = "Estimate impact",
             read_only_hint = true,
@@ -1128,7 +1134,7 @@ enum GraphMode {
     Callers,
     Callees,
     Trace,
-    Impact,
+    Impact { summary: bool, include_tests: bool },
 }
 
 /// A validated request plus the paths the connection query needs; validation
@@ -1149,7 +1155,7 @@ fn graph_doc(
     offset: Option<usize>,
     mode: GraphMode,
 ) -> CallToolResult {
-    let is_graph = matches!(mode, GraphMode::Trace | GraphMode::Impact);
+    let is_graph = matches!(mode, GraphMode::Trace | GraphMode::Impact { .. });
     let depth = if is_graph {
         match graph_depth(depth) {
             Ok(d) => d,
@@ -1208,8 +1214,16 @@ fn graph_doc(
                 Err(e) => return tool_error("invalid_input", &e),
             }
         }
-        GraphMode::Trace | GraphMode::Impact => {
+        GraphMode::Trace | GraphMode::Impact { .. } => {
             let request = index::TraceRequest {
+                summary: matches!(mode, GraphMode::Impact { summary: true, .. }),
+                include_tests: matches!(
+                    mode,
+                    GraphMode::Impact {
+                        include_tests: true,
+                        ..
+                    }
+                ),
                 source: index::SpanQuery {
                     rel: &path,
                     line1: line,
@@ -1264,7 +1278,8 @@ fn graph_doc(
                     &request,
                     started,
                     || {},
-                    matches!(mode, GraphMode::Impact),
+                    matches!(mode, GraphMode::Impact { .. }),
+                    matches!(mode, GraphMode::Impact { .. }),
                 ) {
                     Ok(out) => doc(&response::trace_query_json(&out)),
                     Err(e) => graph_query_error(e),
@@ -1323,6 +1338,9 @@ fn trace_doc(input: &TraceInput) -> CallToolResult {
 }
 
 fn impact_doc(input: &ImpactInput) -> CallToolResult {
+    if input.include_tests && !input.summary {
+        return tool_error("invalid_input", "include_tests needs summary");
+    }
     let anchor = match anchor_of(
         input.path.as_deref(),
         input.line,
@@ -1342,7 +1360,10 @@ fn impact_doc(input: &ImpactInput) -> CallToolResult {
         input.depth,
         input.limit,
         input.offset,
-        GraphMode::Impact,
+        GraphMode::Impact {
+            summary: input.summary,
+            include_tests: input.include_tests,
+        },
     )
 }
 

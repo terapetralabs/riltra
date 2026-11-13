@@ -269,7 +269,33 @@
       ],
       "symbol_uri": "scip-test test corpus 1.0.0 competing_targets.ts/t()."
     },
-    "bridges": [],
+    "bridges": [
+      {
+        "definition_span": [
+          118,
+          124
+        ],
+        "digest": "4732993ffcd50404",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 competing_targets.ts/c().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 163,
+          "byte_start": 109,
+          "doc": null,
+          "import_id": null,
+          "path": "competing_targets.ts",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      }
+    ],
     "budgets": {
       "depth": 3,
       "edges": 3000,
@@ -279,13 +305,22 @@
       "paths": 1000,
       "time_ms": 2000
     },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 1,
+      "per_node_limit": 50,
+      "returned": 1,
+      "scope": "anchor-and-proven-nodes",
+      "total": 1
+    },
     "completeness": {
-      "covered": 0,
+      "covered": 1,
       "denominator": {
         "ambiguous_calls": 1,
         "dynamic_calls": 0,
         "missing_provider_files": 0,
-        "observed_edges": 0,
+        "observed_edges": 1,
         "parse_error_files": 0,
         "skipped_files": 0,
         "stale_imports": 0,
@@ -295,13 +330,15 @@
         "unsupported_files": 0
       },
       "status": "partial",
-      "total": 0,
+      "total": 1,
       "total_exact": true,
       "unresolved": [
+        "ambiguous:2",
         "ambiguous_calls",
-        "empty-result-not-coverage-proof",
+        "candidate-name-not-followed",
         "graph-completeness-unproven",
         "insufficient-impact-evidence",
+        "unproven-relation",
         "unresolved-relations",
         "unresolved_target"
       ]
@@ -319,7 +356,75 @@
       "next_offset": null,
       "offset": 0
     },
-    "paths": [],
+    "paths": [
+      {
+        "basis": "candidate-name",
+        "cycle": false,
+        "distance": 1,
+        "edges": [
+          {
+            "callee": null,
+            "callee_name": "target",
+            "caller": {
+              "byte_end": 163,
+              "byte_start": 109,
+              "doc": null,
+              "import_id": null,
+              "path": "competing_targets.ts",
+              "symbol_uri": null,
+              "type": "syntax_def"
+            },
+            "caller_path": "competing_targets.ts",
+            "caller_span": [
+              148,
+              160
+            ],
+            "evidence": {
+              "callee_span": [
+                148,
+                158
+              ],
+              "digest": "4732993ffcd50404",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "523079e5495356dc",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "competing_targets.ts",
+              "provider": "scip-import",
+              "reference_span": null,
+              "span": [
+                148,
+                160
+              ],
+              "terminal_span": [
+                152,
+                158
+              ]
+            },
+            "import_id": 1,
+            "kind": "POTENTIAL_CALL",
+            "precision": "Heuristic",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": "ambiguous:2",
+            "verification": "Unverified"
+          }
+        ],
+        "scope": "direct",
+        "truncated": false,
+        "unresolved": [
+          "ambiguous:2",
+          "unproven-relation"
+        ],
+        "verification": "Unverified"
+      }
+    ],
     "repo": "sem",
     "schema_version": 1,
     "snapshot": {
@@ -328,11 +433,15 @@
       "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
     },
     "truncated": false,
-    "unresolved": [],
+    "unresolved": [
+      "ambiguous:2",
+      "candidate-name-not-followed",
+      "unproven-relation"
+    ],
     "verdict": "UNKNOWN",
     "verification": "Unverified",
     "visits": {
-      "edges": 0,
+      "edges": 1,
       "nodes": 1
     }
   },
@@ -486,13 +595,22 @@
       "paths": 1000,
       "time_ms": 2000
     },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 1,
+      "per_node_limit": 50,
+      "returned": 1,
+      "scope": "anchor-and-proven-nodes",
+      "total": 1
+    },
     "completeness": {
-      "covered": 0,
+      "covered": 1,
       "denominator": {
         "ambiguous_calls": 1,
         "dynamic_calls": 0,
         "missing_provider_files": 1,
-        "observed_edges": 0,
+        "observed_edges": 1,
         "parse_error_files": 0,
         "skipped_files": 0,
         "stale_imports": 0,
@@ -502,15 +620,18 @@
         "unsupported_files": 0
       },
       "status": "partial",
-      "total": 0,
+      "total": 1,
       "total_exact": true,
       "unresolved": [
+        "ambiguous:2",
         "ambiguous_calls",
-        "empty-result-not-coverage-proof",
+        "candidate-name-not-followed",
         "graph-completeness-unproven",
         "insufficient-impact-evidence",
         "missing_provider_files",
+        "semantic-midpoint-unavailable",
         "syntax-anchor-uncertain",
+        "unproven-relation",
         "unresolved-relations",
         "unresolved_target"
       ]
@@ -528,7 +649,67 @@
       "next_offset": null,
       "offset": 0
     },
-    "paths": [],
+    "paths": [
+      {
+        "basis": "candidate-name",
+        "cycle": false,
+        "distance": 1,
+        "edges": [
+          {
+            "callee": null,
+            "callee_name": "target",
+            "caller": {
+              "byte_end": 163,
+              "byte_start": 109,
+              "doc": null,
+              "import_id": null,
+              "path": "competing_targets.ts",
+              "symbol_uri": null,
+              "type": "syntax_def"
+            },
+            "caller_path": "competing_targets.ts",
+            "caller_span": [
+              148,
+              160
+            ],
+            "evidence": {
+              "callee_span": [
+                148,
+                158
+              ],
+              "digest": "4732993ffcd50404",
+              "imports": [],
+              "path": "competing_targets.ts",
+              "provider": "syntax",
+              "reference_span": null,
+              "span": [
+                148,
+                160
+              ],
+              "terminal_span": [
+                152,
+                158
+              ]
+            },
+            "import_id": null,
+            "kind": "POTENTIAL_CALL",
+            "precision": "Heuristic",
+            "provider": "syntax",
+            "tool": null,
+            "unresolved": "ambiguous:2",
+            "verification": "Unverified"
+          }
+        ],
+        "scope": "direct",
+        "truncated": false,
+        "unresolved": [
+          "ambiguous:2",
+          "unproven-relation",
+          "semantic-midpoint-unavailable"
+        ],
+        "verification": "Unverified"
+      }
+    ],
     "repo": "sem",
     "schema_version": 1,
     "snapshot": {
@@ -537,11 +718,16 @@
       "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
     },
     "truncated": false,
-    "unresolved": [],
+    "unresolved": [
+      "ambiguous:2",
+      "candidate-name-not-followed",
+      "semantic-midpoint-unavailable",
+      "unproven-relation"
+    ],
     "verdict": "UNKNOWN",
     "verification": "Unverified",
     "visits": {
-      "edges": 0,
+      "edges": 1,
       "nodes": 1
     }
   },

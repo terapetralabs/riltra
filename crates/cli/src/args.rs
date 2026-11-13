@@ -86,6 +86,10 @@ pub struct TraceArgs {
     pub depth: Option<String>,
     pub limit: Option<String>,
     pub offset: Option<String>,
+    /// `impact` only: add the `summary` object.
+    pub summary: bool,
+    /// `impact --summary` only: count test-file paths too.
+    pub include_tests: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -491,10 +495,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         },
         "callers" => parse_edge_args(args, true).map(|op| Command::Edge { op }),
         "callees" => parse_edge_args(args, false).map(|op| Command::Edge { op }),
-        "trace" => parse_trace_args(args).map(Command::Trace),
+        "trace" => {
+            let parsed = parse_trace_args(args)?;
+            if parsed.summary || parsed.include_tests {
+                return Err(crate::usage());
+            }
+            Ok(Command::Trace(parsed))
+        }
         "impact" => {
             let parsed = parse_trace_args(args)?;
-            if parsed.to.is_some() {
+            if parsed.to.is_some() || (parsed.include_tests && !parsed.summary) {
                 return Err(crate::usage());
             }
             Ok(Command::Impact(parsed))
@@ -605,8 +615,23 @@ fn anchor_is_valid(
 
 fn parse_trace_args(args: &[String]) -> Result<TraceArgs, String> {
     let mut values = std::collections::BTreeMap::new();
+    let mut summary = false;
+    let mut include_tests = false;
     let mut i = 1;
     while i < args.len() {
+        match args[i].as_str() {
+            "--summary" => {
+                summary = true;
+                i += 1;
+                continue;
+            }
+            "--include-tests" => {
+                include_tests = true;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
         let mut matched = false;
         for flag in [
             "--repo", "--path", "--line", "--col", "--target", "--in", "--kind", "--symbol",
@@ -645,6 +670,8 @@ fn parse_trace_args(args: &[String]) -> Result<TraceArgs, String> {
         depth: values.remove("--depth"),
         limit: values.remove("--limit"),
         offset: values.remove("--offset"),
+        summary,
+        include_tests,
     })
 }
 

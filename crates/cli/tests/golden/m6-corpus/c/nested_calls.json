@@ -355,6 +355,15 @@
       "paths": 1000,
       "time_ms": 2000
     },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 2,
+      "per_node_limit": 50,
+      "returned": 0,
+      "scope": "anchor-and-proven-nodes",
+      "total": 0
+    },
     "completeness": {
       "covered": 1,
       "denominator": {
@@ -392,6 +401,7 @@
     },
     "paths": [
       {
+        "basis": "proven",
         "cycle": false,
         "distance": 1,
         "edges": [
@@ -675,13 +685,22 @@
       "paths": 1000,
       "time_ms": 2000
     },
+    "candidates": {
+      "complete": true,
+      "followed": false,
+      "nodes": 1,
+      "per_node_limit": 50,
+      "returned": 1,
+      "scope": "anchor-and-proven-nodes",
+      "total": 1
+    },
     "completeness": {
-      "covered": 0,
+      "covered": 1,
       "denominator": {
         "ambiguous_calls": 0,
         "dynamic_calls": 0,
         "missing_provider_files": 1,
-        "observed_edges": 0,
+        "observed_edges": 1,
         "parse_error_files": 0,
         "skipped_files": 0,
         "stale_imports": 0,
@@ -691,14 +710,17 @@
         "unsupported_files": 0
       },
       "status": "partial",
-      "total": 0,
+      "total": 1,
       "total_exact": true,
       "unresolved": [
-        "empty-result-not-coverage-proof",
+        "candidate-name-not-followed",
         "graph-completeness-unproven",
         "insufficient-impact-evidence",
         "missing_provider_files",
+        "no-overlap",
+        "semantic-midpoint-unavailable",
         "syntax-anchor-uncertain",
+        "unproven-relation",
         "unresolved-relations",
         "unresolved_target"
       ]
@@ -716,7 +738,67 @@
       "next_offset": null,
       "offset": 0
     },
-    "paths": [],
+    "paths": [
+      {
+        "basis": "candidate-name",
+        "cycle": false,
+        "distance": 1,
+        "edges": [
+          {
+            "callee": null,
+            "callee_name": "target",
+            "caller": {
+              "byte_end": 165,
+              "byte_start": 117,
+              "doc": null,
+              "import_id": null,
+              "path": "nested_calls.c",
+              "symbol_uri": null,
+              "type": "syntax_def"
+            },
+            "caller_path": "nested_calls.c",
+            "caller_span": [
+              153,
+              161
+            ],
+            "evidence": {
+              "callee_span": [
+                153,
+                159
+              ],
+              "digest": "4e4ed15c392f1dc9",
+              "imports": [],
+              "path": "nested_calls.c",
+              "provider": "syntax",
+              "reference_span": null,
+              "span": [
+                153,
+                161
+              ],
+              "terminal_span": [
+                153,
+                159
+              ]
+            },
+            "import_id": null,
+            "kind": "POTENTIAL_CALL",
+            "precision": "Heuristic",
+            "provider": "syntax",
+            "tool": null,
+            "unresolved": "no-overlap",
+            "verification": "Unverified"
+          }
+        ],
+        "scope": "direct",
+        "truncated": false,
+        "unresolved": [
+          "no-overlap",
+          "unproven-relation",
+          "semantic-midpoint-unavailable"
+        ],
+        "verification": "Unverified"
+      }
+    ],
     "repo": "sem",
     "schema_version": 1,
     "snapshot": {
@@ -725,11 +807,16 @@
       "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=9150916a063f224e|nonce=<nonce>"
     },
     "truncated": false,
-    "unresolved": [],
+    "unresolved": [
+      "candidate-name-not-followed",
+      "no-overlap",
+      "semantic-midpoint-unavailable",
+      "unproven-relation"
+    ],
     "verdict": "UNKNOWN",
     "verification": "Unverified",
     "visits": {
-      "edges": 0,
+      "edges": 1,
       "nodes": 1
     }
   },

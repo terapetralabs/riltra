@@ -971,6 +971,8 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
         depth,
         limit,
         offset,
+        summary: args.summary,
+        include_tests: args.include_tests,
     };
     let query = if impact {
         index::impact_query

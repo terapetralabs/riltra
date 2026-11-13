@@ -144,6 +144,124 @@ fn check_evidence(value: &Value, source: &str, manifest: &Value, semantic: bool)
     }
 }
 
+/// Whether one edge of `path` has a caller span in `file` covering bytes a..b.
+fn covers(path: &Value, file: &Value, a: usize, b: usize) -> bool {
+    path["edges"].as_array().unwrap().iter().any(|e| {
+        let span = &e["caller_span"];
+        e["caller_path"] == *file
+            && span[0].as_u64().unwrap() as usize <= a
+            && b <= span[1].as_u64().unwrap() as usize
+    })
+}
+
+/// Syntax-only cases pinned to a documented outcome, not a coverage exemption.
+/// In c/competing_targets the only same-name call is `obj->target()`, a call
+/// through a struct member pointer. The syntax layer records no name-matched
+/// edge for it, so the SYNTAX-ONLY `callers` and impact documents list no
+/// candidate. The SCIP-anchored impact golden for this case may list one
+/// candidate-name path for that call. The manifest is ambiguous (inbound_calls 0,
+/// inbound_references 0), so the case asserts the syntax outcome, not a coverage.
+const MEMBER_POINTER_CALLS_WITHOUT_NAME_CANDIDATES: &[&str] = &["c/competing_targets"];
+
+/// Candidate truth from the manifest alone (never from a golden): a syntax-only
+/// impact answer proves no path, every manifest call site is a candidate, and
+/// extra candidates may come only from the decoy case kinds.
+fn candidate_truth(
+    lang: &str,
+    case: &str,
+    manifest: &Value,
+    source: &str,
+    v: &Value,
+    (h, file, anchor): (&Path, &str, &Value),
+) {
+    if MEMBER_POINTER_CALLS_WITHOUT_NAME_CANDIDATES.contains(&format!("{lang}/{case}").as_str()) {
+        let callers = query(h, "callers", file, anchor);
+        assert!(
+            callers["edges"].as_array().unwrap().is_empty(),
+            "{lang}/{case}: callers must also be empty: {callers}"
+        );
+        assert!(
+            v["paths"].as_array().unwrap().is_empty(),
+            "{lang}/{case}: no candidate path: {v}"
+        );
+        assert_eq!(v["candidates"]["returned"], 0, "{lang}/{case}: {v}");
+        return;
+    }
+    const DECOYS: [&str; 8] = [
+        "same_name",
+        "same_name_binding",
+        "competing_targets",
+        "dynamic_dispatch",
+        "nested_anonymous",
+        "unresolved",
+        "unsupported",
+        "impact_chain",
+    ];
+    let paths = v["paths"].as_array().unwrap();
+    assert!(
+        paths.iter().all(|p| p["basis"] != "proven"),
+        "{lang}/{case}: syntax-only impact proved a path: {v}"
+    );
+    let candidates: Vec<&Value> = paths
+        .iter()
+        .filter(|p| p["basis"] == "candidate-name")
+        .collect();
+    let calls = number(manifest, "inbound_calls");
+    assert!(candidates.len() >= calls, "{lang}/{case}: {v}");
+    let target = manifest["target"].as_str().unwrap();
+    let sites: Vec<&Value> = manifest["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["id"] == target && o["definition"] == false)
+        .collect();
+    // Manifest fields read: occurrences (id, definition), target, inbound_calls,
+    // inbound_references. The sites are the non-definition target occurrences.
+    assert!(
+        sites.len() >= calls,
+        "{lang}/{case}: manifest sites < inbound_calls"
+    );
+    let references = number(manifest, "inbound_references");
+    // Name matching finds calls, not value references: with references in the
+    // manifest there is no inbound call to cover, and none may be listed.
+    let call_sites: Vec<&Value> = if references > 0 {
+        assert_eq!(
+            calls, 0,
+            "{lang}/{case}: references in the manifest but inbound calls"
+        );
+        Vec::new()
+    } else if sites.len() == calls {
+        // Every non-definition occurrence is an inbound call: each is covered.
+        sites.clone()
+    } else {
+        // Decoy extras: the manifest does not say which occurrences are calls.
+        Vec::new()
+    };
+    for site in call_sites {
+        let (a, b) = raw_span(source, site);
+        assert!(
+            candidates
+                .iter()
+                .any(|p| covers(p, &manifest["file"], a, b)),
+            "{lang}/{case}: call site {a}..{b} has no candidate: {v}"
+        );
+    }
+    if !DECOYS.contains(&case) {
+        if references == 0 {
+            assert_eq!(
+                sites.len(),
+                calls,
+                "{lang}/{case}: plain case sites must all be inbound calls"
+            );
+        }
+        assert_eq!(
+            candidates.len(),
+            calls,
+            "{lang}/{case}: extra candidate on a plain case: {v}"
+        );
+    }
+}
+
 fn corpus(lang: &str, case: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let fixture = root.join("fixtures/m6").join(lang);
@@ -182,6 +300,14 @@ fn corpus(lang: &str, case: &str) {
         check_evidence(&v, &source, &manifest, false);
         if cmd == "impact" {
             assert_eq!(v["verdict"], "UNKNOWN");
+            candidate_truth(
+                lang,
+                case,
+                &manifest,
+                &source,
+                &v,
+                (&h, file, definition(id)),
+            );
         }
         bundle[key] = v;
     }
@@ -280,7 +406,10 @@ fn corpus(lang: &str, case: &str) {
         if cmd == "impact" {
             assert_eq!(v["verdict"], manifest["impact"], "{lang}/{case}: {v}");
             if lang == "rs" && case == "dynamic_dispatch" {
-                assert!(v["paths"].as_array().unwrap().is_empty(), "{v}");
+                // A dynamic call by name is a candidate, never a proven path.
+                let paths = v["paths"].as_array().unwrap();
+                assert!(!paths.is_empty(), "{v}");
+                assert!(paths.iter().all(|p| p["basis"] == "candidate-name"), "{v}");
             }
         }
         if cmd == "trace" && matches!(case, "recursion" | "cycle") {
@@ -497,9 +626,11 @@ fn rs_impact_missing_provider_caller_and_unrelated_unsupported_file_are_unknown(
         impact["verdict"], manifest["expected"]["verdict"],
         "{impact}"
     );
-    assert_eq!(
-        impact["paths"],
-        serde_json::json!([]),
+    // The missing caller is listed as a candidate, never as a proven path.
+    let paths = impact["paths"].as_array().unwrap();
+    assert!(!paths.is_empty(), "missing caller is listed: {impact}");
+    assert!(
+        paths.iter().all(|p| p["basis"] == "candidate-name"),
         "missing caller is unknown, not safe: {impact}"
     );
     assert_eq!(
@@ -616,8 +747,15 @@ fn rs_impact_keeps_scip_path_when_another_caller_lacks_provider_coverage() {
         manifest["expected"]["unsupported_files"],
         "{impact}"
     );
-    assert_eq!(impact["paths"].as_array().unwrap().len(), 1, "{impact}");
-    let path = &impact["paths"][0];
+    // Candidates from the uncovered caller may follow the one proven path.
+    let proven: Vec<&Value> = impact["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["basis"] == "proven")
+        .collect();
+    assert_eq!(proven.len(), 1, "{impact}");
+    let path = proven[0];
     assert_eq!(path["scope"], manifest["expected"]["path"]["scope"]);
     assert_eq!(path["distance"], manifest["expected"]["path"]["distance"]);
     assert_eq!(path["edges"].as_array().unwrap().len(), 1, "{path}");

@@ -1077,6 +1077,8 @@ pub struct TraceBudget {
     pub nodes: usize,
     pub edges: usize,
     pub paths: usize,
+    /// Candidate rows per node (impact only).
+    pub candidates: usize,
     pub deadline: std::time::Instant,
 }
 
@@ -1087,6 +1089,7 @@ impl TraceBudget {
             nodes: TRACE_MAX_NODES,
             edges: TRACE_MAX_EDGES,
             paths: TRACE_MAX_PATHS,
+            candidates: 50,
             deadline: started + std::time::Duration::from_millis(TRACE_TIME_MS),
         }
     }
@@ -1101,7 +1104,30 @@ pub struct TracePath {
     pub cycle: bool,
     pub truncated: bool,
     pub unresolved: Vec<String>,
+    /// Impact only: `proven`, `unproven` or `candidate-name`; empty for trace.
+    pub basis: &'static str,
 }
+
+/// Name-matched callers of one syntax definition, as `callers` selects them.
+pub struct CandidateSeed {
+    pub name: String,
+    pub paths: Vec<String>,
+    pub aliases: Vec<(String, String)>,
+}
+
+/// What the name seed of one walk node says.
+pub enum NameSeed {
+    /// Name-matched rows are read for the node.
+    Named(CandidateSeed),
+    /// The anchor is a C/C++ data member, which takes no call by name: no pass, no
+    /// gap. Other data fields reached on the walk get `Missing`.
+    NoName,
+    /// No name could be derived: the node is a gap (`candidate-pass-skipped`).
+    Missing,
+}
+
+/// Seed lookup for one walk node, from its syntax definition.
+pub type SeedLookup<'a> = dyn Fn(&EdgeEndpoint) -> Result<NameSeed, String> + 'a;
 
 pub struct Traversal {
     pub paths: Vec<TracePath>,
@@ -1111,6 +1137,10 @@ pub struct Traversal {
     pub cycle: bool,
     pub truncated: bool,
     pub unresolved: BTreeSet<String>,
+    /// Nodes a candidate pass ran for; candidate rows emitted; every pass read all rows.
+    pub candidate_nodes: usize,
+    pub candidates_returned: usize,
+    pub candidates_complete: bool,
 }
 
 impl Traversal {
@@ -1248,6 +1278,9 @@ pub fn traverse(
         cycle: false,
         truncated: false,
         unresolved: BTreeSet::new(),
+        candidate_nodes: 0,
+        candidates_returned: 0,
+        candidates_complete: true,
     };
     if !(1..=TRACE_MAX_NODES).contains(&budget.nodes)
         || !(1..=TRACE_MAX_EDGES).contains(&budget.edges)
@@ -1319,6 +1352,7 @@ pub fn traverse(
                         cycle: false,
                         truncated: false,
                         unresolved: Vec::new(),
+                        basis: "",
                     },
                     true,
                     true,
@@ -1356,6 +1390,7 @@ pub fn traverse(
                         cycle: false,
                         truncated: more,
                         unresolved: reasons,
+                        basis: "",
                     },
                     target.is_some(),
                     false,
@@ -1387,6 +1422,7 @@ pub fn traverse(
                                 cycle: false,
                                 truncated: false,
                                 unresolved: Vec::new(),
+                                basis: "",
                             },
                             target.is_some(),
                             false,
@@ -1418,6 +1454,7 @@ pub fn traverse(
                                 cycle: false,
                                 truncated: false,
                                 unresolved: reasons,
+                                basis: "",
                             },
                             false,
                         ));
@@ -1450,6 +1487,7 @@ pub fn traverse(
                                     cycle: false,
                                     truncated: true,
                                     unresolved: vec!["node-budget".to_string()],
+                                    basis: "",
                                 },
                                 target.is_some(),
                                 false,
@@ -1473,6 +1511,7 @@ pub fn traverse(
                                 } else {
                                     Vec::new()
                                 },
+                                basis: "",
                             },
                             reached,
                         ));
@@ -1528,17 +1567,229 @@ pub fn traverse(
     Ok(out)
 }
 
+/// The syntax definition behind a walk node: the node itself, or the syntax of
+/// a bridge whose semantic side is the node.
+fn syntax_of(node: &EdgeEndpoint, bridges: &[OwnerBridge]) -> Option<EdgeEndpoint> {
+    if matches!(node, EdgeEndpoint::SyntaxDef { .. }) {
+        return Some(node.clone());
+    }
+    // shortcut: only the first bridged syntax definition gets candidates, upgrade when one semantic node maps to several syntax definitions
+    bridges
+        .iter()
+        .find(|b| unify(&b.semantic, node))
+        .map(|b| b.syntax.clone())
+}
+
+/// What one impact edge did to the walk.
+enum Visit {
+    /// Emitted and not walked further.
+    Leaf,
+    /// Emitted; the proven caller to walk from, with the path that reaches it.
+    Walk(EdgeEndpoint, Vec<EdgeRow>),
+    /// A budget ended the walk; the edge was not emitted.
+    Stop,
+}
+
+/// One inbound edge of an impact walk: reasons, caller mapping, node budget,
+/// then emit. A candidate row is never walked, whatever its relation.
+#[allow(clippy::too_many_arguments)]
+fn impact_edge(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    out: &mut Traversal,
+    known: &mut Vec<EdgeEndpoint>,
+    node: &EdgeEndpoint,
+    lineage: &[EdgeEndpoint],
+    prefix: &[EdgeRow],
+    edge: EdgeRow,
+    budget: &TraceBudget,
+    candidate: bool,
+) -> Result<Visit, String> {
+    if out.paths.len() == budget.paths {
+        out.stop("path-budget");
+        return Ok(Visit::Stop);
+    }
+    out.edges += 1;
+    let mut reasons = Vec::new();
+    if let Some(reason) = &edge.unresolved {
+        reasons.push(reason.clone());
+    }
+    let proven = matches!(edge.edge_kind.as_str(), "CALLS" | "REFERENCES")
+        && edge.precision == "Exact"
+        && edge.unresolved.is_none();
+    if !proven {
+        reasons.push("unproven-relation".to_string());
+    }
+    let mut next = None;
+    if let Some(caller) = &edge.caller {
+        if endpoint_import(node)
+            .zip(endpoint_import(caller))
+            .is_some_and(|(a, b)| a != b)
+        {
+            return Err("impact edge crosses import scope".to_string());
+        }
+        let (mapped, bridges, ambiguous) =
+            trace_node(conn, snapshot_id, caller, endpoint_import(node), budget)?;
+        out.remember(bridges)?;
+        if ambiguous {
+            reasons.push("ambiguous-owner-mapping".to_string());
+        }
+        if matches!(mapped, EdgeEndpoint::SyntaxDef { .. }) {
+            reasons.push("semantic-midpoint-unavailable".to_string());
+        } else if proven && !candidate {
+            next = Some(mapped);
+        }
+    } else {
+        reasons.push("unresolved-owner".to_string());
+    }
+    let cycle = next
+        .as_ref()
+        .is_some_and(|n| lineage.iter().any(|old| unify(old, n)));
+    if let Some(n) = &next {
+        if !known.iter().any(|old| unify(old, n)) {
+            if known.len() == budget.nodes {
+                out.stop("node-budget");
+                return Ok(Visit::Stop);
+            }
+            known.push(n.clone());
+            out.nodes = known.len();
+        }
+    }
+    let mut hops = prefix.to_vec();
+    hops.push(edge);
+    let basis = if candidate {
+        "candidate-name"
+    } else if proven {
+        "proven"
+    } else {
+        "unproven"
+    };
+    out.emit(
+        TracePath {
+            edges: hops.clone(),
+            cycle,
+            truncated: false,
+            unresolved: reasons,
+            basis,
+        },
+        false,
+        false,
+        budget,
+    );
+    Ok(match next {
+        Some(n) if !cycle => Visit::Walk(n, hops),
+        _ => Visit::Leaf,
+    })
+}
+
+/// The name-matched selection `callers` makes for `seed`, read from `endpoint`.
+fn candidate_selection<'a>(
+    snapshot_id: i64,
+    endpoint: &'a EdgeEndpoint,
+    seed: &'a CandidateSeed,
+) -> store::EdgeSelection<'a> {
+    store::EdgeSelection {
+        snapshot_id,
+        endpoint,
+        inbound: true,
+        candidate_name: Some(&seed.name),
+        candidate_paths: &seed.paths,
+        candidate_aliases: &seed.aliases,
+        syntax_aliases: &[],
+    }
+}
+
+/// One candidate pass over `node`'s name-matched inbound rows, read from
+/// `endpoint` (the original anchor for the start). Rows the exact pass already
+/// emitted are skipped. Returns `true` only when every row was read.
+#[allow(clippy::too_many_arguments)]
+fn read_candidates(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    out: &mut Traversal,
+    known: &mut Vec<EdgeEndpoint>,
+    node: &EdgeEndpoint,
+    endpoint: &EdgeEndpoint,
+    lineage: &[EdgeEndpoint],
+    prefix: &[EdgeRow],
+    seed: &CandidateSeed,
+    exact: &[EdgeRow],
+    budget: &TraceBudget,
+) -> Result<bool, String> {
+    let selection = candidate_selection(snapshot_id, endpoint, seed);
+    let mut returned = 0;
+    let mut offset = 0;
+    loop {
+        if budget.expired() {
+            return Err("time-budget".to_string());
+        }
+        if out.edges == budget.edges {
+            out.stop("edge-budget");
+            return Ok(false);
+        }
+        let batch = (budget.edges - out.edges).min(1000);
+        let rows = store::selected_edge_page(conn, &selection, batch as i64, offset as i64)?;
+        let count = rows.len();
+        for edge in rows {
+            if budget.expired() {
+                return Err("time-budget".to_string());
+            }
+            if exact.contains(&edge) {
+                continue;
+            }
+            if returned == budget.candidates {
+                out.stop("candidate-limit");
+                return Ok(false);
+            }
+            if let Visit::Stop = impact_edge(
+                conn,
+                snapshot_id,
+                out,
+                known,
+                node,
+                lineage,
+                prefix,
+                edge,
+                budget,
+                true,
+            )? {
+                return Ok(false);
+            }
+            returned += 1;
+            out.candidates_returned += 1;
+        }
+        if count < batch {
+            return Ok(true);
+        }
+        offset += count;
+    }
+}
+
+/// One distinct node of the proven walk, kept in BFS order for the candidate phase.
+struct WalkNode {
+    node: EdgeEndpoint,
+    prefix: Vec<EdgeRow>,
+    lineage: Vec<EdgeEndpoint>,
+    exact: Vec<EdgeRow>,
+}
+
 /// Reverse BFS. Each emitted path proves one observed dependent, with the
 /// nearest-to-anchor edge first. References with unknown owners stay terminal.
+/// Phase 1 is the proven walk alone, so candidates never change it. Phase 2
+/// then lists, for each distinct node the walk reached, its name-matched callers
+/// as `candidate-name` paths, with whatever budget phase 1 left. A candidate is
+/// never walked further.
 pub fn traverse_impact(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
     start: &EdgeEndpoint,
     budget: &TraceBudget,
+    seeds: Option<&SeedLookup<'_>>,
 ) -> Result<Traversal, String> {
     if !(1..=TRACE_MAX_NODES).contains(&budget.nodes)
         || !(1..=TRACE_MAX_EDGES).contains(&budget.edges)
         || !(1..=TRACE_MAX_PATHS).contains(&budget.paths)
+        || !(1..=TRACE_MAX_PATHS).contains(&budget.candidates)
         || !(1..=TRACE_MAX_DEPTH).contains(&budget.depth)
     {
         return Err("invalid impact budget".to_string());
@@ -1551,17 +1802,23 @@ pub fn traverse_impact(
         cycle: false,
         truncated: false,
         unresolved: BTreeSet::new(),
+        candidate_nodes: 0,
+        candidates_returned: 0,
+        candidates_complete: true,
     };
-    let result = (|| -> Result<(), String> {
+    let original = start.clone();
+    let mut known: Vec<EdgeEndpoint> = Vec::new();
+    let mut records: Vec<WalkNode> = Vec::new();
+    let walked = (|| -> Result<(), String> {
         if budget.expired() {
             return Err("time-budget".to_string());
         }
-        let (start, bridges, ambiguous) = trace_node(conn, snapshot_id, start, None, budget)?;
+        let (start, bridges, ambiguous) = trace_node(conn, snapshot_id, &original, None, budget)?;
         out.remember(bridges)?;
         if ambiguous {
             out.unresolved.insert("ambiguous-owner-mapping".to_string());
         }
-        let mut known = vec![start.clone()];
+        known.push(start.clone());
         out.nodes = 1;
         let mut queue =
             std::collections::VecDeque::from([(start.clone(), Vec::<EdgeRow>::new(), vec![start])]);
@@ -1578,12 +1835,22 @@ pub fn traverse_impact(
                 candidate_aliases: &[],
                 syntax_aliases: &[],
             };
+            let fresh = !records.iter().any(|r| unify(&r.node, &node));
             if prefix.len() == budget.depth {
+                if fresh {
+                    records.push(WalkNode {
+                        node: node.clone(),
+                        prefix,
+                        lineage,
+                        exact: Vec::new(),
+                    });
+                }
                 if !store::selected_edge_page(conn, &selection, 1, 0)?.is_empty() {
                     out.stop("depth-budget");
                 }
                 continue;
             }
+            let mut exact = Vec::new();
             let mut offset = 0;
             loop {
                 if budget.expired() {
@@ -1601,73 +1868,26 @@ pub fn traverse_impact(
                     if budget.expired() {
                         return Err("time-budget".to_string());
                     }
-                    if out.paths.len() == budget.paths {
-                        out.stop("path-budget");
-                        return Ok(());
-                    }
-                    out.edges += 1;
-                    let mut reasons = Vec::new();
-                    if let Some(reason) = &edge.unresolved {
-                        reasons.push(reason.clone());
-                    }
-                    let proven = matches!(edge.edge_kind.as_str(), "CALLS" | "REFERENCES")
-                        && edge.precision == "Exact"
-                        && edge.unresolved.is_none();
-                    if !proven {
-                        reasons.push("unproven-relation".to_string());
-                    }
-                    let mut next = None;
-                    if let Some(caller) = &edge.caller {
-                        if endpoint_import(&node)
-                            .zip(endpoint_import(caller))
-                            .is_some_and(|(a, b)| a != b)
-                        {
-                            return Err("impact edge crosses import scope".to_string());
-                        }
-                        let (mapped, bridges, ambiguous) =
-                            trace_node(conn, snapshot_id, caller, endpoint_import(&node), budget)?;
-                        out.remember(bridges)?;
-                        if ambiguous {
-                            reasons.push("ambiguous-owner-mapping".to_string());
-                        }
-                        if matches!(mapped, EdgeEndpoint::SyntaxDef { .. }) {
-                            reasons.push("semantic-midpoint-unavailable".to_string());
-                        } else if proven {
-                            next = Some(mapped);
-                        }
-                    } else {
-                        reasons.push("unresolved-owner".to_string());
-                    }
-                    let cycle = next
-                        .as_ref()
-                        .is_some_and(|n| lineage.iter().any(|old| unify(old, n)));
-                    if let Some(n) = &next {
-                        if !known.iter().any(|old| unify(old, n)) {
-                            if known.len() == budget.nodes {
-                                out.stop("node-budget");
-                                return Ok(());
-                            }
-                            known.push(n.clone());
-                            out.nodes = known.len();
-                        }
-                    }
-                    let mut hops = prefix.clone();
-                    hops.push(edge);
-                    out.emit(
-                        TracePath {
-                            edges: hops.clone(),
-                            cycle,
-                            truncated: false,
-                            unresolved: reasons,
-                        },
-                        false,
-                        false,
+                    exact.push(edge.clone());
+                    match impact_edge(
+                        conn,
+                        snapshot_id,
+                        &mut out,
+                        &mut known,
+                        &node,
+                        &lineage,
+                        &prefix,
+                        edge,
                         budget,
-                    );
-                    if let Some(n) = next.filter(|_| !cycle) {
-                        let mut ancestors = lineage.clone();
-                        ancestors.push(n.clone());
-                        queue.push_back((n, hops, ancestors));
+                        false,
+                    )? {
+                        Visit::Stop => return Ok(()),
+                        Visit::Leaf => {}
+                        Visit::Walk(next, hops) => {
+                            let mut ancestors = lineage.clone();
+                            ancestors.push(next.clone());
+                            queue.push_back((next, hops, ancestors));
+                        }
                     }
                 }
                 offset += count;
@@ -1675,16 +1895,112 @@ pub fn traverse_impact(
                     break;
                 }
             }
+            if fresh {
+                records.push(WalkNode {
+                    node,
+                    prefix,
+                    lineage,
+                    exact,
+                });
+            }
         }
         Ok(())
     })();
-    if let Err(reason) = result {
+    if let Err(reason) = walked {
         if reason == "time-budget" || reason == "mapping-budget" {
             out.stop(&reason);
         } else {
             return Err(reason);
         }
     }
+    if let Some(seeds) = seeds {
+        let candidated = (|| -> Result<(), String> {
+            for rec in &records {
+                if out.edges == budget.edges {
+                    out.stop("edge-budget");
+                    out.candidates_complete = false;
+                    return Ok(());
+                }
+                if out.paths.len() == budget.paths {
+                    out.stop("path-budget");
+                    out.candidates_complete = false;
+                    return Ok(());
+                }
+                if budget.expired() {
+                    return Err("time-budget".to_string());
+                }
+                // The start uses the anchor endpoint as given; another Scip node is
+                // bridged to its syntax definition on demand, as `trace` bridges.
+                let found = if rec.prefix.is_empty() {
+                    seeds(&original)?
+                } else {
+                    let syntax = match syntax_of(&rec.node, &out.bridges) {
+                        Some(syntax) => Some(syntax),
+                        None if matches!(rec.node, EdgeEndpoint::Scip { .. }) => {
+                            let bridged = trace_bridges(conn, snapshot_id, &rec.node, budget)?;
+                            syntax_of(&rec.node, &bridged)
+                        }
+                        None => None,
+                    };
+                    match syntax {
+                        Some(syntax) => seeds(&syntax)?,
+                        None => NameSeed::Missing,
+                    }
+                };
+                let end = if rec.prefix.is_empty() {
+                    &original
+                } else {
+                    &rec.node
+                };
+                match found {
+                    NameSeed::NoName => {}
+                    NameSeed::Missing => {
+                        out.unresolved.insert("candidate-pass-skipped".to_string());
+                        out.candidates_complete = false;
+                    }
+                    NameSeed::Named(seed) if rec.prefix.len() == budget.depth => {
+                        // One hop past the depth budget: state it, read nothing more.
+                        let probe = candidate_selection(snapshot_id, end, &seed);
+                        if !store::selected_edge_page(conn, &probe, 1, 0)?.is_empty() {
+                            out.stop("depth-budget");
+                            out.candidates_complete = false;
+                        }
+                    }
+                    NameSeed::Named(seed) => {
+                        out.candidate_nodes += 1;
+                        let done = read_candidates(
+                            conn,
+                            snapshot_id,
+                            &mut out,
+                            &mut known,
+                            &rec.node,
+                            end,
+                            &rec.lineage,
+                            &rec.prefix,
+                            &seed,
+                            &rec.exact,
+                            budget,
+                        )?;
+                        out.candidates_complete &= done;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(reason) = candidated {
+            if reason == "time-budget" || reason == "mapping-budget" {
+                out.stop(&reason);
+            } else {
+                return Err(reason);
+            }
+        }
+    }
+    if out.candidates_returned > 0 {
+        out.unresolved
+            .insert("candidate-name-not-followed".to_string());
+    }
+    // A stopped walk may have skipped nodes, so their candidates are unread.
+    out.candidates_complete &= !out.truncated;
     Ok(out)
 }
 
@@ -1786,6 +2102,7 @@ mod tests {
             snapshot,
             &start,
             &TraceBudget::new(3, std::time::Instant::now()),
+            None,
         )
         .unwrap();
         assert_eq!(full.paths.len(), 3);
@@ -1801,7 +2118,7 @@ mod tests {
                 "depth" => budget.depth = 1,
                 _ => unreachable!(),
             }
-            let result = traverse_impact(&conn, snapshot, &start, &budget).unwrap();
+            let result = traverse_impact(&conn, snapshot, &start, &budget, None).unwrap();
             assert!(result.truncated, "{cutoff}");
             assert!(
                 result.nodes <= budget.nodes
@@ -1824,7 +2141,7 @@ mod tests {
         }
         let mut invalid = TraceBudget::new(3, std::time::Instant::now());
         invalid.nodes = 501;
-        assert!(traverse_impact(&conn, snapshot, &start, &invalid).is_err());
+        assert!(traverse_impact(&conn, snapshot, &start, &invalid, None).is_err());
 
         // Policy support for a proven reference owner. The current SCIP
         // derivation does not infer callable ownership for plain references.
@@ -1835,6 +2152,7 @@ mod tests {
             snapshot,
             &start,
             &TraceBudget::new(3, std::time::Instant::now()),
+            None,
         )
         .unwrap();
         assert_eq!(impact_verdict(&references, false), "MEDIUM");
@@ -1845,6 +2163,7 @@ mod tests {
             snapshot,
             &start,
             &TraceBudget::new(3, std::time::Instant::now()),
+            None,
         )
         .unwrap();
         assert_eq!(impact_verdict(&heuristic, false), "UNKNOWN");
@@ -1967,6 +2286,238 @@ mod tests {
         assert_eq!(result.paths[0].edges.len(), 1);
         assert!(!result.unresolved.contains("target-not-proven"));
     }
+    #[test]
+    fn impact_candidate_pass_skips_rows_the_exact_pass_emitted() {
+        let conn = mem_db();
+        let snapshot = mk_snap(&conn);
+        let def = |path: &str, bs: usize| EdgeEndpoint::SyntaxDef {
+            path: path.to_string(),
+            byte_start: bs,
+            byte_end: bs + 5,
+        };
+        let row = |caller: EdgeEndpoint, callee: Option<EdgeEndpoint>, kind: &str| EdgeRow {
+            snapshot_id: snapshot,
+            file_id: 1,
+            caller_path: match &caller {
+                EdgeEndpoint::SyntaxDef { path, .. } => path.clone(),
+                _ => unreachable!(),
+            },
+            caller: Some(caller),
+            caller_span_bytes: (1, 2),
+            callee,
+            callee_name: "target".to_string(),
+            edge_kind: kind.to_string(),
+            precision: if kind == "CALLS" {
+                "Exact"
+            } else {
+                "Heuristic"
+            }
+            .to_string(),
+            provider: "syntax".to_string(),
+            evidence: "{}".to_string(),
+            unresolved: None,
+        };
+        let start = def("t.py", 0);
+        // Exact: a proven caller that the candidate query also selects.
+        let exact = row(def("c.py", 20), Some(start.clone()), "CALLS");
+        store::insert_edge(&conn, &exact).unwrap();
+        // Name-matched: an unresolved callee whose name is the anchor's.
+        store::insert_edge(&conn, &row(def("d.py", 40), None, "POTENTIAL_CALL")).unwrap();
+        let seeds = |endpoint: &EdgeEndpoint| -> Result<NameSeed, String> {
+            Ok(if endpoint == &start {
+                NameSeed::Named(CandidateSeed {
+                    name: "target".to_string(),
+                    paths: vec!["c.py".to_string(), "d.py".to_string()],
+                    aliases: Vec::new(),
+                })
+            } else {
+                NameSeed::Missing
+            })
+        };
+        let result = traverse_impact(
+            &conn,
+            snapshot,
+            &start,
+            &TraceBudget::new(3, std::time::Instant::now()),
+            Some(&seeds),
+        )
+        .unwrap();
+        let bases: Vec<&str> = result.paths.iter().map(|p| p.basis).collect();
+        assert_eq!(bases, ["proven", "candidate-name"]);
+        assert_eq!(result.paths[0].edges, vec![exact]);
+        assert_eq!(result.candidates_returned, 1);
+        assert_eq!(result.candidate_nodes, 1);
+        assert!(result.candidates_complete);
+        assert!(result.unresolved.contains("candidate-name-not-followed"));
+    }
+
+    #[test]
+    fn a_node_without_a_name_seed_marks_candidates_incomplete() {
+        let (conn, snapshot, start) = trace_store(&[(1, 0)]);
+        let seeds = |_: &EdgeEndpoint| -> Result<NameSeed, String> { Ok(NameSeed::Missing) };
+        let result = traverse_impact(
+            &conn,
+            snapshot,
+            &start,
+            &TraceBudget::new(3, std::time::Instant::now()),
+            Some(&seeds),
+        )
+        .unwrap();
+        assert!(!result.candidates_complete, "a skipped pass is a gap");
+        assert!(result.unresolved.contains("candidate-pass-skipped"));
+    }
+
+    /// `n` name-matched rows in d.py, all for a start seeded with the name "n0".
+    fn insert_candidate_rows(conn: &rusqlite::Connection, snapshot: i64, n: usize) {
+        for i in 0..n {
+            store::insert_edge(
+                conn,
+                &EdgeRow {
+                    snapshot_id: snapshot,
+                    file_id: 1,
+                    caller: Some(EdgeEndpoint::SyntaxDef {
+                        path: "d.py".to_string(),
+                        byte_start: 10 + i,
+                        byte_end: 20 + i,
+                    }),
+                    caller_path: "d.py".to_string(),
+                    caller_span_bytes: (10 + i, 20 + i),
+                    callee: None,
+                    callee_name: "n0".to_string(),
+                    edge_kind: "POTENTIAL_CALL".to_string(),
+                    precision: "Heuristic".to_string(),
+                    provider: "syntax".to_string(),
+                    evidence: "{}".to_string(),
+                    unresolved: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    /// Seeds the start with the name "n0" (d.py rows); every other node is Missing.
+    fn start_named_n0<'a>(
+        start: &'a EdgeEndpoint,
+    ) -> impl Fn(&EdgeEndpoint) -> Result<NameSeed, String> + 'a {
+        move |endpoint: &EdgeEndpoint| {
+            Ok(if endpoint == start {
+                NameSeed::Named(CandidateSeed {
+                    name: "n0".to_string(),
+                    paths: vec!["d.py".to_string()],
+                    aliases: Vec::new(),
+                })
+            } else {
+                NameSeed::Missing
+            })
+        }
+    }
+
+    /// Lengths of the proven paths, in order.
+    fn proven_depths(result: &Traversal) -> Vec<usize> {
+        result
+            .paths
+            .iter()
+            .filter(|p| p.basis == "proven")
+            .map(|p| p.edges.len())
+            .collect()
+    }
+
+    #[test]
+    fn proven_paths_survive_a_candidate_heavy_start() {
+        // Proven: node-1 calls node-0 (depth 1), node-2 calls node-1 (depth 2).
+        let (conn, snapshot, start) = trace_store(&[(1, 0), (2, 1)]);
+        insert_candidate_rows(&conn, snapshot, 5);
+        let seeds = start_named_n0(&start);
+        let mut budget = TraceBudget::new(3, std::time::Instant::now());
+        budget.paths = 2;
+        let result = traverse_impact(&conn, snapshot, &start, &budget, Some(&seeds)).unwrap();
+        assert_eq!(
+            proven_depths(&result),
+            vec![1, 2],
+            "{:?}",
+            result
+                .paths
+                .iter()
+                .map(|p| (p.basis, p.edges.len()))
+                .collect::<Vec<_>>()
+        );
+        // The path budget ends phase 2 early: stated, and the answer is incomplete.
+        assert!(
+            result.unresolved.contains("path-budget"),
+            "{:?}",
+            result.unresolved
+        );
+        assert!(!result.candidates_complete);
+    }
+
+    #[test]
+    fn phase_two_ends_on_the_edge_budget_and_proven_paths_stay() {
+        // Phase 1 reads two rows; the candidate rows at the start need the rest.
+        let (conn, snapshot, start) = trace_store(&[(1, 0), (2, 1)]);
+        insert_candidate_rows(&conn, snapshot, 5);
+        let seeds = start_named_n0(&start);
+        let mut budget = TraceBudget::new(3, std::time::Instant::now());
+        budget.edges = 3;
+        let result = traverse_impact(&conn, snapshot, &start, &budget, Some(&seeds)).unwrap();
+        assert_eq!(proven_depths(&result), vec![1, 2]);
+        assert!(
+            result.unresolved.contains("edge-budget"),
+            "{:?}",
+            result.unresolved
+        );
+        assert!(!result.candidates_complete);
+    }
+
+    #[test]
+    fn a_data_member_anchor_takes_no_name_pass_and_no_gap() {
+        // No proven callers; five name-matched rows that a running pass would list.
+        let (conn, snapshot, start) = trace_store(&[]);
+        insert_candidate_rows(&conn, snapshot, 5);
+        let seeds = |_: &EdgeEndpoint| -> Result<NameSeed, String> { Ok(NameSeed::NoName) };
+        let result = traverse_impact(
+            &conn,
+            snapshot,
+            &start,
+            &TraceBudget::new(3, std::time::Instant::now()),
+            Some(&seeds),
+        )
+        .unwrap();
+        assert_eq!(result.candidate_nodes, 0, "no pass runs");
+        assert_eq!(result.candidates_returned, 0);
+        assert!(result.paths.is_empty());
+        assert!(result.candidates_complete, "no name, so no gap");
+        assert!(!result.unresolved.contains("candidate-pass-skipped"));
+    }
+
+    #[test]
+    fn a_boundary_node_without_a_seed_is_a_gap() {
+        // depth 1: node-1 is one hop out, at the boundary, with no syntax definition
+        // and no further inbound edge (so no depth-budget is stated).
+        let (conn, snapshot, start) = trace_store(&[(1, 0)]);
+        let seeds = |endpoint: &EdgeEndpoint| -> Result<NameSeed, String> {
+            Ok(if endpoint == &start {
+                NameSeed::NoName
+            } else {
+                NameSeed::Missing
+            })
+        };
+        let result = traverse_impact(
+            &conn,
+            snapshot,
+            &start,
+            &TraceBudget::new(1, std::time::Instant::now()),
+            Some(&seeds),
+        )
+        .unwrap();
+        assert_eq!(proven_depths(&result), vec![1]);
+        assert!(!result.candidates_complete);
+        assert!(
+            result.unresolved.contains("candidate-pass-skipped"),
+            "{:?}",
+            result.unresolved
+        );
+    }
+
     use crate::testutil::tmpdir;
 
     fn mem_db() -> rusqlite::Connection {

@@ -666,3 +666,422 @@ fn like_metacharacters_in_a_target_are_literal() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(json_of(&out)["status"], "not-found", "{out}");
 }
+
+// --- Impact name-matched candidates (basis `candidate-name`) ---------------
+
+const TARGET_A: &str = "def target():\n    return 1\n";
+const CALLER_B: &str = "from a import target\n\n\ndef user():\n    target()\n";
+
+/// Writes `files` under a fresh source directory, then inits and indexes it.
+fn indexed_files(home: &Path, name: &str, files: &[(&str, &str)]) {
+    let dir = home.join(format!("{name}-src"));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (rel, text) in files {
+        let file = dir.join(rel);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+    let (code, _out, err) = run(
+        home,
+        &["init", "--repo", &dir.to_string_lossy(), "--name", name],
+    );
+    assert_eq!(code, 0, "init: {err}");
+    let (code, _out, err) = run(home, &["index", "--repo", name]);
+    assert_eq!(code, 0, "index: {err}");
+}
+
+/// `impact --repo c --target target` plus `extra`: the raw text and parsed document.
+fn impact_of_target(home: &Path, extra: &[&str]) -> (String, Value) {
+    let mut args = vec!["impact", "--repo", "c", "--target", "target"];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(home, &args);
+    assert_eq!(code, 0, "{err}");
+    let doc = json_of(&out);
+    (out, doc)
+}
+
+fn lists(value: &Value, text: &str) -> bool {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v.as_str() == Some(text))
+}
+
+#[test]
+fn impact_lists_name_matched_callers_as_candidates_without_following_them() {
+    let h = home("cand-anchor");
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("b.py", CALLER_B)]);
+    let (code, out, err) = run(&h, &["callers", "--repo", "c", "--target", "target"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json_of(&out)["edges"].as_array().unwrap().len(), 1, "{out}");
+
+    let (raw, doc) = impact_of_target(&h, &[]);
+    let paths = doc["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1, "{raw}");
+    assert_eq!(paths[0]["distance"], 1, "{raw}");
+    assert_eq!(paths[0]["basis"], "candidate-name", "{raw}");
+    assert!(lists(&paths[0]["unresolved"], "unproven-relation"), "{raw}");
+    assert_eq!(doc["verdict"], "UNKNOWN", "{raw}");
+    assert_eq!(doc["completeness"]["status"], "partial", "{raw}");
+    assert!(
+        lists(&doc["unresolved"], "candidate-name-not-followed"),
+        "{raw}"
+    );
+    assert_eq!(
+        doc["candidates"],
+        serde_json::json!({
+            "scope": "anchor-and-proven-nodes", "followed": false, "nodes": 1,
+            "returned": 1, "complete": true, "total": 1, "per_node_limit": 50
+        }),
+        "{raw}"
+    );
+}
+
+#[test]
+fn candidates_are_not_followed_to_their_own_callers() {
+    let h = home("cand-transitive");
+    let top = "from b import user\n\n\ndef top():\n    user()\n";
+    indexed_files(
+        &h,
+        "c",
+        &[("a.py", TARGET_A), ("b.py", CALLER_B), ("c.py", top)],
+    );
+    let (raw, doc) = impact_of_target(&h, &[]);
+    let paths = doc["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1, "{raw}");
+    assert!(
+        paths.iter().all(|p| p["edges"][0]["caller_path"] == "b.py"),
+        "no path may come from c.py (top): {raw}"
+    );
+    assert_eq!(doc["candidates"]["nodes"], 1, "{raw}");
+    assert_eq!(doc["candidates"]["returned"], 1, "{raw}");
+}
+
+#[test]
+fn per_node_limit_caps_candidates_and_reports_incomplete() {
+    let h = home("cand-cap");
+    let callers = "from a import target\n\n\ndef u1():\n    target()\n\n\ndef u2():\n    target()\n\n\ndef u3():\n    target()\n";
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("b.py", callers)]);
+
+    let (raw, doc) = impact_of_target(&h, &["--limit", "2"]);
+    assert_eq!(doc["paths"].as_array().unwrap().len(), 2, "{raw}");
+    assert_eq!(doc["candidates"]["returned"], 2, "{raw}");
+    assert_eq!(doc["candidates"]["complete"], false, "{raw}");
+    assert!(doc["candidates"]["total"].is_null(), "{raw}");
+    assert_eq!(doc["candidates"]["per_node_limit"], 2, "{raw}");
+    assert!(lists(&doc["unresolved"], "candidate-limit"), "{raw}");
+
+    let (raw, doc) = impact_of_target(&h, &["--limit", "3"]);
+    assert_eq!(doc["paths"].as_array().unwrap().len(), 3, "{raw}");
+    assert_eq!(doc["candidates"]["complete"], true, "{raw}");
+    assert_eq!(doc["candidates"]["total"], 3, "{raw}");
+    assert!(!lists(&doc["unresolved"], "candidate-limit"), "{raw}");
+}
+
+#[test]
+fn an_uncalled_name_has_no_candidates_and_empty_is_not_proof() {
+    let h = home("cand-empty");
+    indexed_files(&h, "c", &[("a.py", TARGET_A)]);
+    let (raw, doc) = impact_of_target(&h, &[]);
+    assert!(doc["paths"].as_array().unwrap().is_empty(), "{raw}");
+    assert!(
+        lists(
+            &doc["completeness"]["unresolved"],
+            "empty-result-not-coverage-proof"
+        ),
+        "{raw}"
+    );
+    assert_eq!(doc["candidates"]["returned"], 0, "{raw}");
+    assert_eq!(doc["candidates"]["complete"], true, "{raw}");
+    assert_eq!(doc["candidates"]["total"], 0, "{raw}");
+    assert_eq!(doc["verdict"], "UNKNOWN", "{raw}");
+}
+
+#[test]
+fn context_keeps_its_shape_and_shows_no_candidates() {
+    let h = home("cand-context");
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("b.py", CALLER_B)]);
+    let (code, out, err) = run(&h, &["context", "--repo", "c", "--target", "target"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("candidate-name"), "{out}");
+    assert!(!out.contains("\"basis\""), "{out}");
+    assert!(!out.contains("\"candidates\""), "{out}");
+    assert!(
+        !out.contains("b.py"),
+        "the candidate caller must not be a node: {out}"
+    );
+}
+
+#[test]
+fn impact_key_order_puts_basis_after_scope_and_candidates_before_disclaimer() {
+    let h = home("cand-order");
+    indexed_files(&h, "c", &[("a.py", TARGET_A), ("b.py", CALLER_B)]);
+    let (raw, _doc) = impact_of_target(&h, &[]);
+    let order = [
+        "\"verdict\":",
+        "\"paths\":",
+        "\"scope\":\"direct\",\"basis\":\"candidate-name\",\"edges\":[",
+        "],\"candidates\":{\"scope\":\"anchor-and-proven-nodes\",\"followed\":false,",
+        "\"disclaimer\":",
+    ];
+    let mut last = 0;
+    for key in order {
+        let found = raw[last..]
+            .find(key)
+            .unwrap_or_else(|| panic!("{key} missing or out of order: {raw}"));
+        last += found + key.len();
+    }
+}
+
+// --- Impact --summary and --include-tests (part B) ----------------------------
+
+const SUMMARY_FILES: [(&str, &str); 3] = [
+    ("lib.py", "def target():\n    return 1\n"),
+    (
+        "user.py",
+        "from lib import target\n\n\ndef user():\n    target()\n",
+    ),
+    (
+        "tests/test_lib.py",
+        "from lib import target\n\n\ndef test_target():\n    target()\n",
+    ),
+];
+
+/// Three name-matched callers of `target` in one file: a per-node cap of one bites.
+const CAP_FILES: [(&str, &str); 2] = [
+    ("lib.py", "def target():\n    return 1\n"),
+    (
+        "callers.py",
+        "from lib import target\n\n\ndef u1():\n    target()\n\n\ndef u2():\n    target()\n\n\ndef u3():\n    target()\n",
+    ),
+];
+
+/// `impact --repo <repo> --target target` plus `extra`: the raw text and parsed document.
+fn impact_in(home: &Path, repo: &str, extra: &[&str]) -> (String, Value) {
+    let mut args = vec!["impact", "--repo", repo, "--target", "target"];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(home, &args);
+    assert_eq!(code, 0, "{err}");
+    let doc = json_of(&out);
+    (out, doc)
+}
+
+/// The dependent file of each path, from the path list alone (literal rule: `tests/`).
+fn dependent_files(doc: &Value) -> Vec<String> {
+    doc["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            p["edges"].as_array().unwrap().last().unwrap()["caller_path"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn summary_counts_non_test_paths_and_reports_the_test_path() {
+    let h = home("sum-default");
+    indexed_files(&h, "s", &SUMMARY_FILES);
+    let (raw, doc) = impact_in(&h, "s", &["--summary"]);
+    let files = dependent_files(&doc);
+    let counted = files.iter().filter(|f| !f.starts_with("tests/")).count();
+    assert_eq!(doc["paths"].as_array().unwrap().len(), 2, "{raw}");
+    let s = &doc["summary"];
+    assert_eq!(s["scope"], "traversal-paths", "{raw}");
+    assert_eq!(s["classifier"], "path-heuristic", "{raw}");
+    assert_eq!(s["include_tests"], false, "{raw}");
+    assert_eq!(s["total"], counted, "{raw}");
+    // Without --include-tests the test path is outside total, but inside the traversal.
+    assert_eq!(
+        s["total"].as_u64().unwrap() + s["tests"]["count"].as_u64().unwrap(),
+        doc["completeness"]["total"].as_u64().unwrap(),
+        "{raw}"
+    );
+    assert_eq!(s["distinct_files"], 1, "{raw}");
+    assert_eq!(
+        s["tests"],
+        serde_json::json!({"count": 1, "included": false}),
+        "{raw}"
+    );
+    assert_eq!(
+        s["candidates_complete"], doc["candidates"]["complete"],
+        "{raw}"
+    );
+    assert_eq!(
+        s["by_depth"],
+        serde_json::json!([{"distance": 1, "paths": counted, "proven": 0, "unproven": 0, "candidate-name": counted}]),
+        "{raw}"
+    );
+}
+
+#[test]
+fn include_tests_counts_the_test_path_everywhere() {
+    let h = home("sum-tests");
+    indexed_files(&h, "s", &SUMMARY_FILES);
+    let (raw, doc) = impact_in(&h, "s", &["--summary", "--include-tests"]);
+    let files = dependent_files(&doc);
+    let s = &doc["summary"];
+    assert_eq!(s["include_tests"], true, "{raw}");
+    assert_eq!(s["total"], doc["completeness"]["total"], "{raw}");
+    assert_eq!(s["total"], files.len(), "{raw}");
+    assert_eq!(
+        s["distinct_files"],
+        files
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "{raw}"
+    );
+    assert_eq!(
+        s["tests"],
+        serde_json::json!({"count": 1, "included": true}),
+        "{raw}"
+    );
+    assert_eq!(s["by_depth"][0]["paths"], files.len(), "{raw}");
+}
+
+#[test]
+fn summary_is_unchanged_by_offset_and_loses_one_path_on_the_page() {
+    // --offset pages the returned paths only; the summary covers the same traversal.
+    let h = home("sum-offset");
+    indexed_files(&h, "s", &SUMMARY_FILES);
+    let (_, full) = impact_in(&h, "s", &["--summary"]);
+    let (raw, paged) = impact_in(&h, "s", &["--summary", "--offset", "1", "--limit", "50"]);
+    assert_eq!(
+        paged["paths"].as_array().unwrap().len(),
+        full["paths"].as_array().unwrap().len() - 1,
+        "{raw}"
+    );
+    // `unresolved` copies completeness.unresolved, which part A extends with
+    // `truncated_branches` when --offset is above zero: only that key may differ.
+    let (mut a, mut b) = (paged["summary"].clone(), full["summary"].clone());
+    a.as_object_mut().unwrap().remove("unresolved");
+    b.as_object_mut().unwrap().remove("unresolved");
+    assert_eq!(a, b, "{raw}");
+    assert_eq!(
+        paged["summary"]["unresolved"], paged["completeness"]["unresolved"],
+        "{raw}"
+    );
+}
+
+#[test]
+fn a_small_limit_caps_candidates_per_node_and_the_summary_says_so() {
+    // `--limit 1` is the per-node candidate cap, not paging: the traversal itself is
+    // capped, so the counts are those of the capped traversal and flagged incomplete.
+    let h = home("sum-cap");
+    indexed_files(&h, "c", &CAP_FILES);
+    let (raw, doc) = impact_in(&h, "c", &["--summary", "--limit", "1"]);
+    assert_eq!(doc["candidates"]["complete"], false, "{raw}");
+    assert_eq!(doc["summary"]["candidates_complete"], false, "{raw}");
+    assert_eq!(doc["completeness"]["total"], 1, "{raw}");
+    assert_eq!(
+        doc["summary"]["total"], doc["completeness"]["total"],
+        "{raw}"
+    );
+    // Without the cap the same fixture lists all three callers and is complete.
+    let (raw, doc) = impact_in(&h, "c", &["--summary"]);
+    assert_eq!(doc["summary"]["candidates_complete"], true, "{raw}");
+    assert_eq!(doc["summary"]["total"], 3, "{raw}");
+}
+
+#[test]
+fn summary_is_after_candidates_and_before_disclaimer() {
+    let h = home("sum-order");
+    indexed_files(&h, "s", &SUMMARY_FILES);
+    let (raw, _) = impact_in(&h, "s", &["--summary"]);
+    let candidates = raw
+        .find("\"candidates\":{")
+        .unwrap_or_else(|| panic!("{raw}"));
+    let summary = raw.find("\"summary\":{").unwrap_or_else(|| panic!("{raw}"));
+    let disclaimer = raw
+        .find("\"disclaimer\":")
+        .unwrap_or_else(|| panic!("{raw}"));
+    assert!(candidates < summary && summary < disclaimer, "{raw}");
+    assert!(raw.contains("},\"summary\":{"), "{raw}");
+    // Summary keys in their contract order.
+    let keys = [
+        "\"scope\":",
+        "\"classifier\":",
+        "\"include_tests\":",
+        "\"total\":",
+        "\"by_depth\":",
+        "\"distinct_files\":",
+        "\"tests\":",
+        "\"candidates_complete\":",
+        "\"verdict\":",
+        "\"unresolved\":",
+    ];
+    let mut last = summary;
+    for key in keys {
+        let at = raw[last..]
+            .find(key)
+            .unwrap_or_else(|| panic!("{key} missing or out of order: {raw}"));
+        last += at + key.len();
+    }
+}
+
+#[test]
+fn summary_mirrors_the_document_verdict_and_unresolved() {
+    let h = home("sum-mirror");
+    indexed_files(&h, "s", &SUMMARY_FILES);
+    let (raw, doc) = impact_in(&h, "s", &["--summary"]);
+    assert_eq!(doc["summary"]["verdict"], doc["verdict"], "{raw}");
+    assert_eq!(
+        doc["summary"]["unresolved"], doc["completeness"]["unresolved"],
+        "{raw}"
+    );
+}
+
+#[test]
+fn default_impact_has_no_summary_key() {
+    let h = home("sum-absent");
+    indexed_files(&h, "s", &SUMMARY_FILES);
+    let (raw, doc) = impact_in(&h, "s", &[]);
+    assert!(!raw.contains("\"summary\""), "{raw}");
+    assert!(doc.get("summary").is_none(), "{raw}");
+}
+
+#[test]
+fn include_tests_needs_summary_and_summary_is_impact_only() {
+    let h = home("sum-usage");
+    indexed_files(&h, "s", &SUMMARY_FILES);
+    for args in [
+        vec![
+            "impact",
+            "--repo",
+            "s",
+            "--target",
+            "target",
+            "--include-tests",
+        ],
+        vec!["trace", "--repo", "s", "--target", "target", "--summary"],
+        vec![
+            "trace",
+            "--repo",
+            "s",
+            "--target",
+            "target",
+            "--include-tests",
+        ],
+    ] {
+        let (code, _out, _err) = run(&h, &args);
+        assert_eq!(code, 2, "{args:?}");
+    }
+    let (code, _out, err) = run(
+        &h,
+        &[
+            "impact",
+            "--repo",
+            "s",
+            "--target",
+            "target",
+            "--summary",
+            "--include-tests",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+}

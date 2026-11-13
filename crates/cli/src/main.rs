@@ -58,9 +58,9 @@ pub(crate) fn usage() -> String {
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
-  {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  mcp Serve the MCP stdio interface\n"
+  {NAME} callers --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
+  {NAME} callees --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
+  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  mcp Serve the MCP stdio interface\n"
     )
 }
 
@@ -668,13 +668,82 @@ struct QueryArgs<'a> {
     lsp_server: Option<&'a str>,
 }
 
+/// The anchor a command runs on: the parsed `--path/--line/--col` position, or
+/// the one definition a `--target` name resolves to. `Doc` is the non-resolved
+/// answer that replaces the command's output (exit 0).
+fn resolve_anchor(
+    home: &Path,
+    repo: &str,
+    position: Option<(String, u32, u32)>,
+    target: Option<&str>,
+    in_path: Option<&str>,
+    kind: Option<&str>,
+    err: &mut String,
+) -> Result<index::TargetResolution, i32> {
+    if let Some((path, line, col)) = position {
+        return Ok(index::TargetResolution::One { path, line, col });
+    }
+    let Some(target) = target else {
+        // The parsers require a position or a target, so this is a bug guard.
+        err.push_str(&format!("{}\n", usage()));
+        return Err(2);
+    };
+    resolve_by_name(
+        home,
+        repo,
+        &index::TargetQuery {
+            target,
+            in_path,
+            kind,
+        },
+        err,
+    )
+}
+
+/// Resolve a `--target` name on the latest snapshot. Storage is only read: a
+/// missing index answers `no-index` and nothing is created or migrated.
+fn resolve_by_name(
+    home: &Path,
+    repo: &str,
+    query: &index::TargetQuery,
+    err: &mut String,
+) -> Result<index::TargetResolution, i32> {
+    match store::open_read(&store::db_path(home, repo)) {
+        store::IndexRead::Missing => Ok(index::TargetResolution::Doc(
+            index::no_index_target_document(repo, query),
+        )),
+        store::IndexRead::Outdated(version) => {
+            err.push_str(&format!("error: index schema v{version} is outdated\n"));
+            Err(3)
+        }
+        store::IndexRead::Ahead(version) => {
+            err.push_str(&format!(
+                "error: database schema v{version} is newer than supported v{}\n",
+                store::SCHEMA_VERSION
+            ));
+            Err(3)
+        }
+        store::IndexRead::Error(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            Err(3)
+        }
+        store::IndexRead::Ready(conn) => index::resolve_target(&conn, repo, query).map_err(|e| {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }),
+    }
+}
+
 fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
-    let (repo, path, line, col, symbol, limit, offset, dir) = match op {
+    let (repo, path, line, col, target, in_path, kind, symbol, limit, offset, dir) = match op {
         args::EdgeOp::Callers {
             repo,
             path,
             line,
             col,
+            target,
+            in_path,
+            kind,
             symbol,
             limit,
             offset,
@@ -683,6 +752,9 @@ fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
             path,
             line,
             col,
+            target,
+            in_path,
+            kind,
             symbol,
             limit,
             offset,
@@ -693,6 +765,9 @@ fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
             path,
             line,
             col,
+            target,
+            in_path,
+            kind,
             symbol,
             limit,
             offset,
@@ -701,6 +776,9 @@ fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
             path,
             line,
             col,
+            target,
+            in_path,
+            kind,
             symbol,
             limit,
             offset,
@@ -712,19 +790,17 @@ fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
         Ok(paths) => paths,
         Err(code) => return code,
     };
-    let line_number: u32 = match line.parse() {
-        Ok(n) if n > 0 => n,
-        _ => {
-            err.push_str(&format!("error: invalid --line value: '{line}'\n"));
-            return 2;
+    let position = match (path.as_deref(), line.as_deref(), col.as_deref()) {
+        (Some(p), Some(l), Some(c)) => {
+            match (trace_position(l, "--line"), trace_position(c, "--col")) {
+                (Ok(l), Ok(c)) => Some((p.to_string(), l, c)),
+                (Err(e), _) | (_, Err(e)) => {
+                    err.push_str(&format!("error: {e}\n"));
+                    return 2;
+                }
+            }
         }
-    };
-    let col_number: u32 = match col.parse() {
-        Ok(n) if n > 0 => n,
-        _ => {
-            err.push_str(&format!("error: invalid --col value: '{col}'\n"));
-            return 2;
-        }
+        _ => None,
     };
     let limit_number = match parse_count(limit.as_deref(), index::DEFAULT_SEARCH_LIMIT, "limit") {
         Ok(n) => n,
@@ -751,6 +827,22 @@ fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
         err.push_str("error: --offset exceeds supported range\n");
         return 2;
     }
+    let (path, line_number, col_number) = match resolve_anchor(
+        &home,
+        &repo,
+        position,
+        target.as_deref(),
+        in_path.as_deref(),
+        kind.as_deref(),
+        err,
+    ) {
+        Ok(index::TargetResolution::One { path, line, col }) => (path, line, col),
+        Ok(index::TargetResolution::Doc(doc)) => {
+            *out = doc + "\n";
+            return 0;
+        }
+        Err(code) => return code,
+    };
     let request = index::EdgeRequest {
         anchor: index::SpanQuery {
             rel: &path,
@@ -789,8 +881,14 @@ fn cmd_trace(args: args::TraceArgs, out: &mut String, err: &mut String) -> i32 {
 
 fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: bool) -> i32 {
     let parsed = (|| {
-        let line = trace_position(&args.line, "--line")?;
-        let col = trace_position(&args.col, "--col")?;
+        let position = match (&args.path, &args.line, &args.col) {
+            (Some(path), Some(line), Some(col)) => Some((
+                path.clone(),
+                trace_position(line, "--line")?,
+                trace_position(col, "--col")?,
+            )),
+            _ => None,
+        };
         let depth = parse_count(args.depth.as_deref(), 3, "depth")?;
         if !(1..=edges::TRACE_MAX_DEPTH).contains(&depth) {
             return Err("--depth must be between 1 and 6".to_string());
@@ -819,9 +917,9 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
                 ))
             })
             .transpose()?;
-        Ok((line, col, depth, limit, offset, to))
+        Ok((position, depth, limit, offset, to))
     })();
-    let (line, col, depth, limit, offset, to) = match parsed {
+    let (position, depth, limit, offset, to) = match parsed {
         Ok(p) => p,
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
@@ -832,9 +930,33 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
         Ok(p) => p,
         Err(code) => return code,
     };
+    // A name answers before the query runs, so the destination is checked here
+    // exactly as the position form checks it (same refusal and exit code).
+    if let (Some(_), Some((dest, _, _))) = (&args.target, &to) {
+        if let Err(e) = crate::semantic::validate_doc_path(Path::new(&root), dest) {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    }
+    let (path, line, col) = match resolve_anchor(
+        &paths::config_dir(),
+        &args.repo,
+        position,
+        args.target.as_deref(),
+        args.in_path.as_deref(),
+        args.kind.as_deref(),
+        err,
+    ) {
+        Ok(index::TargetResolution::One { path, line, col }) => (path, line, col),
+        Ok(index::TargetResolution::Doc(doc)) => {
+            *out = doc + "\n";
+            return 0;
+        }
+        Err(code) => return code,
+    };
     let request = index::TraceRequest {
         source: index::SpanQuery {
-            rel: &args.path,
+            rel: &path,
             line1: line,
             col1: col,
             refs: false,
@@ -869,8 +991,14 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
 
 fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i32 {
     let parsed = (|| {
-        let line = trace_position(&args.line, "--line")?;
-        let col = trace_position(&args.col, "--col")?;
+        let position = match (&args.path, &args.line, &args.col) {
+            (Some(path), Some(line), Some(col)) => Some((
+                path.clone(),
+                trace_position(line, "--line")?,
+                trace_position(col, "--col")?,
+            )),
+            _ => None,
+        };
         let depth = parse_count(args.depth.as_deref(), context::DEFAULT_DEPTH, "depth")?;
         if !(1..=edges::TRACE_MAX_DEPTH).contains(&depth) {
             return Err("--depth must be between 1 and 6".to_string());
@@ -894,17 +1022,48 @@ fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i
                 context::MAX_MAX_BYTES
             ));
         }
-        Ok((line, col, depth, limit, max_bytes))
+        Ok((position, depth, limit, max_bytes))
     })();
-    let (line, col, depth, limit, max_bytes) = match parsed {
+    let (position, depth, limit, max_bytes) = match parsed {
         Ok(values) => values,
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
             return 2;
         }
     };
+    let (root, entry) = match knowledge_repo(&args.repo, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    if let Err(e) = context::validate_options(
+        depth,
+        limit,
+        max_bytes,
+        args.query.as_deref(),
+        args.semantic,
+    ) {
+        err.push_str(&format!("error: {e}\n"));
+        return 2;
+    }
+    let home = paths::config_dir();
+    let (path, line, col) = match resolve_anchor(
+        &home,
+        &args.repo,
+        position,
+        args.target.as_deref(),
+        args.in_path.as_deref(),
+        args.kind.as_deref(),
+        err,
+    ) {
+        Ok(index::TargetResolution::One { path, line, col }) => (path, line, col),
+        Ok(index::TargetResolution::Doc(doc)) => {
+            *out = doc + "\n";
+            return 0;
+        }
+        Err(code) => return code,
+    };
     let request = context::ContextRequest {
-        path: &args.path,
+        path: &path,
         line,
         col,
         symbol: args.symbol.as_deref(),
@@ -913,10 +1072,6 @@ fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i
         depth,
         limit,
         max_bytes,
-    };
-    let (root, entry) = match knowledge_repo(&args.repo, err) {
-        Ok(paths) => paths,
-        Err(code) => return code,
     };
     if let Err(e) = context::validate_request(Path::new(&root), &request) {
         err.push_str(&format!("error: {e}\n"));
@@ -929,7 +1084,6 @@ fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i
             3
         };
     }
-    let home = paths::config_dir();
     match store::open_read(&store::db_path(&home, &args.repo)) {
         store::IndexRead::Missing => {
             err.push_str("error: no snapshot: index the repository first\n");

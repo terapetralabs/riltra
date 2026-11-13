@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "common/mock_lsp.rs"]
+mod mock_lsp;
 #[path = "common/rust_alias.rs"]
 mod rust_alias;
 
@@ -2458,16 +2460,7 @@ fn task4_lsp_is_ephemeral_for_graph_queries() {
     let dir = repo_with(&h, "sem", &[("main.rs", source)]);
     do_index(&h);
     let before = query_json(&h, "callees", "main.rs", &[]);
-    let status = Command::new("cargo")
-        .args(["build", "--offline", "--example", "mock_lsp"])
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let mut mock = std::env::current_exe().unwrap();
-    mock.pop();
-    mock.pop();
-    mock.push("examples");
-    mock.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
+    let mock = mock_lsp::mock_lsp_bin();
     let result = Command::new(env!("CARGO_BIN_EXE_riltra"))
         .args([
             "semantic",

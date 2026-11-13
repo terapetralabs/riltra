@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+#[path = "common/mock_lsp.rs"]
+mod mock_lsp;
 #[path = "common/rust_alias.rs"]
 mod rust_alias;
 
@@ -376,8 +378,9 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
             "code_search missing property {key}: {search_schema}"
         );
     }
-    // CP4 graph tools mirror their CLI counterparts: a required path+line+col
-    // anchor with optional symbol/limit/offset; trace adds `to`+`depth`,
+    // CP4 graph tools mirror their CLI counterparts: a path+line+col anchor or
+    // a name (`target`, with optional `in`/`kind`), so only `repo` is required;
+    // optional symbol/limit/offset; trace adds `to`+`depth`,
     // impact adds `depth` and must not accept `to`. Unknown parameters are
     // rejected (`additionalProperties: false`, CLI unknown-flag strictness).
     for tool in [
@@ -394,11 +397,7 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
             .map(|v| v.as_str().unwrap())
             .collect();
         required.sort_unstable();
-        assert_eq!(
-            required,
-            ["col", "line", "path", "repo"],
-            "{tool}: {schema}"
-        );
+        assert_eq!(required, ["repo"], "{tool}: {schema}");
         let mut keys: Vec<&str> = schema["properties"]
             .as_object()
             .unwrap_or_else(|| panic!("{tool}: properties: {schema}"))
@@ -408,12 +407,16 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
         keys.sort_unstable();
         let expected: &[&str] = match tool {
             "riltra_code_trace" => &[
-                "col", "depth", "limit", "line", "offset", "path", "repo", "symbol", "to",
+                "col", "depth", "in", "kind", "limit", "line", "offset", "path", "repo", "symbol",
+                "target", "to",
             ],
             "riltra_code_impact" => &[
-                "col", "depth", "limit", "line", "offset", "path", "repo", "symbol",
+                "col", "depth", "in", "kind", "limit", "line", "offset", "path", "repo", "symbol",
+                "target",
             ],
-            _ => &["col", "limit", "line", "offset", "path", "repo", "symbol"],
+            _ => &[
+                "col", "in", "kind", "limit", "line", "offset", "path", "repo", "symbol", "target",
+            ],
         };
         assert_eq!(keys, expected, "{tool}: properties: {schema}");
         assert_eq!(schema["additionalProperties"], false, "{tool}: {schema}");
@@ -426,7 +429,7 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
         .map(|value| value.as_str().unwrap())
         .collect();
     context_required.sort_unstable();
-    assert_eq!(context_required, ["col", "line", "path", "repo"]);
+    assert_eq!(context_required, ["repo"]);
     let mut context_fields: Vec<&str> = context_schema["properties"]
         .as_object()
         .unwrap()
@@ -439,6 +442,8 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
         [
             "col",
             "depth",
+            "in",
+            "kind",
             "limit",
             "line",
             "max_bytes",
@@ -446,7 +451,8 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
             "query",
             "repo",
             "semantic",
-            "symbol"
+            "symbol",
+            "target"
         ]
     );
     assert_eq!(context_schema["additionalProperties"], false);
@@ -4964,26 +4970,7 @@ fn t5_knowledge_hostile_or_corrupt_store_fails_closed() {
 
 // --- M9: the semantic tool ----------------------------------------------------
 
-/// The mock language server binary, built once per test process. `testutil`
-/// is `#[cfg(test)]`-only, so an integration test cannot call it and repeats
-/// the build/locate logic `tests/semantic.rs` already uses.
-fn mock_lsp_bin() -> PathBuf {
-    static BUILD: std::sync::Once = std::sync::Once::new();
-    BUILD.call_once(|| {
-        let status = std::process::Command::new("cargo")
-            .args(["build", "--offline", "--example", "mock_lsp"])
-            .status()
-            .expect("cargo build mock server");
-        assert!(status.success(), "mock server must build");
-    });
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // test binary
-    p.pop(); // deps
-    p.push("examples");
-    p.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
-    assert!(p.is_file(), "mock server missing: {}", p.display());
-    p
-}
+use mock_lsp::mock_lsp_bin;
 
 /// A repository the mock can answer about. Line 2 carries a non-ASCII
 /// character, so a UTF-16 column and a byte column differ: the UTF-16
@@ -5722,6 +5709,342 @@ fn t2_knowledge_search_by_path_matches_cli() {
         ],
     );
 
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+// --- By-name anchors: the graph and context tools accept `target` (with
+// optional `in`/`kind`) in place of path/line/col. Parity is by parsed
+// document, the rule every other MCP/CLI test in this file uses.
+
+/// The five by-name tools and the CLI command each one mirrors.
+const NAME_TOOLS: [(&str, &str); 5] = [
+    ("riltra_code_callers", "callers"),
+    ("riltra_code_callees", "callees"),
+    ("riltra_code_trace", "trace"),
+    ("riltra_code_impact", "impact"),
+    ("riltra_context", "context"),
+];
+
+/// Same fixture as `tests/workflow.rs`: `save` is defined in `a.py` (a
+/// function and `Box.save`) and in `b.py`; `save_all` lives in `b.py`.
+fn name_repo(cfg: &Path, dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("a.py"),
+        "def save(x):\n    return x\n\n\nclass Box:\n    def save(self):\n        return self\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.py"),
+        "def save(x):\n    return x\n\n\ndef save_all(items):\n    for item in items:\n        save(item)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("c.py"),
+        "from b import save_all\n\n\ndef run():\n    save_all([])\n",
+    )
+    .unwrap();
+    indexed_repo(cfg, dir, "w");
+}
+
+#[test]
+fn target_ambiguous_answers_the_cli_document_for_every_tool() {
+    let h = home("target-ambiguous");
+    let r = home("target-ambiguous-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    for (id, (tool, cmd)) in (2i64..).zip(NAME_TOOLS) {
+        let res = call_tool(&mut s, id, tool, &json!({"repo": "w", "target": "save"}));
+        assert!(!is_error(&res), "{tool}: {res}");
+        let got = doc(&res);
+        assert_eq!(got["status"], "ambiguous", "{tool}: {got}");
+        assert_eq!(
+            got,
+            cli_json(&h, &[cmd, "--repo", "w", "--target", "save"]),
+            "{tool}"
+        );
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_resolved_answers_the_position_form_for_every_tool() {
+    let h = home("target-resolved");
+    let r = home("target-resolved-repo");
+    name_repo(&h, &r);
+    let found = cli_json(&h, &["search", "--repo", "w", "--symbol", "save_all"]);
+    let hit = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["path"] == "b.py" && x["kind"] == "function")
+        .expect("save_all definition");
+    let position = json!({
+        "repo": "w",
+        "path": "b.py",
+        "line": hit["span"]["start_line"],
+        "col": hit["span"]["start_col"],
+    });
+    let mut s = ready(&h);
+    for (i, (tool, _)) in NAME_TOOLS.iter().enumerate() {
+        let id = 2 + 2 * i as i64;
+        let res = call_tool(
+            &mut s,
+            id,
+            tool,
+            &json!({"repo": "w", "target": "save_all"}),
+        );
+        assert!(!is_error(&res), "{tool}: {res}");
+        let by_name = doc(&res);
+        let res_position = call_tool(&mut s, id + 1, tool, &position);
+        assert!(!is_error(&res_position), "{tool}: {res_position}");
+        let by_position = doc(&res_position);
+        assert_eq!(by_name, by_position, "{tool}");
+        assert!(by_name.get("status").is_none(), "{tool}: {by_name}");
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_filters_map_to_in_and_kind_and_match_the_cli() {
+    let h = home("target-filters");
+    let r = home("target-filters-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    for (i, (tool, cmd)) in NAME_TOOLS.iter().enumerate() {
+        let id = 2 + 2 * i as i64;
+        let by_kind = doc(&call_tool(
+            &mut s,
+            id,
+            tool,
+            &json!({"repo": "w", "target": "save", "kind": "method"}),
+        ));
+        assert_eq!(
+            by_kind,
+            cli_json(
+                &h,
+                &[cmd, "--repo", "w", "--target", "save", "--kind", "method"]
+            ),
+            "{tool} kind"
+        );
+        let by_in = doc(&call_tool(
+            &mut s,
+            id + 1,
+            tool,
+            &json!({"repo": "w", "target": "save", "in": "b.py"}),
+        ));
+        assert_eq!(
+            by_in,
+            cli_json(
+                &h,
+                &[cmd, "--repo", "w", "--target", "save", "--in", "b.py"]
+            ),
+            "{tool} in"
+        );
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_mixed_or_incomplete_anchors_are_invalid_input() {
+    let h = home("target-invalid");
+    let r = home("target-invalid-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    let cases = [
+        json!({"repo": "w", "target": "save_all", "path": "b.py", "line": 1, "col": 1}),
+        json!({"repo": "w", "target": "save_all", "line": 1}),
+        json!({"repo": "w", "path": "b.py"}),
+        json!({"repo": "w", "in": "b.py"}),
+        json!({"repo": "w", "target": ""}),
+    ];
+    let mut id = 2i64;
+    for (tool, _) in NAME_TOOLS {
+        for args in &cases {
+            let res = call_tool(&mut s, id, tool, args);
+            id += 1;
+            assert!(is_error(&res), "{tool} {args}: {res}");
+            let d = doc(&res);
+            assert_eq!(d["kind"], "invalid_input", "{tool} {args}: {d}");
+        }
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_unknown_fields_are_still_rejected() {
+    let h = home("target-unknown");
+    let r = home("target-unknown-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    s.send(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "riltra_code_callers",
+                "arguments": {"repo": "w", "target": "save", "bogus": 1}
+            }
+        })
+        .to_string(),
+    );
+    let v = s.recv();
+    assert!(
+        v.get("error").is_some() || is_error(&v["result"]),
+        "unknown field must be refused: {v}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_without_an_index_is_a_document_and_creates_nothing() {
+    let h = home("target-noindex");
+    let r = home("target-noindex-repo");
+    std::fs::create_dir_all(&r).unwrap();
+    std::fs::write(r.join("a.py"), "def save(x):\n    return x\n").unwrap();
+    init_repo(&h, &r, "w");
+    let before = listing(&h);
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_callers",
+        &json!({"repo": "w", "target": "save"}),
+    );
+    assert!(!is_error(&res), "{res}");
+    let d = doc(&res);
+    assert_eq!(d["status"], "no-index", "{d}");
+    assert_eq!(d["total"], 0, "{d}");
+    assert_eq!(listing(&h), before, "lookup must not create storage");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+// --- Fix round 1 ------------------------------------------------------------
+
+#[test]
+fn target_context_options_are_refused_like_the_position_form() {
+    let h = home("target-context-options");
+    let r = home("target-context-options-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    let cases = [
+        json!({"repo": "w", "path": "b.py", "line": 1, "col": 1, "semantic": true}),
+        json!({"repo": "w", "target": "save", "semantic": true}),
+        json!({"repo": "w", "target": "save", "query": ""}),
+    ];
+    for (i, args) in cases.iter().enumerate() {
+        let res = call_tool(&mut s, 2 + i as i64, "riltra_context", args);
+        assert!(is_error(&res), "{args}: {res}");
+        let d = doc(&res);
+        assert_eq!(d["kind"], "invalid_input", "{args}: {d}");
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_with_a_snapshotless_database_is_no_index() {
+    let h = home("target-nosnap");
+    let r = home("target-nosnap-repo");
+    name_repo(&h, &r);
+    let conn = rusqlite::Connection::open(db_path(&h, "w")).unwrap();
+    conn.execute("DELETE FROM snapshots", []).unwrap();
+    drop(conn);
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_callers",
+        &json!({"repo": "w", "target": "save"}),
+    );
+    assert!(!is_error(&res), "{res}");
+    let d = doc(&res);
+    assert_eq!(d["status"], "no-index", "{d}");
+    assert_eq!(d["total"], 0, "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_blank_filters_and_position_filters_are_invalid_input() {
+    let h = home("target-blank");
+    let r = home("target-blank-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    let cases = [
+        json!({"repo": "w", "target": "save", "in": " "}),
+        json!({"repo": "w", "target": "save", "kind": ""}),
+        json!({"repo": "w", "target": "   "}),
+        json!({"repo": "w", "path": "b.py", "line": 1, "col": 1, "in": "b.py"}),
+        json!({"repo": "w", "path": "b.py", "line": 1, "col": 1, "kind": "function"}),
+    ];
+    let mut id = 2i64;
+    for (tool, _) in NAME_TOOLS {
+        for args in &cases {
+            let res = call_tool(&mut s, id, tool, args);
+            id += 1;
+            assert!(is_error(&res), "{tool} {args}: {res}");
+            let d = doc(&res);
+            assert_eq!(d["kind"], "invalid_input", "{tool} {args}: {d}");
+        }
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn target_trace_refuses_an_invalid_destination_like_the_position_form() {
+    let h = home("target-to-parity");
+    let r = home("target-to-parity-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    let position = call_tool(
+        &mut s,
+        2,
+        "riltra_code_trace",
+        &json!({"repo": "w", "path": "b.py", "line": 1, "col": 1, "to": "../escape:1:1"}),
+    );
+    let by_name = call_tool(
+        &mut s,
+        3,
+        "riltra_code_trace",
+        &json!({"repo": "w", "target": "save", "to": "../escape:1:1"}),
+    );
+    assert!(is_error(&position), "{position}");
+    assert!(is_error(&by_name), "{by_name}");
+    assert_eq!(doc(&by_name), doc(&position));
+    assert_eq!(doc(&by_name)["kind"], "invalid_input");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+// --- Fix round 2 ------------------------------------------------------------
+
+#[test]
+fn target_substring_is_a_true_substring_over_mcp() {
+    let h = home("target-true-substring");
+    let r = home("target-true-substring-repo");
+    name_repo(&h, &r);
+    let mut s = ready(&h);
+    for (i, term) in ["save a", "save all"].iter().enumerate() {
+        let res = call_tool(
+            &mut s,
+            2 + i as i64,
+            "riltra_code_callers",
+            &json!({"repo": "w", "target": term}),
+        );
+        assert!(!is_error(&res), "{term}: {res}");
+        let d = doc(&res);
+        assert_eq!(d["status"], "not-found", "{term}: {d}");
+    }
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 }

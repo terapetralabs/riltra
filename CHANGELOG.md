@@ -12,6 +12,14 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 - Opt-in `--progress` flag for `scan` and `index`: prints live progress lines
   (files parsed and elapsed seconds) to stderr only. The JSON on stdout is
   unchanged, and the flag is off by default.
+- By-name anchors for `callers`, `callees`, `trace`, `impact` and `context`:
+  `--target <name>` with optional `--in` and `--kind` (MCP: `target`, `in`,
+  `kind`). The MCP graph and context tools no longer require `path`, `line`
+  and `col` in their schema when `target` is given. Ambiguous and unknown
+  names answer a document (`ambiguous`, `not-found`, `no-index`) instead of
+  guessing. `--kind` takes the kind as stored per language (Python functions
+  and methods are `function`; Go, JavaScript, TypeScript and Java methods are
+  `method`).
 
 ### Fixed
 

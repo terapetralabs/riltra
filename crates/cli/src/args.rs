@@ -58,9 +58,12 @@ pub enum Command {
 #[derive(Debug, PartialEq)]
 pub struct ContextArgs {
     pub repo: String,
-    pub path: String,
-    pub line: String,
-    pub col: String,
+    pub path: Option<String>,
+    pub line: Option<String>,
+    pub col: Option<String>,
+    pub target: Option<String>,
+    pub in_path: Option<String>,
+    pub kind: Option<String>,
     pub symbol: Option<String>,
     pub query: Option<String>,
     pub semantic: bool,
@@ -72,9 +75,12 @@ pub struct ContextArgs {
 #[derive(Debug, PartialEq)]
 pub struct TraceArgs {
     pub repo: String,
-    pub path: String,
-    pub line: String,
-    pub col: String,
+    pub path: Option<String>,
+    pub line: Option<String>,
+    pub col: Option<String>,
+    pub target: Option<String>,
+    pub in_path: Option<String>,
+    pub kind: Option<String>,
     pub symbol: Option<String>,
     pub to: Option<String>,
     pub depth: Option<String>,
@@ -86,18 +92,24 @@ pub struct TraceArgs {
 pub enum EdgeOp {
     Callers {
         repo: String,
-        path: String,
-        line: String,
-        col: String,
+        path: Option<String>,
+        line: Option<String>,
+        col: Option<String>,
+        target: Option<String>,
+        in_path: Option<String>,
+        kind: Option<String>,
         symbol: Option<String>,
         limit: Option<String>,
         offset: Option<String>,
     },
     Callees {
         repo: String,
-        path: String,
-        line: String,
-        col: String,
+        path: Option<String>,
+        line: Option<String>,
+        col: Option<String>,
+        target: Option<String>,
+        in_path: Option<String>,
+        kind: Option<String>,
         symbol: Option<String>,
         limit: Option<String>,
         offset: Option<String>,
@@ -501,6 +513,9 @@ fn parse_context_args(args: &[String]) -> Result<ContextArgs, String> {
     let mut path = None;
     let mut line = None;
     let mut col = None;
+    let mut target = None;
+    let mut in_path = None;
+    let mut kind = None;
     let mut symbol = None;
     let mut query = None;
     let mut semantic = false;
@@ -520,6 +535,12 @@ fn parse_context_args(args: &[String]) -> Result<ContextArgs, String> {
             line = Some(v);
         } else if let Some(v) = take_value(args, &mut i, "--col") {
             col = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--target") {
+            target = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--in") {
+            in_path = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--kind") {
+            kind = Some(v);
         } else if let Some(v) = take_value(args, &mut i, "--symbol") {
             symbol = Some(v);
         } else if let Some(v) = take_value(args, &mut i, "--query") {
@@ -534,20 +555,51 @@ fn parse_context_args(args: &[String]) -> Result<ContextArgs, String> {
             return Err(crate::usage());
         }
     }
-    match (repo, path, line, col) {
-        (Some(repo), Some(path), Some(line), Some(col)) => Ok(ContextArgs {
-            repo,
-            path,
-            line,
-            col,
-            symbol,
-            query,
-            semantic,
-            depth,
-            limit,
-            max_bytes,
-        }),
+    match repo {
+        Some(repo) if anchor_is_valid(&path, &line, &col, &target, &in_path, &kind) => {
+            Ok(ContextArgs {
+                repo,
+                path,
+                line,
+                col,
+                target,
+                in_path,
+                kind,
+                symbol,
+                query,
+                semantic,
+                depth,
+                limit,
+                max_bytes,
+            })
+        }
         _ => Err(crate::usage()),
+    }
+}
+
+/// A command anchors either at `--path/--line/--col` or at a name
+/// (`--target`, narrowed by `--in`/`--kind`), never both; a blank target
+/// names nothing.
+fn anchor_is_valid(
+    path: &Option<String>,
+    line: &Option<String>,
+    col: &Option<String>,
+    target: &Option<String>,
+    in_path: &Option<String>,
+    kind: &Option<String>,
+) -> bool {
+    match target {
+        Some(target) => {
+            path.is_none()
+                && line.is_none()
+                && col.is_none()
+                && !target.trim().is_empty()
+                && in_path.as_ref().is_none_or(|p| !p.trim().is_empty())
+                && kind.as_ref().is_none_or(|k| !k.trim().is_empty())
+        }
+        None => {
+            path.is_some() && line.is_some() && col.is_some() && in_path.is_none() && kind.is_none()
+        }
     }
 }
 
@@ -557,8 +609,8 @@ fn parse_trace_args(args: &[String]) -> Result<TraceArgs, String> {
     while i < args.len() {
         let mut matched = false;
         for flag in [
-            "--repo", "--path", "--line", "--col", "--symbol", "--to", "--depth", "--limit",
-            "--offset",
+            "--repo", "--path", "--line", "--col", "--target", "--in", "--kind", "--symbol",
+            "--to", "--depth", "--limit", "--offset",
         ] {
             if let Some(value) = take_value(args, &mut i, flag) {
                 values.insert(flag, value);
@@ -570,11 +622,24 @@ fn parse_trace_args(args: &[String]) -> Result<TraceArgs, String> {
             return Err(crate::usage());
         }
     }
+    let repo = values.remove("--repo").ok_or_else(crate::usage)?;
+    let path = values.remove("--path");
+    let line = values.remove("--line");
+    let col = values.remove("--col");
+    let target = values.remove("--target");
+    let in_path = values.remove("--in");
+    let kind = values.remove("--kind");
+    if !anchor_is_valid(&path, &line, &col, &target, &in_path, &kind) {
+        return Err(crate::usage());
+    }
     Ok(TraceArgs {
-        repo: values.remove("--repo").ok_or_else(crate::usage)?,
-        path: values.remove("--path").ok_or_else(crate::usage)?,
-        line: values.remove("--line").ok_or_else(crate::usage)?,
-        col: values.remove("--col").ok_or_else(crate::usage)?,
+        repo,
+        path,
+        line,
+        col,
+        target,
+        in_path,
+        kind,
         symbol: values.remove("--symbol"),
         to: values.remove("--to"),
         depth: values.remove("--depth"),
@@ -590,6 +655,9 @@ fn parse_edge_args(args: &[String], callers: bool) -> Result<EdgeOp, String> {
     let mut path = None;
     let mut line = None;
     let mut col = None;
+    let mut target = None;
+    let mut in_path = None;
+    let mut kind = None;
     let mut symbol = None;
     let mut limit = None;
     let mut offset = None;
@@ -603,6 +671,12 @@ fn parse_edge_args(args: &[String], callers: bool) -> Result<EdgeOp, String> {
             line = Some(v);
         } else if let Some(v) = take_value(args, &mut i, "--col") {
             col = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--target") {
+            target = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--in") {
+            in_path = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--kind") {
+            kind = Some(v);
         } else if let Some(v) = take_value(args, &mut i, "--symbol") {
             symbol = Some(v);
         } else if let Some(v) = take_value(args, &mut i, "--limit") {
@@ -613,14 +687,17 @@ fn parse_edge_args(args: &[String], callers: bool) -> Result<EdgeOp, String> {
             return Err(crate::usage());
         }
     }
-    match (repo, path, line, col) {
-        (Some(repo), Some(path), Some(line), Some(col)) => {
+    match repo {
+        Some(repo) if anchor_is_valid(&path, &line, &col, &target, &in_path, &kind) => {
             if callers {
                 Ok(EdgeOp::Callers {
                     repo,
                     path,
                     line,
                     col,
+                    target,
+                    in_path,
+                    kind,
                     symbol,
                     limit,
                     offset,
@@ -631,6 +708,9 @@ fn parse_edge_args(args: &[String], callers: bool) -> Result<EdgeOp, String> {
                     path,
                     line,
                     col,
+                    target,
+                    in_path,
+                    kind,
                     symbol,
                     limit,
                     offset,

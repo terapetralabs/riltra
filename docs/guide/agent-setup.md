@@ -61,6 +61,8 @@ Confirmation (`confirm_state`) on a knowledge record is stored provenance, not v
 
 `line` and `col` are 1-based. For the graph tools (`callers`, `callees`, `trace`, `impact`) the column counts bytes, so on a line with non-ASCII text it differs from an editor's column. Take `line` and `col` from the span of a search result instead of computing them. `riltra_code_semantic` takes its column in the language server's position unit (UTF-16 by default), which is not the byte column.
 
+`callers`, `callees`, `trace`, `impact` and `context` also accept a definition name in place of a position: `--target <name> [--in <relpath>] [--kind <kind>]` on the CLI, and `target`, `in` and `kind` on the MCP tools. The two forms are mutually exclusive. A name resolves only when exactly one definition has that exact name; otherwise the answer is a document with status `ambiguous` (up to 20 candidates listed), `not-found`, or `no-index`, and the exit code stays 0. A substring match never resolves by itself, even when it is the only hit. Substring matches are true substrings of the name, case-insensitive for ASCII letters (SQLite LIKE); exact names are case-sensitive. `total` counts every definition that matches (`total_exact` is always `true` for these answers); the candidate list holds up to 20 and `truncated` says when more exist. `--kind` takes the kind as stored for each language, which differs: Python functions and methods are `function`, Go, JavaScript, TypeScript and Java methods are `method`, and classes are `class`.
+
 ## Excluding paths
 
 Put a `.riltraignore` file in the repository root to keep generated or vendored directories out of the index.

@@ -85,13 +85,34 @@ pub fn validate_request(
     root: &Path,
     request: &ContextRequest<'_>,
 ) -> Result<(PathBuf, String), String> {
-    if !(1..=edges::TRACE_MAX_DEPTH).contains(&request.depth)
-        || !(1..=MAX_LIMIT).contains(&request.limit)
-        || !(MIN_MAX_BYTES..=MAX_MAX_BYTES).contains(&request.max_bytes)
+    validate_options(
+        request.depth,
+        request.limit,
+        request.max_bytes,
+        request.query,
+        request.semantic,
+    )?;
+    let trace = trace_request(request);
+    let (canon, rel, _) = index::validated_trace_anchor(root, &trace)?;
+    Ok((canon, rel))
+}
+
+/// The bounds, query and semantic checks, which need no anchor. A by-name
+/// lookup runs them before it can answer, so a name gets the position's refusals.
+pub fn validate_options(
+    depth: usize,
+    limit: usize,
+    max_bytes: usize,
+    query: Option<&str>,
+    semantic: bool,
+) -> Result<(), String> {
+    if !(1..=edges::TRACE_MAX_DEPTH).contains(&depth)
+        || !(1..=MAX_LIMIT).contains(&limit)
+        || !(MIN_MAX_BYTES..=MAX_MAX_BYTES).contains(&max_bytes)
     {
         return Err("invalid context bounds".to_string());
     }
-    if let Some(query) = request.query {
+    if let Some(query) = query {
         if query.trim().is_empty() {
             return Err("context query must not be empty".to_string());
         }
@@ -103,12 +124,10 @@ pub fn validate_request(
             ));
         }
     }
-    if request.semantic && request.query.is_none() {
+    if semantic && query.is_none() {
         return Err("context semantic retrieval requires --query".to_string());
     }
-    let trace = trace_request(request);
-    let (canon, rel, _) = index::validated_trace_anchor(root, &trace)?;
-    Ok((canon, rel))
+    Ok(())
 }
 
 pub fn query_conn(

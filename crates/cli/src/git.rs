@@ -84,7 +84,7 @@ fn canonical_str(p: &Path) -> Option<String> {
 /// repository: without a `.git` entry the answer is absent even inside a
 /// larger work tree, and a directory `.git` only validates when the discovered
 /// toplevel is this root itself (corrupt metadata or parent bleed → invalid).
-pub fn fingerprint(root: &Path) -> GitInfo {
+pub fn fingerprint_using(root: &Path, run: &dyn Fn(&Path, &[&str]) -> Option<String>) -> GitInfo {
     let claim = match std::fs::symlink_metadata(root.join(".git")) {
         Err(_) => return absent(),
         Ok(m) if m.file_type().is_dir() => DotGit::Dir,
@@ -100,7 +100,7 @@ pub fn fingerprint(root: &Path) -> GitInfo {
         }
     };
     let discovered =
-        git_out(root, &["rev-parse", "--show-toplevel"]).and_then(|s| canonical_str(Path::new(&s)));
+        run(root, &["rev-parse", "--show-toplevel"]).and_then(|s| canonical_str(Path::new(&s)));
     let toplevel = match (claim, discovered) {
         (DotGit::Dir, Some(t)) if t == canon_root => Some(t),
         (DotGit::Link, Some(t)) => Some(t),
@@ -112,10 +112,10 @@ pub fn fingerprint(root: &Path) -> GitInfo {
             ..absent()
         };
     };
-    let head = git_out(root, &["rev-parse", "HEAD"])
+    let head = run(root, &["rev-parse", "HEAD"])
         .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()));
-    let branch = git_out(root, &["branch", "--show-current"]).filter(|s| !s.is_empty());
-    let status = git_out(
+    let branch = run(root, &["branch", "--show-current"]).filter(|s| !s.is_empty());
+    let status = run(
         root,
         &["status", "--porcelain=v1", "--untracked-files=normal"],
     );
@@ -137,12 +137,12 @@ pub fn fingerprint(root: &Path) -> GitInfo {
             (dirty, untracked, true)
         }
     };
-    let git_dir = git_out(root, &["rev-parse", "--absolute-git-dir"])
-        .and_then(|s| canonical_str(Path::new(&s)));
+    let git_dir =
+        run(root, &["rev-parse", "--absolute-git-dir"]).and_then(|s| canonical_str(Path::new(&s)));
     // `--git-common-dir` may print relative (main repo) or absolute
     // (linked worktree); resolve against the root either way.
-    let common_dir = git_out(root, &["rev-parse", "--git-common-dir"])
-        .and_then(|s| canonical_str(&root.join(&s)));
+    let common_dir =
+        run(root, &["rev-parse", "--git-common-dir"]).and_then(|s| canonical_str(&root.join(&s)));
     let worktree = match (git_dir, common_dir) {
         (Some(a), Some(b)) => a != b,
         _ => false,
@@ -157,6 +157,10 @@ pub fn fingerprint(root: &Path) -> GitInfo {
         toplevel: Some(toplevel),
         worktree,
     }
+}
+/// The fingerprint through the posture of `git_out`: what every command except `changes` uses.
+pub fn fingerprint(root: &Path) -> GitInfo {
+    fingerprint_using(root, &git_out)
 }
 
 fn opt_json(value: &Option<String>) -> String {
@@ -179,6 +183,212 @@ pub fn git_json(g: &GitInfo) -> String {
         opt_json(&g.toplevel),
         g.worktree
     )
+}
+
+/// What one git call returned. `code` is None when git was killed by a signal.
+pub struct GitRun {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+/// Hardened git for `changes` and its freshness check. Every call carries the
+/// same overrides: filter drivers (clean, smudge, process) emptied and marked not
+/// required, the external diff and fsmonitor emptied, no pager, no optional locks,
+/// literal pathspecs. Built-in conversions (`core.autocrlf`, `text`/`eol`) are not
+/// drivers and keep working. Other commands keep the posture of `git_out`.
+pub struct DiffGit {
+    overrides: Vec<(String, String)>,
+}
+
+impl DiffGit {
+    /// Reads the configured filter drivers (reading config runs nothing).
+    pub fn new(root: &Path) -> Result<DiffGit, String> {
+        let listed = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "--no-optional-locks",
+                "config",
+                "--name-only",
+                "--get-regexp",
+                r"^filter\..*\.(clean|smudge|process|required)$",
+            ])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| format!("git unavailable: {e}"))?;
+        // Exit 1 is git's answer for "no key matches": no drivers configured.
+        let text = match listed.status.code() {
+            Some(0) => String::from_utf8_lossy(&listed.stdout).into_owned(),
+            Some(1) => String::new(),
+            _ => {
+                return Err(format!(
+                    "git config failed: {}",
+                    String::from_utf8_lossy(&listed.stderr).trim()
+                ))
+            }
+        };
+        let mut drivers = std::collections::BTreeSet::new();
+        for key in text.lines() {
+            let key = key.strip_prefix("filter.").unwrap_or(key);
+            if let Some((name, _)) = key.rsplit_once('.') {
+                drivers.insert(name.to_string());
+            }
+        }
+        let mut overrides = vec![
+            ("core.fsmonitor".to_string(), String::new()),
+            ("diff.external".to_string(), String::new()),
+        ];
+        for driver in drivers {
+            // An empty clean/smudge/process command means no filter; required=false
+            // keeps a missing helper from failing the call.
+            for key in ["clean", "smudge", "process"] {
+                overrides.push((format!("filter.{driver}.{key}"), String::new()));
+            }
+            overrides.push((format!("filter.{driver}.required"), "false".to_string()));
+        }
+        Ok(DiffGit { overrides })
+    }
+
+    /// Runs a hardened call in the repository at `root`.
+    pub fn run(&self, root: &Path, args: &[String]) -> Result<GitRun, String> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(root)
+            .args(["--no-optional-locks", "--no-pager"]);
+        self.collect(cmd, args, &[], None)
+    }
+
+    /// Runs a hardened call with `cwd` as the working directory and no repository
+    /// argument, with `extra` command-scope overrides on top of the hardened ones:
+    /// `diff --no-index` on files outside any repository.
+    pub fn run_in_with(
+        &self,
+        cwd: &Path,
+        args: &[String],
+        extra: &[(&str, &str)],
+    ) -> Result<GitRun, String> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(["--no-optional-locks", "--no-pager"]);
+        self.collect(cmd, args, extra, None)
+    }
+
+    /// Runs a hardened call in `root` with `input` on its standard input.
+    pub fn run_stdin(&self, root: &Path, args: &[String], input: &[u8]) -> Result<GitRun, String> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(root)
+            .args(["--no-optional-locks", "--no-pager"]);
+        self.collect(cmd, args, &[], Some(input))
+    }
+
+    /// Trimmed stdout of a hardened call in `root`; `None` when git fails.
+    pub fn text(&self, root: &Path, args: &[&str]) -> Option<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let run = self.run(root, &args).ok()?;
+        (run.code == Some(0)).then(|| String::from_utf8_lossy(&run.stdout).trim_end().to_string())
+    }
+
+    /// The value of a repository config key read through the hardened posture: `None`
+    /// when the key is unset (git exits 1), an error when git cannot read the config.
+    pub fn config_value(&self, root: &Path, key: &str) -> Result<Option<String>, String> {
+        let args: Vec<String> = ["config", "--get", key]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let run = self.run(root, &args)?;
+        match run.code {
+            Some(0) => Ok(Some(
+                String::from_utf8_lossy(&run.stdout).trim().to_string(),
+            )),
+            Some(1) => Ok(None),
+            _ => Err(format!("git config failed: {}", run.stderr)),
+        }
+    }
+
+    /// The fingerprint of `root`, read through this hardened posture.
+    pub fn fingerprint(&self, root: &Path) -> GitInfo {
+        fingerprint_using(root, &|dir, args| self.text(dir, args))
+    }
+
+    fn collect(
+        &self,
+        mut cmd: std::process::Command,
+        args: &[String],
+        extra: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> Result<GitRun, String> {
+        use std::io::Write as _;
+        cmd.args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat")
+            // Paths reach git as literal names: a `[`, `*` or `?` in a file name is not a pattern.
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .env_remove("GIT_EXTERNAL_DIFF");
+        let mut overrides = self.overrides.clone();
+        overrides.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        cmd.env("GIT_CONFIG_COUNT", overrides.len().to_string());
+        for (i, (key, value)) in overrides.iter().enumerate() {
+            cmd.env(format!("GIT_CONFIG_KEY_{i}"), key)
+                .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+        }
+        let out = match input {
+            None => cmd.output().map_err(|e| format!("git unavailable: {e}"))?,
+            Some(input) => {
+                cmd.stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let mut child = cmd.spawn().map_err(|e| format!("git unavailable: {e}"))?;
+                // The input goes to git on a helper thread while wait_with_output drains
+                // stdout and stderr. Writing all the input first deadlocks once git's
+                // output fills a pipe while git still waits for more input.
+                let stdin = child.stdin.take();
+                let payload = input.to_vec();
+                let writer = std::thread::spawn(move || -> std::io::Result<()> {
+                    match stdin {
+                        Some(mut stdin) => stdin.write_all(&payload),
+                        None => Ok(()),
+                    }
+                });
+                let out = child
+                    .wait_with_output()
+                    .map_err(|e| format!("git failed: {e}"))?;
+                let written = writer
+                    .join()
+                    .map_err(|_| "git input thread panicked".to_string())?;
+                written.map_err(|e| format!("git input failed: {e}"))?;
+                out
+            }
+        };
+        Ok(GitRun {
+            code: out.status.code(),
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
+}
+
+/// Whether git finds `root` itself as its work-tree top. A `.git` that is not a
+/// repository of its own would otherwise borrow a parent's. The call reads
+/// repository discovery only and runs no repository code.
+pub fn is_worktree_top(root: &Path) -> bool {
+    let found = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--show-toplevel"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+    match found {
+        Ok(out) if out.status.success() => {
+            let top = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+            let top = canonical_str(Path::new(&top));
+            top.is_some() && top == canonical_str(root)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +551,46 @@ mod tests {
             git_json(&g),
             "{\"present\":false,\"valid\":false,\"head\":null,\"branch\":null,\"dirty\":false,\"untracked\":0,\"toplevel\":null,\"worktree\":false}"
         );
+    }
+
+    #[test]
+    fn stdin_larger_than_a_pipe_is_drained_while_it_is_written() {
+        let Some(dir) = crate::testutil::git_repo("git-stdin", "main") else {
+            return;
+        };
+        let diff = super::DiffGit::new(&dir).expect("driver listing");
+        // About 1 MB of path input; check-attr answers one record per path, so the output
+        // is larger than a pipe buffer and a write-first helper would block forever.
+        let mut input = Vec::new();
+        for i in 0..25000 {
+            input.extend_from_slice(
+                format!("dir{:03}/a-fairly-long-file-name-{i:06}.txt", i % 50).as_bytes(),
+            );
+            input.push(0);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let args: Vec<String> = ["check-attr", "-z", "--stdin", "filter"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let result = diff
+                .run_stdin(&dir, &args, &input)
+                .map(|run| (run.code, run.stdout.len()));
+            tx.send(result).ok();
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(result) => {
+                let (code, len) = result.expect("check-attr run");
+                assert_eq!(code, Some(0));
+                assert!(
+                    len > 1_000_000,
+                    "the output must exceed a pipe buffer: {len}"
+                );
+            }
+            Err(_) => {
+                panic!("no result within 60 s: the stdin write and the stdout read deadlocked")
+            }
+        }
     }
 }

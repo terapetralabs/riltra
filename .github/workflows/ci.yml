@@ -215,7 +215,7 @@ jobs:
       - name: Test deterministic MCP tool schemas with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra tool_schemas_keep_core_key_order
       - name: Test advertised MCP schema order with optional feature graph
-        run: cargo test --locked --no-default-features --features semantic-knowledge --test mcp mcp_tools_list_advertises_the_fourteen_tools
+        run: cargo test --locked --no-default-features --features semantic-knowledge --test mcp mcp_tools_list_advertises_the_fifteen_tools
       - name: Verify and test both dependency audits offline
         shell: bash
         env:

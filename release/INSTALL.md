@@ -106,7 +106,7 @@ without touching your own registry.
 
 ## Using it from an MCP client such as OpenCode
 
-`riltra mcp` serves fourteen tools over stdio (thirteen read-only ones and the
+`riltra mcp` serves fifteen tools over stdio (fourteen read-only ones and the
 provider-backed `riltra_code_semantic`, which stays off until an operator sets
 `RILTRA_LSP_SERVER` to a language server's absolute path). An OpenCode
 configuration entry looks like:

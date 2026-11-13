@@ -50,6 +50,114 @@ automatically. Knowledge records are revisioned, and explicit bindings point
 to one record revision. A binding records a relationship, not whether the
 record itself is true.
 
+## Changed definitions
+
+`riltra changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]`
+and the MCP tool `riltra_code_changes` list the definitions a git change
+touches. The scopes compare these sides: `unstaged` (index to worktree),
+`staged` (HEAD to index), `all` (HEAD to worktree, the default), and `compare`
+(`--base` to worktree; `--base` is required for `compare` and refused for every
+other scope). Untracked files count as added in every scope except `staged`.
+The default `--limit` is 50 files and the maximum is 1000; `total_files` counts
+all changed files before the limit.
+
+Refusals. Exit 2 for usage errors and for an unknown `--base` ref. Exit 3 when
+the registered root is not the top level of a git work tree: the root must hold
+its own `.git`, so a subdirectory of a repository, or an empty `.git` directory
+inside a parent repository, is refused and never answered from the parent. Also
+exit 3 when the repository has no HEAD commit, when git is missing or older than
+2.31, or when the registered root moved or was retargeted (MCP answers with the
+same refusal as the other repository tools).
+
+
+Content. The parsed content is the raw blob or worktree bytes. No clean filter
+runs, so the bytes are not converted back to what a filter would store. The
+tracked-path hunks come from `git diff`, which keeps git's own text and eol
+conversions. The duplicate-path identity and hunks come from a child process
+that uses the repository's effective `core.autocrlf` and ignores `.gitattributes`
+text and eol rules.
+
+
+Statuses. The first matching check wins: `unsupported` with reason
+`non-utf8-path` (the name is not UTF-8; it is shown lossily and never given to
+git), `submodule` (mode 160000 on either side; no content is read), `symlink` (mode 120000 on either side; the target text is never parsed), `filter-managed` (see below), `unmerged`
+(a merge conflict with no single version; `change` is `modified`),
+`too-large` (over 1 MiB; riltra checks the size before it reads the blob, but git diff still reads tracked blobs for hunks), `unreadable` (not a regular
+file, including a nested repository); then `binary` (a NUL byte in the first
+8000 bytes); then `unsupported` with `language-unsupported` (only Python, Rust,
+TypeScript and TSX are parsed in this release); then `parse-error`
+(`syntax-error`); otherwise the change kind. A type change is reported as
+`modified`. Submodule, symlink, unmerged and non-UTF-8 files have no hunks, and an empty
+untracked file has no hunks. A conflicted path is one entry per path in every scope.
+
+Symbols are `established` only for ordinary files. Other statuses carry no
+definitions, and every hunk of the file is listed in `hunks_outside_definitions`
+(binary files list none). `hunks_outside_definitions` is not capped: a file with
+many changes lists all of its hunks, so the output grows with the change.
+
+A hunk touches a definition when its new-side lines meet the definition's new
+span, when a pure deletion lies strictly inside that span (after its first line
+and before its last), or when its old-side lines meet the old span. A
+definition is `modified` when it is touched on either side, `added` when a hunk
+touches it, and `removed` when it is gone from the worktree (removed definitions
+are always listed). Nested definitions are each listed when touched, and
+duplicate names pair in source order. The header is the first line of a
+definition, so `header_touched` only says that a hunk covers that line.
+
+A renamed file is looked up in the index under its old path, because the index
+holds the old path until it is re-indexed. In the unstaged scope a staged rename shows as
+the new path modified (index to worktree), so its callers are looked up under the
+new path, which the index holds only after it is re-indexed (`not-in-index` until then); the all and compare scopes show it as `renamed` and look it up under the old path.
+
+`inbound_edges` is the syntax-level inbound count the index holds for the
+definition's name, kind and file (the selection `callers` makes), read from the
+index without consulting the live source. It is the count as of the index: when
+`index_freshness` is `stale`, the count is stale too. It is `null` with
+`not-in-index`, `ambiguous-in-index`, `added`, `no-index` (no index), or
+`index-unavailable` (the index is outdated, ahead, corrupt, or has no snapshot or
+graph proof; the reason is in `index_freshness`). The structure is still
+answered in every case.
+
+Hardening. Every git call that reads repository content or state in `changes`,
+including the index freshness check, runs with the same overrides: repository
+filter drivers (clean, smudge, process) are emptied and marked not required, the
+external diff and fsmonitor hook are emptied, the pager and optional locks are
+off, and paths are literal. No repository filter, external diff or fsmonitor hook
+runs during `changes`. Three calls are not hardened, and they run no repository
+code: `git --version` (the version gate), the listing of filter driver names
+(`git config --name-only --get-regexp`), and the work-tree check (`git rev-parse
+--show-toplevel`, repository discovery only). The read of `core.autocrlf` (`git
+config --get`) goes through the hardened runner. A filter-managed repository can
+read as dirty or stale more often than `git status` would report it; that is the
+conservative side. Other commands keep the posture they had before.
+
+Filter-managed files. A path whose `filter` attribute has a value other than
+`unspecified` or `unset` is `unsupported` with reason `filter-managed`. That
+includes a name that no configured driver answers to: git would filter nothing in
+that case, so this listing is conservative there. The path's worktree bytes are not
+the bytes a driver would store, so nothing is parsed and no hunks or definitions
+are listed. The attribute is read with `git check-attr`, which runs nothing. A clean
+filter that is not idempotent can make git's own status disagree with this listing,
+while index freshness reads stale.
+
+The duplicate-path case (a path staged as deleted and re-created untracked, in the
+all and compare scopes) is reconciled before the count and the limit. The two sides
+are compared first with `git diff --no-index` on two temporary files written in a
+fresh directory under the system temporary directory. Exit 0 with no output means
+identical, which gives no entry. The worktree side is read only through the same
+confined reader as every other worktree read: a link or junction that leads out of
+the repository is refused, so the entry is listed as unreadable whatever the outside
+file holds. Files over 64 MiB are not proven identical: their entry is listed
+(too-large) rather than omitted. Otherwise the hunks come from the same child. The
+temporary directory is removed when the command ends; the removal is best effort, so
+a stray directory can be left behind if removal fails. The temporary files and the
+index's SQLite sidecar files are the only writes this feature makes. A read-only
+open can leave the `-shm` and `-wal` sidecars beside the index; the existing MCP
+read tools do the same, so this is not new to `changes`. The repository is never
+written.
+
+The output is the structure of a change, not an impact verdict.
+
 ## Optional semantic knowledge search
 
 The default-off `semantic-knowledge` build feature adds local vector search
@@ -62,7 +170,7 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves fourteen local stdio tools. Thirteen read repository,
+`riltra mcp` serves fifteen local stdio tools. Fourteen read repository,
 index, code, and knowledge data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the

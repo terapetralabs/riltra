@@ -23,6 +23,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
+use crate::changes;
 #[cfg(feature = "semantic-knowledge")]
 use crate::json;
 use crate::knowledge_store_absent;
@@ -377,6 +378,23 @@ impl RiltraMcp {
         Parameters(input): Parameters<EdgeInput>,
     ) -> CallToolResult {
         blocking(move || edge_doc(&input, GraphMode::Callers)).await
+    }
+
+    #[tool(
+        name = "riltra_code_changes",
+        description = "Definitions a git change touches (same document as CLI `changes`): the live parse of each changed Python, Rust or TypeScript file names the definitions a hunk meets, added, removed or modified, with the hunks outside every definition. Symbols never depend on the index; caller counts (`inbound_edges`) come from it and say why they are null when they cannot be given. It is a map of structure, not an impact verdict. When to call: after editing, to see which functions or classes a change actually touches before reviewing or testing them.",
+        annotations(
+            title = "Changed definitions",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_changes(
+        &self,
+        Parameters(input): Parameters<ChangesInput>,
+    ) -> CallToolResult {
+        blocking(move || changes_doc(&input)).await
     }
 
     #[tool(
@@ -756,6 +774,41 @@ fn index_status_doc(
             let _ = tx.commit();
             Ok(response::index_status_json(repo, recorded, &freshness, fts))
         }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct ChangesInput {
+    /// Registered repository name.
+    repo: String,
+    /// `unstaged` (index to worktree), `staged` (HEAD to index), `all` (HEAD to worktree) or `compare` (`base` to worktree). Default `all`.
+    scope: Option<String>,
+    /// Git ref to compare with. Required for scope `compare`, refused otherwise.
+    base: Option<String>,
+    /// Maximum files listed (default 50, range 1 to 1000).
+    limit: Option<usize>,
+}
+
+fn changes_doc(input: &ChangesInput) -> CallToolResult {
+    let req = match changes::request(
+        input.scope.as_deref().unwrap_or("all"),
+        input.base.as_deref(),
+        input.limit.unwrap_or(changes::DEFAULT_LIMIT),
+    ) {
+        Ok(req) => req,
+        Err(e) => return tool_error("invalid_input", &e),
+    };
+    // The same record check as the other repository tools: a moved or retargeted root is refused.
+    let (home, canon) = match repo_root(&input.repo) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match changes::document(&home, &input.repo, &canon, &req) {
+        Ok(text) => doc(&text),
+        Err(failure) if failure.code == 2 => tool_error("invalid_input", &failure.message),
+        Err(failure) => tool_error("store_error", &failure.message),
     }
 }
 
@@ -1961,6 +2014,7 @@ fn health_doc() -> CallToolResult {
             "tools": [
                 "riltra_code_callees",
                 "riltra_code_callers",
+                "riltra_code_changes",
                 "riltra_code_impact",
                 "riltra_code_search",
                 "riltra_code_semantic",

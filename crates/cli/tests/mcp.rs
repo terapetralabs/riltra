@@ -187,7 +187,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_fourteen_tools() {
+fn mcp_tools_list_advertises_the_fifteen_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -204,6 +204,7 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
         [
             "riltra_code_callees",
             "riltra_code_callers",
+            "riltra_code_changes",
             "riltra_code_impact",
             "riltra_code_search",
             "riltra_code_semantic",
@@ -217,7 +218,7 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the fourteen tools"
+        "the server advertises exactly the fifteen tools"
     );
     let code_search_tool = tools
         .iter()
@@ -316,6 +317,7 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
     for name in [
         "riltra_code_callees",
         "riltra_code_callers",
+        "riltra_code_changes",
         "riltra_code_impact",
         "riltra_code_search",
         "riltra_code_semantic",
@@ -819,6 +821,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
         [
             "riltra_code_callees",
             "riltra_code_callers",
+            "riltra_code_changes",
             "riltra_code_impact",
             "riltra_code_search",
             "riltra_code_semantic",
@@ -832,7 +835,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the fourteen tools"
+        "the health document must list the fifteen tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -6234,4 +6237,253 @@ fn candidate_labels_mcp_matches_cli_on_all_five_tools() {
 
     let (code, _) = s.finish();
     assert_eq!(code, 0);
+}
+
+#[test]
+fn mcp_code_changes_answers_the_same_document_as_the_cli() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = home("changes");
+    let dir = h.join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main", "."]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("m.py"), "def alpha():\n    return 1\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    std::fs::write(dir.join("m.py"), "def alpha():\n    return 2\n").unwrap();
+    init_repo(&h, &dir, "r");
+
+    let (code, out, err) = run_cli(&h, &["changes", "--repo", "r"]);
+    assert_eq!(code, 0, "{err}");
+    let cli: Value = serde_json::from_str(out.trim()).expect("cli emits one JSON document");
+
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_code_changes", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(
+        doc(&result),
+        cli,
+        "MCP and CLI must answer the same parsed document"
+    );
+
+    let bad = call_tool(
+        &mut s,
+        3,
+        "riltra_code_changes",
+        &json!({"repo": "r", "scope": "compare"}),
+    );
+    assert!(is_error(&bad), "{bad}");
+    assert_eq!(bad["structuredContent"]["kind"], "invalid_input", "{bad}");
+    let (code, _, _) = run_cli(&h, &["changes", "--repo", "r", "--scope", "compare"]);
+    assert_eq!(
+        code, 2,
+        "the CLI refuses the same arguments with a usage error"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mcp_code_changes_freshness_runs_no_repository_hook() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = home("freshness");
+    let dir = h.join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main", "."]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("m.py"), "def alpha():\n    return 1\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    indexed_repo(&h, &dir, "r");
+    // Hooks are configured only after the index exists; the worktree then changes.
+    let marker = |name: &str| h.join(format!("{name}-marker"));
+    let sh = |script: &str, name: &str| format!("sh -c '{script}' \"{}\"", marker(name).display());
+    std::fs::write(dir.join(".gitattributes"), "*.py filter=x\n*.py diff=x\n").unwrap();
+    git(&[
+        "config",
+        "filter.x.clean",
+        &sh("touch \"$0\"; cat", "clean"),
+    ]);
+    git(&[
+        "config",
+        "diff.x.textconv",
+        &sh("touch \"$0\"; cat \"$1\"", "textconv"),
+    ]);
+    git(&["config", "diff.external", &sh("touch \"$0\"", "external")]);
+    git(&["config", "core.fsmonitor", &sh("touch \"$0\"", "fsmonitor")]);
+    std::fs::write(dir.join("m.py"), "def alpha():\n    return 2\n").unwrap();
+    for name in ["clean", "textconv", "external", "fsmonitor"] {
+        let _ = std::fs::remove_file(marker(name));
+    }
+
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_code_changes", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    let document = doc(&result);
+    assert_eq!(document["index_freshness"]["status"], "stale", "{document}");
+    for name in ["clean", "textconv", "external", "fsmonitor"] {
+        assert!(
+            !marker(name).exists(),
+            "the {name} marker was created: a repository hook ran"
+        );
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mcp_code_changes_refuses_an_empty_git_directory_in_a_parent_repository() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = home("emptygit");
+    let dir = h.join("parent");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main", "."]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("m.py"), "def alpha():\n    return 1\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(sub.join(".git")).unwrap();
+    std::fs::write(sub.join("m.py"), "def alpha():\n    return 2\n").unwrap();
+    init_repo(&h, &sub, "r");
+
+    let (code, _, err) = run_cli(&h, &["changes", "--repo", "r"]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains("not the top level of a git work tree"),
+        "{err}"
+    );
+
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_code_changes", &json!({"repo": "r"}));
+    assert!(is_error(&result), "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("not the top level of a git work tree"),
+        "{result}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+/// A directory link (junction on Windows, symlink on Unix). `false` when the link cannot be made.
+#[cfg(windows)]
+fn link_dir(link: &std::path::Path, target: &std::path::Path) -> bool {
+    std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn link_dir(link: &std::path::Path, target: &std::path::Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+/// A registry record that names a directory link to the real repository is a moved or
+/// retargeted root: the same refusal from every tool that reads the record.
+#[test]
+fn mcp_code_changes_refuses_a_registry_record_retargeted_to_a_link() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = home("retargeted");
+    let dir = h.join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main", "."]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("m.py"), "def alpha():\n    return 1\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    init_repo(&h, &dir, "r");
+    let link = h.join("linked-root");
+    if !link_dir(&link, &dir) {
+        eprintln!("skipped: this platform cannot create a directory link here");
+        return;
+    }
+    let registry = h.join("registry.json");
+    let text = std::fs::read_to_string(&registry).unwrap();
+    let mut value: Value = serde_json::from_str(&text).unwrap();
+    value["repos"][0]["root"] = json!(link.display().to_string());
+    std::fs::write(&registry, value.to_string()).unwrap();
+
+    let mut s = ready(&h);
+    let status = call_tool(&mut s, 2, "riltra_repo_status", &json!({"repo": "r"}));
+    let changes = call_tool(&mut s, 3, "riltra_code_changes", &json!({"repo": "r"}));
+    assert!(is_error(&changes), "{changes}");
+    let text = changes["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("moved or retargeted"), "{changes}");
+    assert_eq!(
+        changes["content"][0]["text"], status["content"][0]["text"],
+        "the same refusal as riltra_repo_status"
+    );
+    let (code, _, err) = run_cli(&h, &["changes", "--repo", "r"]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("moved or retargeted"), "{err}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+/// Whether git is installed; without it the test skips, with a printed message.
+fn git_or_skip() -> bool {
+    let present = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !present {
+        eprintln!("skipped: git is not installed");
+    }
+    present
 }

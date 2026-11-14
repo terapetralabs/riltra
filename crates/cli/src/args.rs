@@ -3,6 +3,14 @@
 //! std-only); both `--flag value` and `--flag=value` forms are accepted.
 
 #[derive(Debug, PartialEq)]
+pub struct ChangesArgs {
+    pub repo: String,
+    pub scope: String,
+    pub base: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Command {
     Help,
     Version,
@@ -49,6 +57,8 @@ pub enum Command {
     Trace(TraceArgs),
     Impact(TraceArgs),
     Context(ContextArgs),
+    Changes(ChangesArgs),
+    ChangesRefused(String),
     Knowledge {
         op: KnowledgeOp,
     },
@@ -510,11 +520,51 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Ok(Command::Impact(parsed))
         }
         "context" => parse_context_args(args).map(Command::Context),
+        "changes" => parse_changes_args(args),
         "knowledge" => match args.get(1).map(String::as_str) {
             Some(sub) => parse_knowledge_op(sub, args).map(|op| Command::Knowledge { op }),
             None => Err(crate::usage()),
         },
         _ => Err(crate::usage()),
+    }
+}
+
+/// `changes` flags. Every refusal here is a usage error (exit 2), including a
+/// scope/base mismatch and a ref that starts with `-`.
+fn parse_changes_args(args: &[String]) -> Result<Command, String> {
+    let mut values = std::collections::BTreeMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let mut matched = false;
+        for flag in ["--repo", "--scope", "--base", "--limit"] {
+            if let Some(value) = take_value(args, &mut i, flag) {
+                values.insert(flag, value);
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Err(crate::usage());
+        }
+    }
+    let repo = values.remove("--repo").ok_or_else(crate::usage)?;
+    let scope = values
+        .remove("--scope")
+        .unwrap_or_else(|| "all".to_string());
+    let base = values.remove("--base");
+    let limit = match values.remove("--limit") {
+        Some(text) => text.parse::<usize>().map_err(|_| crate::usage())?,
+        None => crate::changes::DEFAULT_LIMIT,
+    };
+    // A request the changes module refuses names its own cause (exit 2 in dispatch).
+    match crate::changes::request(&scope, base.as_deref(), limit) {
+        Ok(_) => Ok(Command::Changes(ChangesArgs {
+            repo,
+            scope,
+            base,
+            limit,
+        })),
+        Err(message) => Ok(Command::ChangesRefused(message)),
     }
 }
 

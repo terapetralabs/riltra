@@ -1729,6 +1729,48 @@ fn called_name(definition: &str) -> &str {
     definition.rsplit("::").next().unwrap_or(definition)
 }
 
+/// Syntax-level inbound total of one indexed definition, read from the index
+/// alone: the selection `callers` makes for the same definition, but the anchor
+/// is the stored byte range, so the live source is never consulted. This is the
+/// count as of the index (stale when the index is stale).
+pub(crate) fn indexed_inbound_total(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    path: &str,
+    name: &str,
+    byte_start: usize,
+    byte_end: usize,
+) -> Result<usize, String> {
+    let anchor = EdgeAnchor {
+        kind: AnchorKind::SyntaxFallback,
+        path: path.to_string(),
+        line1: 1,
+        col1: 1,
+        symbol_uri: None,
+        import_id: None,
+        doc: None,
+        display: Some(name.to_string()),
+        candidate_display: Some(name.to_string()),
+        span_bytes: Some((byte_start, byte_end)),
+        precision: "Heuristic".to_string(),
+        uncertainty: None,
+        // shortcut: data_member is false for PR 4 languages (no C++ fields here), revisit for C++ fields in PR 5
+        data_member: false,
+    };
+    let endpoint = anchor_endpoint(&anchor).ok_or("anchor has no endpoint")?;
+    let candidates = caller_candidate_paths(tx, snapshot_id, &anchor)?;
+    let selection = store::EdgeSelection {
+        snapshot_id,
+        endpoint: &endpoint,
+        inbound: true,
+        candidate_name: anchor.candidate_display.as_deref().map(called_name),
+        candidate_paths: &candidates.paths,
+        candidate_aliases: &candidates.aliases,
+        syntax_aliases: &[],
+    };
+    Ok(store::selected_edge_counts(tx, &selection)?.total)
+}
+
 struct CallerCandidates {
     paths: Vec<String>,
     aliases: Vec<(String, String)>,
@@ -3400,12 +3442,24 @@ pub fn evaluate_snapshot(
     canon_root: &Path,
     snapshot: &store::Snapshot,
 ) -> (String, Vec<String>) {
+    evaluate_snapshot_with(conn, name, canon_root, snapshot, &git::fingerprint)
+}
+
+/// `evaluate_snapshot` with the fingerprint source passed in. `changes` passes its
+/// hardened fingerprint, so its freshness check runs no plain `git status`.
+pub fn evaluate_snapshot_with(
+    conn: &rusqlite::Connection,
+    name: &str,
+    canon_root: &Path,
+    snapshot: &store::Snapshot,
+    fingerprint: &dyn Fn(&Path) -> git::GitInfo,
+) -> (String, Vec<String>) {
     let _ = name;
     let mut reasons = Vec::new();
     if canon_root.to_string_lossy() != snapshot.root {
         reasons.push("root-moved".to_string());
     }
-    let live = git::fingerprint(canon_root);
+    let live = fingerprint(canon_root);
     if live.dirty || snapshot.dirty {
         reasons.push("dirty".to_string());
     }

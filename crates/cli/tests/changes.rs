@@ -1772,3 +1772,847 @@ fn a_differing_duplicate_above_the_scan_cap_has_no_hunks() {
     assert_eq!(f["hunks"], 0, "{doc}");
     assert_eq!(f["hunks_outside_definitions"], json!([]), "{doc}");
 }
+
+// ---------------------------------------------------------------------------
+// PR 5: JavaScript, C, C++, Go and Java. Every expected row is written by hand
+// from the fixture source and the grammar's node ranges, never copied from tool
+// output. A row reads `name kind change h=<header_touched> old>new`, spans as
+// `start-end`, `-` for none. Rows are listed in the tool's order (start line of
+// the side that exists, then name).
+
+struct Shapes {
+    tag: &'static str,
+    ext: &'static str,
+    /// Every shape of the language in one file.
+    all: &'static str,
+    /// Rows when the whole file is new / deleted.
+    added: &'static [&'static str],
+    removed: &'static [&'static str],
+    /// Replace `.0` (one line, once) by `.1`: rows for a body edit.
+    body: (&'static str, &'static str, &'static [&'static str]),
+    /// The same on the first line of a definition.
+    head: (&'static str, &'static str, &'static [&'static str]),
+    /// Text appended to `all`: rows for the added definition.
+    tail: (&'static str, &'static [&'static str]),
+    /// Text cut from `all`: rows for the removed definitions.
+    drop: (&'static str, &'static [&'static str]),
+    /// Replace `.0` by `.1` to break the syntax.
+    broken: (&'static str, &'static str),
+}
+
+const JS: Shapes = Shapes {
+    tag: "javascript",
+    ext: "js",
+    all: "function alpha() {\n  return 1;\n}\n\nclass Box {\n  read() {\n    return 2;\n  }\n  onTick = () => {\n    return 3;\n  };\n}\n\nconst arrow = () => {\n  return 4;\n};\n\nconst expr = function () {\n  return 5;\n};\n",
+    added: &[
+        "alpha function added h=true ->1-3",
+        "Box class added h=true ->5-12",
+        "read method added h=true ->6-8",
+        "onTick method added h=true ->9-11",
+        "arrow function added h=true ->14-16",
+        "expr function added h=true ->18-20",
+    ],
+    removed: &[
+        "alpha function removed h=true 1-3>-",
+        "Box class removed h=true 5-12>-",
+        "read method removed h=true 6-8>-",
+        "onTick method removed h=true 9-11>-",
+        "arrow function removed h=true 14-16>-",
+        "expr function removed h=true 18-20>-",
+    ],
+    body: (
+        "return 2;",
+        "return 20;",
+        &[
+            "Box class modified h=false 5-12>5-12",
+            "read method modified h=false 6-8>6-8",
+        ],
+    ),
+    head: (
+        "function alpha() {",
+        "function alpha(a) {",
+        &["alpha function modified h=true 1-3>1-3"],
+    ),
+    tail: (
+        "\nfunction gamma() {\n  return 6;\n}\n",
+        &["gamma function added h=true ->22-24"],
+    ),
+    drop: (
+        "\nconst expr = function () {\n  return 5;\n};\n",
+        &["expr function removed h=true 18-20>-"],
+    ),
+    broken: ("function alpha() {", "function alpha( {"),
+};
+
+const GO: Shapes = Shapes {
+    tag: "go",
+    ext: "go",
+    all: "package m\n\ntype Widget struct {\n\tn int\n}\n\ntype Runner interface {\n\tRun() int\n}\n\nfunc alpha() int {\n\treturn 1\n}\n\nfunc (w *Widget) Run() int {\n\treturn w.n\n}\n",
+    added: &[
+        "Widget struct added h=true ->3-5",
+        "Runner interface added h=true ->7-9",
+        "alpha function added h=true ->11-13",
+        "Run method added h=true ->15-17",
+    ],
+    removed: &[
+        "Widget struct removed h=true 3-5>-",
+        "Runner interface removed h=true 7-9>-",
+        "alpha function removed h=true 11-13>-",
+        "Run method removed h=true 15-17>-",
+    ],
+    body: (
+        "return 1",
+        "return 10",
+        &["alpha function modified h=false 11-13>11-13"],
+    ),
+    head: (
+        "func alpha() int {",
+        "func alpha() int64 {",
+        &["alpha function modified h=true 11-13>11-13"],
+    ),
+    tail: (
+        "\nfunc gamma() int {\n\treturn 3\n}\n",
+        &["gamma function added h=true ->19-21"],
+    ),
+    drop: (
+        "\nfunc (w *Widget) Run() int {\n\treturn w.n\n}\n",
+        &["Run method removed h=true 15-17>-"],
+    ),
+    broken: ("func alpha() int {", "func alpha( int {"),
+};
+
+const JAVA: Shapes = Shapes {
+    tag: "java",
+    ext: "java",
+    all: "interface Shape {\n    int area();\n}\n\nenum Color {\n    RED, GREEN\n}\n\nrecord Point(int x, int y) {\n    Point {\n        if (x < 0) {\n            throw new IllegalArgumentException();\n        }\n    }\n}\n\nclass Box {\n    Box() {\n    }\n\n    @Override\n    public String toString() {\n        return \"box\";\n    }\n}\n",
+    added: &[
+        "Shape interface added h=true ->1-3",
+        "area method added h=true ->2-2",
+        "Color type added h=true ->5-7",
+        "Point class added h=true ->9-15",
+        "Point method added h=true ->10-14",
+        "Box class added h=true ->17-25",
+        "Box method added h=true ->18-19",
+        "toString method added h=true ->21-24",
+    ],
+    removed: &[
+        "Shape interface removed h=true 1-3>-",
+        "area method removed h=true 2-2>-",
+        "Color type removed h=true 5-7>-",
+        "Point class removed h=true 9-15>-",
+        "Point method removed h=true 10-14>-",
+        "Box class removed h=true 17-25>-",
+        "Box method removed h=true 18-19>-",
+        "toString method removed h=true 21-24>-",
+    ],
+    body: (
+        "return \"box\";",
+        "return \"boxed\";",
+        &[
+            "Box class modified h=false 17-25>17-25",
+            "toString method modified h=false 21-24>21-24",
+        ],
+    ),
+    // The annotation is part of the method declaration, so it is the first line.
+    head: (
+        "@Override",
+        "@Deprecated",
+        &[
+            "Box class modified h=false 17-25>17-25",
+            "toString method modified h=true 21-24>21-24",
+        ],
+    ),
+    tail: (
+        "\nclass Gamma {\n}\n",
+        &["Gamma class added h=true ->27-28"],
+    ),
+    drop: (
+        "\nclass Box {\n    Box() {\n    }\n\n    @Override\n    public String toString() {\n        return \"box\";\n    }\n}\n",
+        &[
+            "Box class removed h=true 17-25>-",
+            "Box method removed h=true 18-19>-",
+            "toString method removed h=true 21-24>-",
+        ],
+    ),
+    broken: ("int area();", "int area(;"),
+};
+
+const C: Shapes = Shapes {
+    tag: "c",
+    ext: "c",
+    all: "struct point {\n    int x;\n};\n\nenum color {\n    RED,\n    GREEN\n};\n\ntypedef unsigned int uint;\n\nint alpha(void) {\n    return 1;\n}\n",
+    added: &[
+        "point struct added h=true ->1-3",
+        "color type added h=true ->5-8",
+        "uint type added h=true ->10-10",
+        "alpha function added h=true ->12-14",
+    ],
+    removed: &[
+        "point struct removed h=true 1-3>-",
+        "color type removed h=true 5-8>-",
+        "uint type removed h=true 10-10>-",
+        "alpha function removed h=true 12-14>-",
+    ],
+    body: (
+        "return 1;",
+        "return 10;",
+        &["alpha function modified h=false 12-14>12-14"],
+    ),
+    head: (
+        "int alpha(void) {",
+        "long alpha(void) {",
+        &["alpha function modified h=true 12-14>12-14"],
+    ),
+    tail: (
+        "\nint gamma(void) {\n    return 3;\n}\n",
+        &["gamma function added h=true ->16-18"],
+    ),
+    drop: (
+        "\nint alpha(void) {\n    return 1;\n}\n",
+        &["alpha function removed h=true 12-14>-"],
+    ),
+    broken: ("int alpha(void) {", "int alpha(void {"),
+};
+
+// The namespace wrapper has no entry of its own; its members do. The field's
+// span is its identifier, a method defined in the class body is a `function`,
+// and the out-of-line definition keeps its qualified name.
+const CPP: Shapes = Shapes {
+    tag: "cpp",
+    ext: "cpp",
+    all: "namespace app {\n\nusing Id = int;\n\nclass Widget {\npublic:\n    int count;\n    int run() { return count; }\n    void reset();\n};\n\nvoid Widget::reset() {\n    count = 0;\n}\n\nint helper(int a) {\n    return a;\n}\n\n}\n",
+    added: &[
+        "Id type added h=true ->3-3",
+        "Widget class added h=true ->5-10",
+        "count field added h=true ->7-7",
+        "run function added h=true ->8-8",
+        "Widget::reset function added h=true ->12-14",
+        "helper function added h=true ->16-18",
+    ],
+    removed: &[
+        "Id type removed h=true 3-3>-",
+        "Widget class removed h=true 5-10>-",
+        "count field removed h=true 7-7>-",
+        "run function removed h=true 8-8>-",
+        "Widget::reset function removed h=true 12-14>-",
+        "helper function removed h=true 16-18>-",
+    ],
+    body: (
+        "count = 0;",
+        "count = 1;",
+        &["Widget::reset function modified h=false 12-14>12-14"],
+    ),
+    head: (
+        "int helper(int a) {",
+        "int helper(int b) {",
+        &["helper function modified h=true 16-18>16-18"],
+    ),
+    tail: (
+        "\nint gamma() {\n    return 3;\n}\n",
+        &["gamma function added h=true ->22-24"],
+    ),
+    drop: (
+        "\nint helper(int a) {\n    return a;\n}\n",
+        &["helper function removed h=true 16-18>-"],
+    ),
+    broken: ("int helper(int a) {", "int helper(int a {"),
+};
+
+fn rows(f: &Value) -> Vec<String> {
+    let lines = |v: &Value| {
+        if v.is_null() {
+            "-".to_string()
+        } else {
+            format!("{}-{}", v["start_line"], v["end_line"])
+        }
+    };
+    f["definitions"]
+        .as_array()
+        .expect("definitions array")
+        .iter()
+        .map(|d| {
+            format!(
+                "{} {} {} h={} {}>{}",
+                d["name"].as_str().unwrap(),
+                d["kind"].as_str().unwrap(),
+                d["change"].as_str().unwrap(),
+                d["header_touched"],
+                lines(&d["old_span"]),
+                lines(&d["new_span"])
+            )
+        })
+        .collect()
+}
+
+fn owned(want: &[&str]) -> Vec<String> {
+    want.iter().map(|s| s.to_string()).collect()
+}
+
+/// `all` with the one occurrence of `from` replaced by `to`.
+fn edit(s: &Shapes, from: &str, to: &str) -> String {
+    assert_eq!(
+        s.all.matches(from).count(),
+        1,
+        "{}: {from:?} must occur once in the fixture",
+        s.tag
+    );
+    s.all.replacen(from, to, 1)
+}
+
+/// Runs `changes` over `dir`, checks the definition rows of `name` and returns its entry.
+fn check(tag: &str, case: &str, dir: &Path, name: &str, scope: &str, want: &[&str]) -> Value {
+    let (code, doc, err) = changes(&setup(dir), &["--scope", scope]);
+    assert_eq!(code, 0, "{tag} {case}: {err}");
+    let f = file(&doc, name).clone();
+    assert_eq!(f["symbols"], "established", "{tag} {case}");
+    assert_eq!(rows(&f), owned(want), "{tag} {case}");
+    f
+}
+
+fn matrix(s: &Shapes) {
+    let tag = s.tag;
+    let name = format!("m.{}", s.ext);
+    let body = edit(s, s.body.0, s.body.1);
+
+    // Added: a new file, then a definition appended to an existing file.
+    let dir = repo(&[("keep.txt", "x\n")]);
+    write(&dir, &name, s.all);
+    let f = check(tag, "new file", &dir, &name, "unstaged", s.added);
+    assert_eq!(f["status"], "added", "{tag} new file");
+    assert!(
+        f["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["callers"].is_null() && d["callers_reason"] == "added"),
+        "{tag}: an added definition has no caller lookup"
+    );
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &format!("{}{}", s.all, s.tail.0));
+    check(
+        tag,
+        "appended definition",
+        &dir,
+        &name,
+        "unstaged",
+        s.tail.1,
+    );
+
+    // Removed: a deleted file, then definitions cut from an existing file.
+    let dir = repo(&[(&name, s.all)]);
+    std::fs::remove_file(dir.join(&name)).unwrap();
+    let f = check(tag, "deleted file", &dir, &name, "unstaged", s.removed);
+    assert_eq!(f["status"], "deleted", "{tag} deleted file");
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &edit(s, s.drop.0, ""));
+    check(tag, "cut definitions", &dir, &name, "unstaged", s.drop.1);
+
+    // Modified: a body edit, and an edit on the first line of a definition.
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &body);
+    let f = check(tag, "body edit", &dir, &name, "unstaged", s.body.2);
+    assert_eq!(f["hunks_outside_definitions"], json!([]), "{tag} body edit");
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &edit(s, s.head.0, s.head.1));
+    check(tag, "first-line edit", &dir, &name, "unstaged", s.head.2);
+
+    // A path below a directory.
+    let nested = format!("src/deep/m.{}", s.ext);
+    let dir = repo(&[(&nested, s.all)]);
+    write(&dir, &nested, &body);
+    check(tag, "nested path", &dir, &nested, "unstaged", s.body.2);
+
+    // Rename with a change: the old path is reported, definitions match across the move.
+    let moved = format!("n.{}", s.ext);
+    let dir = repo(&[(&name, s.all)]);
+    git(&dir, &["mv", &name, &moved]);
+    write(&dir, &moved, &body);
+    let f = check(tag, "rename with change", &dir, &moved, "all", s.body.2);
+    assert_eq!(f["change"], "renamed", "{tag} rename");
+    assert_eq!(f["old_path"], name.as_str(), "{tag} rename");
+
+    // CRLF line endings report the same rows.
+    let crlf = s.all.replace('\n', "\r\n");
+    let dir = repo(&[(&name, crlf.as_str())]);
+    write(&dir, &name, &crlf.replacen(s.body.0, s.body.1, 1));
+    check(tag, "CRLF body edit", &dir, &name, "unstaged", s.body.2);
+
+    // Staged scope reads the staged blob, not the working tree.
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &body);
+    git(&dir, &["add", &name]);
+    write(&dir, &name, &edit(s, s.head.0, s.head.1));
+    check(tag, "staged blob", &dir, &name, "staged", s.body.2);
+
+    // A file that cannot be parsed has a reason and no symbols; the hunk is outside.
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &edit(s, s.broken.0, s.broken.1));
+    let (code, doc, err) = changes(&setup(&dir), &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{tag} parse error: {err}");
+    let f = file(&doc, &name);
+    assert_eq!(f["status"], "parse-error", "{tag}");
+    assert_eq!(f["reason"], "syntax-error", "{tag}");
+    assert_eq!(f["symbols"], "not-established", "{tag}");
+    assert_eq!(f["definitions"], json!([]), "{tag}");
+    assert_eq!(
+        f["hunks_outside_definitions"].as_array().unwrap().len(),
+        1,
+        "{tag}"
+    );
+
+    // An unsupported neighbour stays unsupported and changes nothing for the listed language.
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &body);
+    write(&dir, "n.jsx", "export const A = () => <div />;\n");
+    let (code, doc, err) = changes(&setup(&dir), &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{tag} neighbour: {err}");
+    let n = file(&doc, "n.jsx");
+    assert_eq!(n["status"], "unsupported", "{tag}");
+    assert_eq!(n["reason"], "language-unsupported", "{tag}");
+    assert_eq!(rows(file(&doc, &name)), owned(s.body.2), "{tag} neighbour");
+}
+
+#[test]
+fn javascript_change_operations() {
+    if git_available() {
+        matrix(&JS);
+    }
+}
+
+#[test]
+fn go_change_operations() {
+    if git_available() {
+        matrix(&GO);
+    }
+}
+
+#[test]
+fn java_change_operations() {
+    if git_available() {
+        matrix(&JAVA);
+    }
+}
+
+#[test]
+fn c_change_operations() {
+    if git_available() {
+        matrix(&C);
+    }
+}
+
+#[test]
+fn cpp_change_operations() {
+    if git_available() {
+        matrix(&CPP);
+    }
+}
+
+/// One edit of `all` in `m.<ext>`, unstaged, with the rows and the outside-hunk count it must give.
+fn boundary(s: &Shapes, case: &str, from: &str, to: &str, want: &[&str], outside: usize) {
+    let name = format!("m.{}", s.ext);
+    let dir = repo(&[(&name, s.all)]);
+    write(&dir, &name, &edit(s, from, to));
+    let f = check(s.tag, case, &dir, &name, "unstaged", want);
+    assert_eq!(
+        f["hunks_outside_definitions"].as_array().unwrap().len(),
+        outside,
+        "{} {case}",
+        s.tag
+    );
+}
+
+#[test]
+fn span_boundaries_follow_the_grammar() {
+    if !git_available() {
+        return;
+    }
+    // Java: the signature line sits below the annotation, so it is not the first line.
+    boundary(
+        &JAVA,
+        "signature below an annotation",
+        "public String toString() {",
+        "public String toString(int n) {",
+        &[
+            "Box class modified h=false 17-25>17-25",
+            "toString method modified h=false 21-24>21-24",
+        ],
+        0,
+    );
+    // Java: the line before the annotation is inside the class, outside the method.
+    boundary(
+        &JAVA,
+        "line before an annotation",
+        "    }\n\n    @Override",
+        "    }\n    // note\n    @Override",
+        &["Box class modified h=false 17-25>17-25"],
+        0,
+    );
+    // Go: a doc comment is outside the function span; the added line shifts nothing it covers.
+    boundary(
+        &GO,
+        "doc comment above a function",
+        "func alpha() int {",
+        "// alpha returns one.\nfunc alpha() int {",
+        &[],
+        1,
+    );
+}
+
+#[test]
+fn cpp_template_line_is_outside_the_function_span() {
+    if !git_available() {
+        return;
+    }
+    let base = "template <typename T>\nT twice(T v) {\n    return v;\n}\n";
+    // The template line is not part of the stored function span (2-4).
+    let dir = repo(&[("t.cpp", base)]);
+    write(&dir, "t.cpp", &base.replacen("typename", "class", 1));
+    let f = check("cpp", "template line", &dir, "t.cpp", "unstaged", &[]);
+    assert_eq!(f["hunks_outside_definitions"].as_array().unwrap().len(), 1);
+    // The signature line is the first line of the stored span.
+    let dir = repo(&[("t.cpp", base)]);
+    write(
+        &dir,
+        "t.cpp",
+        &base.replacen("T twice(T v)", "T twice(T w)", 1),
+    );
+    check(
+        "cpp",
+        "template signature",
+        &dir,
+        "t.cpp",
+        "unstaged",
+        &["twice function modified h=true 2-4>2-4"],
+    );
+}
+
+#[test]
+fn cpp_field_span_is_its_identifier() {
+    if !git_available() {
+        return;
+    }
+    // One line: changing the type edits the line of the field's identifier.
+    let one = "class W {\n  int n;\n};\n";
+    let dir = repo(&[("w.h", one)]);
+    write(&dir, "w.h", &one.replace("int n", "long n"));
+    check(
+        "cpp",
+        "one-line field in a header",
+        &dir,
+        "w.h",
+        "unstaged",
+        &[
+            "W class modified h=false 1-3>1-3",
+            "n field modified h=true 2-2>2-2",
+        ],
+    );
+    // Two lines: `int` is outside the identifier span, so the field is not touched; the class is.
+    let two = "class W {\n  int\n  n;\n};\n";
+    let dir = repo(&[("w.hpp", two)]);
+    write(&dir, "w.hpp", &two.replace("int", "long"));
+    let f = check(
+        "cpp",
+        "two-line field in a class",
+        &dir,
+        "w.hpp",
+        "unstaged",
+        &["W class modified h=false 1-4>1-4"],
+    );
+    assert_eq!(f["hunks_outside_definitions"], json!([]));
+    // Two lines at file scope: no stored definition holds the hunk.
+    let scope = "int\nvalue;\n";
+    let dir = repo(&[("v.cpp", scope)]);
+    write(&dir, "v.cpp", &scope.replace("int", "long"));
+    let f = check(
+        "cpp",
+        "two-line declaration at file scope",
+        &dir,
+        "v.cpp",
+        "unstaged",
+        &[],
+    );
+    assert_eq!(f["hunks_outside_definitions"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_java_field_is_not_a_definition() {
+    if !git_available() {
+        return;
+    }
+    // The parser stores no Java field: editing one touches only the enclosing class.
+    let base = "class F {\n    int count;\n\n    int get() {\n        return count;\n    }\n}\n";
+    let dir = repo(&[("F.java", base)]);
+    write(&dir, "F.java", &base.replace("int count;", "long count;"));
+    let f = check(
+        "java",
+        "field edit",
+        &dir,
+        "F.java",
+        "unstaged",
+        &["F class modified h=false 1-7>1-7"],
+    );
+    assert_eq!(f["hunks_outside_definitions"], json!([]));
+}
+
+#[test]
+fn a_header_that_does_not_parse_as_cpp_is_a_parse_error() {
+    if !git_available() {
+        return;
+    }
+    let dir = repo(&[("api.h", "int f(void);\n")]);
+    write(&dir, "api.h", "int f(void;\n");
+    let (code, doc, err) = changes(&setup(&dir), &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{err}");
+    let f = file(&doc, "api.h");
+    assert_eq!(f["status"], "parse-error");
+    assert_eq!(f["reason"], "syntax-error");
+    assert_eq!(f["language"], "cpp");
+    assert_eq!(f["definitions"], json!([]));
+}
+
+/// One file with `target` and a caller of it in the same file: the index links a caller to the
+/// definition through the definition's own file (and, for C and C++, through includes).
+struct Linked {
+    tag: &'static str,
+    lib_name: &'static str,
+    lib: &'static str,
+    from: &'static str,
+    to: &'static str,
+    fresh: &'static str,
+    fresh_name: &'static str,
+}
+
+fn linked_cases(l: &Linked) {
+    let tag = l.tag;
+    let dir = repo(&[(l.lib_name, l.lib)]);
+    let home = setup(&dir);
+    let (code, _, err) = riltra(&home, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "{tag}: {err}");
+    let total = callers_total(&home, "target", l.lib_name);
+    assert!(
+        total.as_u64().is_some_and(|n| n >= 1),
+        "{tag}: the fixture caller must be indexed, got {total}"
+    );
+
+    // Modified: the index count. Added after indexing: no lookup, so no count.
+    write(
+        &dir,
+        l.lib_name,
+        &format!("{}{}", l.lib.replacen(l.from, l.to, 1), l.fresh),
+    );
+    let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{tag}: {err}");
+    let lib = file(&doc, l.lib_name);
+    let target = def(lib, "target");
+    assert_eq!(target["change"], "modified", "{tag}");
+    assert_eq!(target["callers"], json!({"inbound_edges": total}), "{tag}");
+    let fresh = def(lib, l.fresh_name);
+    assert_eq!(fresh["change"], "added", "{tag}");
+    assert_eq!(fresh["callers"], json!(null), "{tag}");
+    assert_eq!(fresh["callers_reason"], "added", "{tag}");
+
+    // Removed: the same count.
+    write(&dir, l.lib_name, "");
+    let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{tag}: {err}");
+    let target = def(file(&doc, l.lib_name), "target");
+    assert_eq!(target["change"], "removed", "{tag}");
+    assert_eq!(target["callers"], json!({"inbound_edges": total}), "{tag}");
+}
+
+#[test]
+fn indexed_caller_counts_reach_every_new_language() {
+    if !git_available() {
+        return;
+    }
+    linked_cases(&Linked {
+        tag: "javascript",
+        lib_name: "lib.js",
+        lib: "export function target() {\n  return 1;\n}\n\nexport function user() {\n  return target();\n}\n",
+        from: "return 1;",
+        to: "return 2;",
+        fresh: "\nexport function fresh() {\n  return 3;\n}\n",
+        fresh_name: "fresh",
+    });
+    linked_cases(&Linked {
+        tag: "go",
+        lib_name: "lib.go",
+        lib: "package m\n\nfunc target() int {\n\treturn 1\n}\n\nfunc user() int {\n\treturn target()\n}\n",
+        from: "return 1",
+        to: "return 2",
+        fresh: "\nfunc fresh() int {\n\treturn 3\n}\n",
+        fresh_name: "fresh",
+    });
+    linked_cases(&Linked {
+        tag: "java",
+        lib_name: "Lib.java",
+        lib: "class Lib {\n    static int target() {\n        return 1;\n    }\n\n    int user() {\n        return target();\n    }\n}\n",
+        from: "return 1;",
+        to: "return 2;",
+        fresh: "\nclass Fresh {\n}\n",
+        fresh_name: "Fresh",
+    });
+    linked_cases(&Linked {
+        tag: "c",
+        lib_name: "lib.c",
+        lib: "int target(void) {\n    return 1;\n}\n\nint user(void) {\n    return target();\n}\n",
+        from: "return 1;",
+        to: "return 2;",
+        fresh: "\nint fresh(void) {\n    return 3;\n}\n",
+        fresh_name: "fresh",
+    });
+    linked_cases(&Linked {
+        tag: "cpp",
+        lib_name: "lib.cpp",
+        lib: "int target() {\n    return 1;\n}\n\nint user() {\n    return target();\n}\n",
+        from: "return 1;",
+        to: "return 2;",
+        fresh: "\nint fresh() {\n    return 3;\n}\n",
+        fresh_name: "fresh",
+    });
+}
+
+#[test]
+fn overloads_in_one_file_stay_ambiguous_in_the_index() {
+    if !git_available() {
+        return;
+    }
+    for (name, base, from, to) in [
+        (
+            "d.cpp",
+            "int dup(int a) {\n    return a;\n}\n\nint dup(long a) {\n    return 1;\n}\n",
+            "return a;",
+            "return a + 1;",
+        ),
+        (
+            "D.java",
+            "class D {\n    int dup(int a) {\n        return a;\n    }\n\n    int dup(long a) {\n        return 1;\n    }\n}\n",
+            "return a;",
+            "return a + 1;",
+        ),
+    ] {
+        let dir = repo(&[(name, base)]);
+        let home = setup(&dir);
+        let (code, _, err) = riltra(&home, &["index", "--repo", "r"]);
+        assert_eq!(code, 0, "{name}: {err}");
+        write(&dir, name, &base.replacen(from, to, 1));
+        let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+        assert_eq!(code, 0, "{name}: {err}");
+        let first = def(file(&doc, name), "dup");
+        assert_eq!(first["callers"], json!(null), "{name}");
+        assert_eq!(first["callers_reason"], "ambiguous-in-index", "{name}");
+    }
+}
+
+/// A caller of the free function, in the same file as the class and the function.
+const FIELD_USER: &str = "\nint user() {\n    return target();\n}\n";
+
+/// A C++ class whose field shares its name with a free function that has a caller.
+fn field_repo() -> PathBuf {
+    repo(&[(
+        "lib.cpp",
+        &format!(
+            "class Widget {{\npublic:\n    int target;\n}};\n\nint target() {{\n    return 1;\n}}\n{FIELD_USER}"
+        ),
+    )])
+}
+
+#[test]
+fn a_cpp_field_never_gets_a_call_count_even_beside_a_function_of_its_name() {
+    if !git_available() {
+        return;
+    }
+    let dir = field_repo();
+    let home = setup(&dir);
+    let (code, _, err) = riltra(&home, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "{err}");
+    let lib = "lib.cpp";
+
+    // Modified field and modified function of one name: the function keeps its count.
+    let edited = format!(
+        "class Widget {{\npublic:\n    long target;\n}};\n\nint target() {{\n    return 2;\n}}\n{FIELD_USER}"
+    );
+    write(&dir, lib, &edited);
+    let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{err}");
+    let f = file(&doc, lib);
+    assert_eq!(
+        rows(f),
+        owned(&[
+            "Widget class modified h=false 1-4>1-4",
+            "target field modified h=true 3-3>3-3",
+            "target function modified h=false 6-8>6-8",
+        ])
+    );
+    let field = &f["definitions"][1];
+    assert_eq!(field["callers"], json!(null));
+    assert_eq!(field["callers_reason"], "data-member");
+    let function = &f["definitions"][2];
+    // One caller (`user`) in the fixture.
+    assert_eq!(
+        function["callers"],
+        json!({"inbound_edges": 1}),
+        "the function keeps the index count: {function}"
+    );
+
+    // Removed field: the same reason.
+    write(
+        &dir,
+        lib,
+        &format!(
+            "class Widget {{\npublic:\n}};\n\nint target() {{\n    return 1;\n}}\n{FIELD_USER}"
+        ),
+    );
+    let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{err}");
+    let field = def(file(&doc, lib), "target");
+    assert_eq!(field["kind"], "field");
+    assert_eq!(field["change"], "removed");
+    assert_eq!(field["callers"], json!(null));
+    assert_eq!(field["callers_reason"], "data-member");
+
+    // Added field: no lookup is made, so the existing reason stands.
+    write(
+        &dir,
+        lib,
+        &format!(
+            "class Widget {{\npublic:\n    int target;\n    int extra;\n}};\n\nint target() {{\n    return 1;\n}}\n{FIELD_USER}"
+        ),
+    );
+    let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{err}");
+    let extra = def(file(&doc, lib), "extra");
+    assert_eq!(extra["kind"], "field");
+    assert_eq!(extra["change"], "added");
+    assert_eq!(extra["callers"], json!(null));
+    assert_eq!(extra["callers_reason"], "added");
+}
+
+#[test]
+fn a_cpp_field_without_a_usable_index_keeps_the_existing_reason() {
+    if !git_available() {
+        return;
+    }
+    let edited = format!(
+        "class Widget {{\npublic:\n    long target;\n}};\n\nint target() {{\n    return 2;\n}}\n{FIELD_USER}"
+    );
+    // No index: not `data-member`.
+    let dir = field_repo();
+    let home = setup(&dir);
+    write(&dir, "lib.cpp", &edited);
+    let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{err}");
+    let field = &file(&doc, "lib.cpp")["definitions"][1];
+    assert_eq!(field["kind"], "field");
+    assert_eq!(field["callers_reason"], "no-index");
+    // Unreadable index: not `data-member` either.
+    let dir = field_repo();
+    let home = setup(&dir);
+    std::fs::create_dir_all(home.join("index")).unwrap();
+    std::fs::write(home.join("index").join("r.db"), b"this is not sqlite").unwrap();
+    write(&dir, "lib.cpp", &edited);
+    let (code, doc, err) = changes(&home, &["--scope", "unstaged"]);
+    assert_eq!(code, 0, "{err}");
+    let field = &file(&doc, "lib.cpp")["definitions"][1];
+    assert_eq!(field["callers_reason"], "index-unavailable");
+}

@@ -1754,7 +1754,7 @@ pub(crate) fn indexed_inbound_total(
         span_bytes: Some((byte_start, byte_end)),
         precision: "Heuristic".to_string(),
         uncertainty: None,
-        // shortcut: data_member is false for PR 4 languages (no C++ fields here), revisit for C++ fields in PR 5
+        // shortcut: data_member stays false because `changes`, the only caller, answers a field before this lookup; set it from the definition kind if another caller ever passes one.
         data_member: false,
     };
     let endpoint = anchor_endpoint(&anchor).ok_or("anchor has no endpoint")?;

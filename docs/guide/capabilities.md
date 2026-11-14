@@ -84,8 +84,9 @@ git), `submodule` (mode 160000 on either side; no content is read), `symlink` (m
 (a merge conflict with no single version; `change` is `modified`),
 `too-large` (over 1 MiB; riltra checks the size before it reads the blob, but git diff still reads tracked blobs for hunks), `unreadable` (not a regular
 file, including a nested repository); then `binary` (a NUL byte in the first
-8000 bytes); then `unsupported` with `language-unsupported` (only Python, Rust,
-TypeScript and TSX are parsed in this release); then `parse-error`
+8000 bytes); then `unsupported` with `language-unsupported` (only Python,
+JavaScript, TypeScript and TSX, Rust, C, C++, Go and Java are parsed in this
+release); then `parse-error`
 (`syntax-error`); otherwise the change kind. A type change is reported as
 `modified`. Submodule, symlink, unmerged and non-UTF-8 files have no hunks, and an empty
 untracked file has no hunks. A conflicted path is one entry per path in every scope.
@@ -104,6 +105,28 @@ are always listed). Nested definitions are each listed when touched, and
 duplicate names pair in source order. The header is the first line of a
 definition, so `header_touched` only says that a hunk covers that line.
 
+Language notes. A definition is matched by the kind and name the parser stores.
+Java classes and records are `class`, interfaces and annotation types
+`interface`, enums `type`, and methods, constructors and compact constructors
+`method`. Go methods are `method` and are not nested under their receiver type.
+A JavaScript or TypeScript function bound to a `const` is a `function`, and a
+class field bound to a function is a `method`. C and C++ enums and typedefs are
+`type`. In C++ a method defined inside its class body is a `function`, an
+out-of-line definition keeps its qualified name (`Widget::reset`), and a
+namespace has no entry of its own.
+
+Limits of those notes. A span starts where the grammar's node starts: a Java
+annotation above a method is part of the method, while a Go doc comment or a
+C++ `template <...>` line is not part of the function it precedes. Because
+`header_touched` looks at the first line only, a Java signature on the line
+below an annotation is not the header. A C++ data member (`field`) is anchored
+on its identifier, so changing the type on an earlier line of a multi-line
+declaration does not touch the field (the enclosing class is touched instead).
+Java fields are not extracted. A field never gets a caller count. Every `.h`
+file is parsed as C++ and macros are not expanded, so a struct member in a `.h`
+file is a `field`, and a header that does not parse as C++ is reported
+`parse-error`.
+
 A renamed file is looked up in the index under its old path, because the index
 holds the old path until it is re-indexed. In the unstaged scope a staged rename shows as
 the new path modified (index to worktree), so its callers are looked up under the
@@ -113,7 +136,10 @@ new path, which the index holds only after it is re-indexed (`not-in-index` unti
 definition's name, kind and file (the selection `callers` makes), read from the
 index without consulting the live source. It is the count as of the index: when
 `index_freshness` is `stale`, the count is stale too. It is `null` with
-`not-in-index`, `ambiguous-in-index`, `added`, `no-index` (no index), or
+`not-in-index`, `ambiguous-in-index`, `added`, `data-member` (a modified or
+removed C++ field when the index is usable: a field is not called, so no count is
+looked up; an added field says `added`, and without a usable index the field
+carries the index reason below), `no-index` (no index), or
 `index-unavailable` (the index is outdated, ahead, corrupt, or has no snapshot or
 graph proof; the reason is in `index_freshness`). The structure is still
 answered in every case.

@@ -6296,6 +6296,61 @@ fn mcp_code_changes_answers_the_same_document_as_the_cli() {
 }
 
 #[test]
+fn mcp_code_changes_answers_a_cpp_change_like_the_cli() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = home("changes-cpp");
+    let dir = h.join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main", "."]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["config", "core.autocrlf", "false"]);
+    std::fs::write(
+        dir.join("w.hpp"),
+        "class W {\n  int n;\n  int run() { return n; }\n};\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    std::fs::write(
+        dir.join("w.hpp"),
+        "class W {\n  long n;\n  int run() { return n; }\n};\n",
+    )
+    .unwrap();
+    init_repo(&h, &dir, "r");
+
+    let (code, out, err) = run_cli(&h, &["changes", "--repo", "r"]);
+    assert_eq!(code, 0, "{err}");
+    let cli: Value = serde_json::from_str(out.trim()).expect("cli emits one JSON document");
+    let defs = cli["files"][0]["definitions"].as_array().unwrap();
+    let kinds: Vec<&str> = defs.iter().map(|d| d["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["class", "field"], "{cli}");
+    assert_eq!(defs[1]["callers_reason"], "no-index", "{cli}");
+
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_code_changes", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(
+        doc(&result),
+        cli,
+        "MCP and CLI must answer the same parsed document"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn mcp_code_changes_freshness_runs_no_repository_hook() {
     if !git_or_skip() {
         return;

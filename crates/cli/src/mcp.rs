@@ -382,7 +382,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_changes",
-        description = "Definitions a git change touches (same document as CLI `changes`): the live parse of each changed Python, Rust or TypeScript file names the definitions a hunk meets, added, removed or modified, with the hunks outside every definition. Symbols never depend on the index; caller counts (`inbound_edges`) come from it and say why they are null when they cannot be given. It is a map of structure, not an impact verdict. When to call: after editing, to see which functions or classes a change actually touches before reviewing or testing them.",
+        description = "Definitions a git change touches (same document as CLI `changes`): the live parse of each changed Python, JavaScript, TypeScript, Rust, C, C++, Go or Java file names the definitions a hunk meets, added, removed or modified, with the hunks outside every definition. Symbols never depend on the index; caller counts (`inbound_edges`) come from it and say why they are null when they cannot be given. It is a map of structure, not an impact verdict. When to call: after editing, to see which functions or classes a change actually touches before reviewing or testing them.",
         annotations(
             title = "Changed definitions",
             read_only_hint = true,

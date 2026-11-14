@@ -8,7 +8,8 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 - `riltra changes` and the MCP tool `riltra_code_changes`: the definitions a git change
   touches (scopes unstaged, staged, all, compare), from a live parse of Python,
-  Rust and TypeScript files, with caller counts as the index holds them.
+  JavaScript, TypeScript, Rust, C, C++, Go and Java files, with caller counts as
+  the index holds them. A C++ data member is listed without a caller count.
 - Syntax facts for Go (`.go`) and Java (`.java`): definitions, imports and
   call candidates. Syntax-only; calls stay `POTENTIAL_CALL` and no SCIP or
   language-server evidence is claimed.

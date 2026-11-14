@@ -990,14 +990,7 @@ fn analyse(ctx: &Ctx, change: &Change) -> Result<FileOut, Failure> {
         _ => None,
     };
     let lang = match kind {
-        FileKind::Supported(l)
-            if matches!(
-                l,
-                Language::Python | Language::Rust | Language::TypeScript | Language::Tsx
-            ) =>
-        {
-            Some(l)
-        }
+        FileKind::Supported(l) => Some(l),
         _ => None,
     };
     let refusal = if change.non_utf8 {
@@ -1164,6 +1157,11 @@ fn count_callers(
         index::evaluate_snapshot_with(&tx, repo, canon, &snapshot, &|root| git.fingerprint(root));
     let mut answers = BTreeMap::new();
     for key in keys {
+        // A data member is never called, so no count is looked up for it.
+        if key.2 == "field" {
+            answers.insert(key.clone(), Answer::Reason("data-member"));
+            continue;
+        }
         let symbols = symbol_rows(&tx, snapshot.id, key).map_err(|_| "store-error")?;
         let answer = match symbols.as_slice() {
             [] => Answer::Reason("not-in-index"),

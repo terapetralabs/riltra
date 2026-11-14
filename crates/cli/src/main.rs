@@ -10,6 +10,7 @@
 mod args;
 mod backup;
 mod changes;
+mod concept;
 mod context;
 mod doctor;
 mod edges;

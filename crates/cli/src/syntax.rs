@@ -137,7 +137,72 @@ pub struct FileFacts {
     /// name is the identifier text, the span and bytes address the identifier.
     /// Never part of the `scan` document; stored and queried by the index only.
     pub reference_occurrences: Vec<Fact>,
+    /// Heritage facts (PR 6): supertypes named by a type declaration. Never
+    /// part of the `scan` document; stored by the index only.
+    pub heritage: Vec<Heritage>,
+    /// Containment facts (PR 6): each definition, and each symbol-less container,
+    /// that has an enclosing container, paired with its nearest one, in visit
+    /// order. Never part of the `scan` document; stored by the index only.
+    pub containment: Vec<Containment>,
+    /// Doc comments (PR 6): the comment block above a definition, and a Python
+    /// docstring. Never part of the `scan` document; stored by the index only.
+    pub doc_comments: Vec<DocComment>,
     pub errors: u32,
+}
+
+/// A definition, or a container without a symbol, and its nearest enclosing
+/// container (PR 6). Both sides are identified by the byte range a stored
+/// definition has (or, for a symbol-less container, the node's range), never
+/// by a symbol rowid. Never part of the `scan` document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Containment {
+    pub child_kind: &'static str,
+    pub child_name: Option<String>,
+    pub child_byte_start: usize,
+    pub child_byte_end: usize,
+    pub parent_kind: &'static str,
+    pub parent_name: Option<String>,
+    pub parent_byte_start: usize,
+    pub parent_byte_end: usize,
+}
+
+/// A type declaration naming a supertype (PR 6). `supertype_text` is the exact
+/// source text (the written evidence); `supertype_name` is a normalised lookup
+/// key, never a resolution. Never part of the `scan` document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Heritage {
+    pub subtype: String,
+    pub relation: &'static str,
+    pub supertype_text: String,
+    pub supertype_name: Option<String>,
+    /// The supertype expression.
+    pub span: Span,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    /// The stored definition's byte range (Rust: the `impl` item).
+    pub decl_byte_start: usize,
+    pub decl_byte_end: usize,
+}
+
+/// Longest doc text stored per row, in bytes (cut on a UTF-8 character boundary).
+pub const DOC_TEXT_CAP: usize = 4096;
+
+/// A doc comment of a stored definition (PR 6). The definition is identified by
+/// its byte range, as `symbols` stores it. Never part of the `scan` document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocComment {
+    pub def_byte_start: usize,
+    pub def_byte_end: usize,
+    /// "above" | "docstring".
+    pub form: &'static str,
+    /// Raw source text, comment markers kept, at most `DOC_TEXT_CAP` bytes.
+    pub text: String,
+    /// True when the block was longer than `DOC_TEXT_CAP`.
+    pub truncated: bool,
+    /// The whole block, not only the kept text.
+    pub span: Span,
+    pub byte_start: usize,
+    pub byte_end: usize,
 }
 
 /// Roles of a reference occurrence. These strings are stored in
@@ -1116,6 +1181,708 @@ fn position_from(src: &[u8], base: usize, base_pos: (u32, u32), off: usize) -> (
     }
 }
 
+/// Normalised lookup key of a supertype's text: one leading `*` and one
+/// trailing type-argument list are stripped, and what remains must be
+/// identifiers joined by `.` or `::`, none starting with a digit. A call or an
+/// expression has no key. `<...>` is a type-argument list in every language;
+/// `[...]` is one only when `brackets` says so (Python and Go). A `[...]` whose
+/// content starts with a digit or a quote is an index and is never stripped.
+/// The key is a lookup hint, never a resolution.
+fn heritage_name(text: &str, brackets: bool) -> Option<String> {
+    let text = text.strip_prefix('*').unwrap_or(text);
+    let base = match text.chars().last() {
+        Some(close @ ('>' | ']')) if close == '>' || brackets => {
+            let open = if close == '>' { '<' } else { '[' };
+            let mut depth = 0usize;
+            let mut cut = None;
+            // The scan starts on the closing bracket, so depth stays positive
+            // until the matching opener brings it back to zero.
+            for (i, c) in text.char_indices().rev() {
+                if c == close {
+                    depth += 1;
+                } else if c == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        cut = Some(i);
+                        break;
+                    }
+                }
+            }
+            let cut = cut?;
+            // Both brackets are one byte, so the content lies between them.
+            let content = &text[cut + 1..text.len() - 1];
+            if close == ']'
+                && content.trim_start().starts_with(|c: char| {
+                    c.is_ascii_digit() || matches!(c, '"' | '\'' | '-' | '+' | ':')
+                })
+            {
+                return None;
+            }
+            &text[..cut]
+        }
+        _ => text,
+    };
+    let identifiers = base.replace("::", ".").split('.').all(|seg| {
+        !seg.is_empty()
+            && !seg.starts_with(|c: char| c.is_ascii_digit())
+            && seg
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    });
+    identifiers.then(|| base.to_string())
+}
+
+/// The first named child of `node` with the given kind.
+fn named_child_of_kind<'a>(
+    node: tree_sitter::Node<'a>,
+    kind: &str,
+) -> Option<tree_sitter::Node<'a>> {
+    (0..node.named_child_count())
+        .filter_map(|i| node.named_child(i))
+        .find(|c| c.kind() == kind)
+}
+
+/// The named children of a list node, comments left out. Rust and Java name
+/// their comments `line_comment` and `block_comment`, the others `comment`.
+fn list_items(node: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
+    (0..node.named_child_count())
+        .filter_map(|i| node.named_child(i))
+        .filter(|c| !matches!(c.kind(), "comment" | "line_comment" | "block_comment"))
+        .collect()
+}
+
+/// The subtype name and declaring byte range of the definition the current
+/// arm just pushed. `None` when the declaration has no name: no heritage row.
+fn last_definition(facts: &FileFacts) -> Option<(String, (usize, usize))> {
+    let def = facts.definitions.last()?;
+    Some((def.name.clone()?, (def.byte_start, def.byte_end)))
+}
+
+/// Records one heritage row for `owner` (subtype name and declaring range).
+/// The supertype's bytes run from `first` to `last`: one node, except
+/// TypeScript `Base<number>`, which spans the value and its type arguments.
+fn push_heritage(
+    facts: &mut FileFacts,
+    owner: &(String, (usize, usize)),
+    relation: &'static str,
+    first: tree_sitter::Node,
+    last: tree_sitter::Node,
+    src: &[u8],
+) {
+    let (subtype, (decl_byte_start, decl_byte_end)) = owner;
+    let Some(text) = src
+        .get(first.start_byte()..last.end_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+    else {
+        return;
+    };
+    let (start, end) = (first.start_position(), last.end_position());
+    facts.heritage.push(Heritage {
+        subtype: subtype.clone(),
+        relation,
+        supertype_text: text.to_string(),
+        // A literal or keyword node (`null`, `None`, `this`) reads like a name
+        // but is not one: the text is kept, the lookup key is NULL.
+        supertype_name: if matches!(
+            first.kind(),
+            "null"
+                | "undefined"
+                | "true"
+                | "false"
+                | "none"
+                | "this"
+                | "super"
+                | "number"
+                | "integer"
+                | "float"
+                | "string"
+        ) {
+            None
+        } else {
+            heritage_name(
+                text,
+                matches!(facts.language, Language::Python | Language::Go),
+            )
+        },
+        span: Span {
+            start_line: (start.row + 1) as u32,
+            start_col: (start.column + 1) as u32,
+            end_line: (end.row + 1) as u32,
+            end_col: (end.column + 1) as u32,
+        },
+        byte_start: first.start_byte(),
+        byte_end: last.end_byte(),
+        decl_byte_start: *decl_byte_start,
+        decl_byte_end: *decl_byte_end,
+    });
+}
+
+/// Python `class C(B, mod.D, metaclass=M)`: each positional base is `extends`.
+fn push_python_heritage(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    let Some(bases) = node.child_by_field_name("superclasses") else {
+        return;
+    };
+    // shortcut: splat bases (`*bases`, `**kw`) are skipped, not expanded; upgrade when a query needs them.
+    for base in list_items(bases) {
+        if matches!(
+            base.kind(),
+            "keyword_argument" | "list_splat" | "dictionary_splat"
+        ) {
+            continue;
+        }
+        push_heritage(facts, &owner, "extends", base, base, src);
+    }
+}
+
+/// JavaScript `class C extends E {}`: the expression after `extends`.
+fn push_js_heritage(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    // shortcut: class expressions (`const C = class extends B {}`) are not recorded; upgrade when a query needs them.
+    let Some(base) =
+        named_child_of_kind(node, "class_heritage").and_then(|h| list_items(h).into_iter().next())
+    else {
+        return;
+    };
+    push_heritage(facts, &owner, "extends", base, base, src);
+}
+
+/// TypeScript `class C<T> extends B<T> implements I, J {}` (and abstract).
+fn push_ts_class_heritage(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    let Some(heritage) = named_child_of_kind(node, "class_heritage") else {
+        return;
+    };
+    if let Some(clause) = named_child_of_kind(heritage, "extends_clause") {
+        if let Some(value) = clause.child_by_field_name("value") {
+            let last = clause
+                .child_by_field_name("type_arguments")
+                .unwrap_or(value);
+            push_heritage(facts, &owner, "extends", value, last, src);
+        }
+    }
+    if let Some(clause) = named_child_of_kind(heritage, "implements_clause") {
+        for ty in list_items(clause) {
+            push_heritage(facts, &owner, "implements", ty, ty, src);
+        }
+    }
+}
+
+/// TypeScript `interface I extends J, K {}`.
+fn push_ts_interface_heritage(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    let Some(clause) = named_child_of_kind(node, "extends_type_clause") else {
+        return;
+    };
+    let mut cursor = clause.walk();
+    for ty in clause.children_by_field_name("type", &mut cursor) {
+        push_heritage(facts, &owner, "extends", ty, ty, src);
+    }
+}
+
+/// Java `superclass` (extends) and `interfaces` (implements) of a class,
+/// record or enum. Each is absent when the declaration has none.
+fn push_java_supertypes(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    // The `superclass` node wraps the type written after `extends`; a comment
+    // before it is no type.
+    if let Some(ty) = node
+        .child_by_field_name("superclass")
+        .and_then(|s| list_items(s).into_iter().next())
+    {
+        push_heritage(facts, &owner, "extends", ty, ty, src);
+    }
+    if let Some(list) = node
+        .child_by_field_name("interfaces")
+        .and_then(|s| named_child_of_kind(s, "type_list"))
+    {
+        for ty in list_items(list) {
+            push_heritage(facts, &owner, "implements", ty, ty, src);
+        }
+    }
+}
+
+/// Java `interface I extends J, K {}`: the `type_list` of `extends_interfaces`.
+fn push_java_interface_heritage(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    let Some(list) = named_child_of_kind(node, "extends_interfaces")
+        .and_then(|e| named_child_of_kind(e, "type_list"))
+    else {
+        return;
+    };
+    for ty in list_items(list) {
+        push_heritage(facts, &owner, "extends", ty, ty, src);
+    }
+}
+
+/// Rust `impl Trait for Type`: the trait is `implements`, the subtype is the
+/// impl's type as written, and the declaring range is the impl item. An
+/// inherent impl has no `trait` field and gives no row, and neither does a
+/// negative impl (`impl !Send for T {}`), whose `!` precedes the trait.
+/// shortcut: Rust supertraits (`trait A: B`) and generic bounds are not recorded; upgrade when a query needs them.
+fn push_rust_impl_heritage(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let (Some(trait_node), Some(ty)) = (
+        node.child_by_field_name("trait"),
+        node.child_by_field_name("type"),
+    ) else {
+        return;
+    };
+    let mut cursor = node.walk();
+    if node
+        .children(&mut cursor)
+        .take_while(|c| c.id() != trait_node.id())
+        .any(|c| c.kind() == "!")
+    {
+        return;
+    }
+    let Some(subtype) = node_text(ty, src) else {
+        return;
+    };
+    let owner = (subtype.to_string(), (node.start_byte(), node.end_byte()));
+    push_heritage(facts, &owner, "implements", trait_node, trait_node, src);
+}
+
+/// C++ `class C : public B, private ns::D<int> {}`: every named child of the
+/// base clause except access specifiers and attributes (`[[deprecated]]`). The
+/// caller has checked that the specifier is a named definition with a body.
+/// A pack expansion `Bs...` keeps its `...` in the text, span and bytes: a
+/// pack stands for any number of bases, so it has no single lookup name.
+fn push_cpp_bases(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    let Some(clause) = named_child_of_kind(node, "base_class_clause") else {
+        return;
+    };
+    for base in list_items(clause) {
+        if matches!(base.kind(), "access_specifier" | "attribute_declaration") {
+            continue;
+        }
+        // A comment between the base and its `...` is an extra: skip it.
+        let mut next = base.next_sibling();
+        while next.is_some_and(|n| n.is_extra()) {
+            next = next.and_then(|n| n.next_sibling());
+        }
+        let dots = next.filter(|t| !t.is_named() && t.kind() == "...");
+        push_heritage(facts, &owner, "extends", base, dots.unwrap_or(base), src);
+    }
+}
+
+/// Go `type S struct { B; *P; pkg.Q }`: each field without a name is an
+/// embedded struct field (`embeds`). The caller has checked the spec's kind.
+/// shortcut: Go interface embedding (`interface { B }`) is not recorded; upgrade when a query needs interface supertypes.
+fn push_go_embeds(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(owner) = last_definition(facts) else {
+        return;
+    };
+    let Some(fields) = node
+        .child_by_field_name("type")
+        .filter(|t| t.kind() == "struct_type")
+        .and_then(|s| named_child_of_kind(s, "field_declaration_list"))
+    else {
+        return;
+    };
+    for field in list_items(fields) {
+        if field.kind() != "field_declaration" || field.child_by_field_name("name").is_some() {
+            continue;
+        }
+        // The `*` of an embedded pointer is a token of the field, not of its
+        // type, so the text starts at the field and ends at the type (a tag
+        // comes after the type and is left out).
+        if let Some(ty) = field.child_by_field_name("type") {
+            push_heritage(facts, &owner, "embeds", field, ty, src);
+        }
+    }
+}
+
+/// A definition or container as containment rows identify it: its kind, its
+/// name as written, and its byte range (PR 6).
+#[derive(Clone)]
+struct Identity {
+    kind: &'static str,
+    name: Option<String>,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+/// A container open on the walk (PR 6). It is the nearest container of every
+/// node that starts before `node_end`, the end byte of its own node.
+struct OpenContainer {
+    node_end: usize,
+    identity: Identity,
+}
+
+/// A container with no stored definition (PR 6): C++ namespace, TypeScript
+/// `namespace` and `module`, Rust `impl` and `mod`. The kinds are `namespace`,
+/// `module` and `impl`; the name is the text of the node's name (or, for an
+/// impl, type) field, `None` when absent.
+fn symbol_less_container(lang: Language, node: tree_sitter::Node, src: &[u8]) -> Option<Identity> {
+    let (kind, field) = match (lang, node.kind()) {
+        (Language::Cpp, "namespace_definition") => ("namespace", "name"),
+        (Language::TypeScript | Language::Tsx, "internal_module") => ("namespace", "name"),
+        (Language::TypeScript | Language::Tsx, "module") => ("module", "name"),
+        (Language::Rust, "impl_item") => ("impl", "type"),
+        (Language::Rust, "mod_item") => ("module", "name"),
+        _ => return None,
+    };
+    let name = node
+        .child_by_field_name(field)
+        .and_then(|n| node_text(n, src))
+        .map(str::to_string);
+    Some(Identity {
+        kind,
+        name,
+        byte_start: node.start_byte(),
+        byte_end: node.end_byte(),
+    })
+}
+
+/// Node kinds that are containers when they push a definition in the same
+/// visit (PR 6). Go has none, and C only through a macro-headed struct.
+fn is_symbol_container(lang: Language, kind: &str) -> bool {
+    match lang {
+        Language::Python => kind == "class_definition",
+        Language::JavaScript => kind == "class_declaration",
+        Language::TypeScript | Language::Tsx => matches!(
+            kind,
+            "class_declaration"
+                | "abstract_class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+        ),
+        Language::Rust => kind == "trait_item",
+        Language::Cpp => matches!(
+            kind,
+            "class_specifier" | "struct_specifier" | "enum_specifier"
+        ),
+        Language::Java => matches!(
+            kind,
+            "class_declaration"
+                | "record_declaration"
+                | "interface_declaration"
+                | "annotation_type_declaration"
+                | "enum_declaration"
+        ),
+        Language::C | Language::Go => false,
+    }
+}
+
+/// A `function_definition` that `macro_headed_tag` stored as a class or struct
+/// is a container of its member functions (PR 6).
+fn is_macro_headed_tag(lang: Language, node: tree_sitter::Node, children: &[Identity]) -> bool {
+    matches!(lang, Language::C | Language::Cpp)
+        && node.kind() == "function_definition"
+        && children
+            .first()
+            .is_some_and(|c| matches!(c.kind, "class" | "struct"))
+}
+
+/// Records the containment rows of `node` after `visit_node` ran on it. Its
+/// children are the definitions it pushed (`defs_before` marks where they
+/// start) and, for a symbol-less container, the node itself. Each child is
+/// recorded against the innermost open container before `node` opens its own
+/// one, so a container is no child of itself.
+/// shortcut: a definition nested in a function takes the nearest container, not the function (upgrade when a reader needs function-level nesting).
+fn record_containment(
+    lang: Language,
+    node: tree_sitter::Node,
+    src: &[u8],
+    facts: &mut FileFacts,
+    defs_before: usize,
+    containers: &mut Vec<OpenContainer>,
+) {
+    let mut children: Vec<Identity> = facts.definitions[defs_before..]
+        .iter()
+        .map(|d| Identity {
+            kind: d.kind,
+            name: d.name.clone(),
+            byte_start: d.byte_start,
+            byte_end: d.byte_end,
+        })
+        .collect();
+    // A container node pushes exactly one definition, its own identity.
+    let own = match symbol_less_container(lang, node, src) {
+        Some(container) => {
+            children.push(container.clone());
+            Some(container)
+        }
+        None if is_symbol_container(lang, node.kind())
+            || is_macro_headed_tag(lang, node, &children) =>
+        {
+            children.first().cloned()
+        }
+        None => None,
+    };
+    if let Some(parent) = containers.last() {
+        for child in children {
+            facts.containment.push(Containment {
+                child_kind: child.kind,
+                child_name: child.name,
+                child_byte_start: child.byte_start,
+                child_byte_end: child.byte_end,
+                parent_kind: parent.identity.kind,
+                parent_name: parent.identity.name.clone(),
+                parent_byte_start: parent.identity.byte_start,
+                parent_byte_end: parent.identity.byte_end,
+            });
+        }
+    }
+    if let Some(identity) = own {
+        containers.push(OpenContainer {
+            node_end: node.end_byte(),
+            identity,
+        });
+    }
+}
+
+/// Whether `kind` is a comment node of the language (PR 6).
+fn is_comment(lang: Language, kind: &str) -> bool {
+    match lang {
+        Language::Rust | Language::Java => matches!(kind, "line_comment" | "block_comment"),
+        _ => kind == "comment",
+    }
+}
+
+/// Whether `parent` wraps the definition node `node` for doc comments (PR 6).
+/// Go wraps a spec only when the `type` keyword is on the spec's own line.
+fn is_wrapper(lang: Language, node: tree_sitter::Node, parent: tree_sitter::Node) -> bool {
+    match lang {
+        Language::Python => parent.kind() == "decorated_definition",
+        Language::JavaScript | Language::TypeScript | Language::Tsx => matches!(
+            parent.kind(),
+            "export_statement" | "lexical_declaration" | "variable_declaration"
+        ),
+        Language::C | Language::Cpp => matches!(
+            parent.kind(),
+            "template_declaration" | "type_definition" | "declaration" | "field_declaration"
+        ),
+        Language::Go => {
+            parent.kind() == "type_declaration"
+                && parent.start_position().row == node.start_position().row
+        }
+        Language::Rust | Language::Java => false,
+    }
+}
+
+/// The node a doc comment sits above (PR 6): the outermost wrapper of `node`,
+/// or for Rust the first of the attributes directly before the item.
+/// shortcut: TypeScript `declare` (ambient) and C++ `extern "C"` wrappers are not passed through, so their definitions get no doc comment (upgrade when a reader needs them).
+fn doc_anchor(lang: Language, node: tree_sitter::Node) -> tree_sitter::Node {
+    if lang == Language::Rust {
+        let mut anchor = node;
+        while let Some(prev) = anchor
+            .prev_sibling()
+            .filter(|p| p.kind() == "attribute_item")
+        {
+            anchor = prev;
+        }
+        return anchor;
+    }
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        if !is_wrapper(lang, node, parent) {
+            break;
+        }
+        current = parent;
+    }
+    current
+}
+
+/// The end byte of a comment without its trailing `\r` and `\n` bytes: a
+/// comment node may include its line terminator (PR 6).
+fn comment_end(src: &[u8], node: tree_sitter::Node) -> usize {
+    let mut end = node.end_byte();
+    while end > node.start_byte() && matches!(src.get(end - 1), Some(b'\r' | b'\n')) {
+        end -= 1;
+    }
+    end
+}
+
+/// The 1-based line of a comment's last character (PR 6).
+fn comment_end_line(src: &[u8], node: tree_sitter::Node) -> u32 {
+    let start = node.start_position();
+    let base = ((start.row + 1) as u32, (start.column + 1) as u32);
+    position_from(src, node.start_byte(), base, comment_end(src, node)).0
+}
+
+/// Whether only spaces and tabs precede byte `start` on its line (PR 6).
+fn starts_its_line(src: &[u8], start: usize) -> bool {
+    let mut i = start;
+    while i > 0 && matches!(src[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    i == 0 || src[i - 1] == b'\n'
+}
+
+/// The comment block above `node`'s anchor (PR 6), as its first and last comment
+/// node. The block runs upward through comments that each start their line and
+/// are not separated by a blank line; it attaches only when its last comment
+/// ends on the line directly above the anchor.
+fn comment_block<'a>(
+    lang: Language,
+    node: tree_sitter::Node<'a>,
+    src: &[u8],
+) -> Option<(tree_sitter::Node<'a>, tree_sitter::Node<'a>)> {
+    let anchor = doc_anchor(lang, node);
+    let anchor_line = anchor.start_position().row as u32 + 1;
+    let mut next_line = anchor_line;
+    let mut nearest = None;
+    let mut farthest = None;
+    let mut cursor = anchor.prev_sibling();
+    while let Some(comment) = cursor {
+        if !is_comment(lang, comment.kind()) || !starts_its_line(src, comment.start_byte()) {
+            break;
+        }
+        if comment_end_line(src, comment) + 1 < next_line {
+            break;
+        }
+        if nearest.is_none() {
+            nearest = Some(comment);
+        }
+        farthest = Some(comment);
+        next_line = comment.start_position().row as u32 + 1;
+        cursor = comment.prev_sibling();
+    }
+    let (nearest, farthest) = (nearest?, farthest?);
+    (comment_end_line(src, nearest) + 1 == anchor_line).then_some((farthest, nearest))
+}
+
+/// Cuts doc text to `DOC_TEXT_CAP` bytes on a character boundary (PR 6).
+fn cut_doc(text: &str) -> (&str, bool) {
+    if text.len() <= DOC_TEXT_CAP {
+        return (text, false);
+    }
+    let mut end = DOC_TEXT_CAP;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+/// A doc text as it sits in the source (PR 6), before a definition is attached.
+struct DocText {
+    text: String,
+    truncated: bool,
+    span: Span,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+/// The doc text under `byte_start..byte_end`. `None` when those bytes are not
+/// UTF-8, the same rule `node_text` applies.
+fn doc_text(src: &[u8], span: Span, byte_start: usize, byte_end: usize) -> Option<DocText> {
+    let full = std::str::from_utf8(&src[byte_start..byte_end]).ok()?;
+    let (kept, truncated) = cut_doc(full);
+    Some(DocText {
+        text: kept.to_string(),
+        truncated,
+        span,
+        byte_start,
+        byte_end,
+    })
+}
+
+/// The doc text of a comment block: from its first comment's start to its last
+/// comment's end, the comments between them included verbatim (PR 6).
+fn comment_block_text(
+    src: &[u8],
+    first: tree_sitter::Node,
+    last: tree_sitter::Node,
+) -> Option<DocText> {
+    let (mut span, byte_start, _) = span_of(first);
+    let byte_end = comment_end(src, last);
+    let (end_line, end_col) =
+        position_from(src, byte_start, (span.start_line, span.start_col), byte_end);
+    span.end_line = end_line;
+    span.end_col = end_col;
+    doc_text(src, span, byte_start, byte_end)
+}
+
+/// The docstring of a Python function or class: the string that is the first
+/// non-comment named child of the body, when that child is an expression
+/// statement holding a plain string (PR 6). An f-string or bytes literal is
+/// not a docstring.
+/// shortcut: a docstring built from concatenated strings is not recorded (upgrade when a reader needs multi-part docstrings).
+fn python_docstring<'t>(
+    lang: Language,
+    node: tree_sitter::Node<'t>,
+    src: &[u8],
+) -> Option<tree_sitter::Node<'t>> {
+    if lang != Language::Python
+        || !matches!(node.kind(), "function_definition" | "class_definition")
+    {
+        return None;
+    }
+    let body = node.child_by_field_name("body")?;
+    let statement = (0..body.named_child_count())
+        .filter_map(|i| body.named_child(i))
+        .find(|child| child.kind() != "comment")?;
+    if statement.kind() != "expression_statement" {
+        return None;
+    }
+    let string = statement.named_child(0)?;
+    if string.kind() != "string" {
+        return None;
+    }
+    let prefix_has_f_or_b = src[string.start_byte()..]
+        .iter()
+        .take_while(|b| b.is_ascii_alphabetic())
+        .any(|&b| matches!(b, b'f' | b'F' | b'b' | b'B'));
+    (!prefix_has_f_or_b).then_some(string)
+}
+
+/// Records the doc comment rows of the definitions `node` pushed in this visit
+/// (PR 6): the block above its anchor (form `above`) and a Python docstring
+/// (form `docstring`). Each definition gets at most one row of each form.
+fn record_doc_comments(
+    lang: Language,
+    node: tree_sitter::Node,
+    src: &[u8],
+    facts: &mut FileFacts,
+    defs_before: usize,
+) {
+    if facts.definitions.len() == defs_before {
+        return;
+    }
+    let above = comment_block(lang, node, src)
+        .and_then(|(first, last)| comment_block_text(src, first, last));
+    let docstring = python_docstring(lang, node, src).and_then(|string| {
+        let (span, byte_start, byte_end) = span_of(string);
+        doc_text(src, span, byte_start, byte_end)
+    });
+    let mut rows = Vec::new();
+    for definition in &facts.definitions[defs_before..] {
+        for (form, found) in [("above", &above), ("docstring", &docstring)] {
+            let Some(found) = found else {
+                continue;
+            };
+            rows.push(DocComment {
+                def_byte_start: definition.byte_start,
+                def_byte_end: definition.byte_end,
+                form,
+                text: found.text.clone(),
+                truncated: found.truncated,
+                span: found.span.clone(),
+                byte_start: found.byte_start,
+                byte_end: found.byte_end,
+            });
+        }
+    }
+    facts.doc_comments.extend(rows);
+}
+
 /// Visit every node under `root` in pre-order. Iterative on purpose: nesting
 /// depth is bounded only by the file size cap, and a recursive walk overflows
 /// the stack on deeply nested source.
@@ -1127,8 +1894,20 @@ fn visit(
     macros: &HashSet<&str>,
 ) {
     let mut cursor = root.walk();
+    // The containers open at the current node, innermost last (PR 6).
+    let mut containers: Vec<OpenContainer> = Vec::new();
     loop {
-        visit_node(lang, cursor.node(), src, facts, macros);
+        let node = cursor.node();
+        while containers
+            .last()
+            .is_some_and(|c| c.node_end <= node.start_byte())
+        {
+            containers.pop();
+        }
+        let defs_before = facts.definitions.len();
+        visit_node(lang, node, src, facts, macros);
+        record_doc_comments(lang, node, src, facts, defs_before);
+        record_containment(lang, node, src, facts, defs_before, &mut containers);
         if cursor.goto_first_child() {
             continue;
         }
@@ -1155,7 +1934,10 @@ fn visit_node(
     match lang {
         Language::Python => match node.kind() {
             "function_definition" => push_def(facts, "function", node, src),
-            "class_definition" => push_def(facts, "class", node, src),
+            "class_definition" => {
+                push_def(facts, "class", node, src);
+                push_python_heritage(facts, node, src);
+            }
             "import_statement" | "import_from_statement" => push_import(facts, node, src),
             "call" => push_call(facts, node, src),
             _ => {}
@@ -1168,7 +1950,10 @@ fn visit_node(
             "variable_declarator" | "field_definition" if is_named_function_binding(node) => {
                 push_def(facts, binding_kind(node), node, src)
             }
-            "class_declaration" => push_def(facts, "class", node, src),
+            "class_declaration" => {
+                push_def(facts, "class", node, src);
+                push_js_heritage(facts, node, src);
+            }
             "import_statement" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
             _ => {}
@@ -1183,9 +1968,14 @@ fn visit_node(
             {
                 push_def(facts, binding_kind(node), node, src)
             }
-            "class_declaration" => push_def(facts, "class", node, src),
-            "abstract_class_declaration" => push_def(facts, "class", node, src),
-            "interface_declaration" => push_def(facts, "interface", node, src),
+            "class_declaration" | "abstract_class_declaration" => {
+                push_def(facts, "class", node, src);
+                push_ts_class_heritage(facts, node, src);
+            }
+            "interface_declaration" => {
+                push_def(facts, "interface", node, src);
+                push_ts_interface_heritage(facts, node, src);
+            }
             "type_alias_declaration" | "enum_declaration" => push_def(facts, "type", node, src),
             "import_statement" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
@@ -1198,6 +1988,7 @@ fn visit_node(
             // An associated type in an impl block is not a type alias.
             "type_item" if !in_impl(node) => push_def(facts, "type", node, src),
             "trait_item" => push_def(facts, "interface", node, src),
+            "impl_item" => push_rust_impl_heritage(facts, node, src),
             "use_declaration" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
             _ => {}
@@ -1205,17 +1996,29 @@ fn visit_node(
         Language::Go => match node.kind() {
             "function_declaration" => push_def(facts, "function", node, src),
             "method_declaration" => push_def(facts, "method", node, src),
-            "type_spec" | "type_alias" => push_go_type(facts, node, src),
+            "type_spec" => {
+                push_go_type(facts, node, src);
+                push_go_embeds(facts, node, src);
+            }
+            "type_alias" => push_go_type(facts, node, src),
             "import_declaration" => push_import(facts, node, src),
             "call_expression" | "type_conversion_expression" => push_go_call(facts, node, src),
             _ => {}
         },
         Language::Java => match node.kind() {
-            "class_declaration" | "record_declaration" => push_def(facts, "class", node, src),
-            "interface_declaration" | "annotation_type_declaration" => {
-                push_def(facts, "interface", node, src)
+            "class_declaration" | "record_declaration" => {
+                push_def(facts, "class", node, src);
+                push_java_supertypes(facts, node, src);
             }
-            "enum_declaration" => push_def(facts, "type", node, src),
+            "interface_declaration" => {
+                push_def(facts, "interface", node, src);
+                push_java_interface_heritage(facts, node, src);
+            }
+            "annotation_type_declaration" => push_def(facts, "interface", node, src),
+            "enum_declaration" => {
+                push_def(facts, "type", node, src);
+                push_java_supertypes(facts, node, src);
+            }
             "method_declaration"
             | "constructor_declaration"
             | "compact_constructor_declaration" => push_def(facts, "method", node, src),
@@ -1244,12 +2047,20 @@ fn visit_node(
                 node,
                 src,
             ),
-            "struct_specifier" => push_struct(facts, node, src),
+            "struct_specifier" => {
+                push_struct(facts, node, src);
+                if node.child_by_field_name("name").is_some()
+                    && node.child_by_field_name("body").is_some()
+                {
+                    push_cpp_bases(facts, node, src);
+                }
+            }
             "class_specifier"
                 if node.child_by_field_name("body").is_some()
                     && node.child_by_field_name("name").is_some() =>
             {
-                push_tagged(facts, "class", node, src)
+                push_tagged(facts, "class", node, src);
+                push_cpp_bases(facts, node, src);
             }
             "enum_specifier" => push_enum(facts, node, src),
             "type_definition" => push_typedef(facts, node, src),
@@ -1275,6 +2086,9 @@ pub fn parse_source(lang: Language, src: &[u8]) -> FileFacts {
         imports: Vec::new(),
         calls: Vec::new(),
         reference_occurrences: Vec::new(),
+        heritage: Vec::new(),
+        containment: Vec::new(),
+        doc_comments: Vec::new(),
         errors: 0,
     };
     let mut parser = tree_sitter::Parser::new();
@@ -2725,5 +3539,670 @@ class C { x = () => 1; y = 2; #p = function () {}; }
                 }
             }
         }
+    }
+
+    // Heritage facts (PR 6): a type declaration names its supertypes. Every
+    // expectation below is written from the fixture source.
+    type HeritageRow = (String, &'static str, String, Option<String>);
+
+    /// The heritage rows of a source, sorted. Each row is also checked against
+    /// the source: its bytes are the supertype text, the declaring range holds
+    /// the supertype, and (outside Rust, where an impl is no definition) the
+    /// declaring range and subtype are those of a stored definition.
+    fn heritage_rows(lang: Language, src: &str) -> Vec<HeritageRow> {
+        let facts = parse_source(lang, src.as_bytes());
+        let mut rows = Vec::new();
+        for h in &facts.heritage {
+            assert_eq!(
+                &src.as_bytes()[h.byte_start..h.byte_end],
+                h.supertype_text.as_bytes(),
+                "{h:?}"
+            );
+            assert!(
+                h.decl_byte_start <= h.byte_start && h.byte_end <= h.decl_byte_end,
+                "{h:?}"
+            );
+            if lang == Language::Rust {
+                assert!(src[h.decl_byte_start..].starts_with("impl"), "{h:?}");
+            } else {
+                assert!(
+                    facts
+                        .definitions
+                        .iter()
+                        .any(|d| d.byte_start == h.decl_byte_start
+                            && d.byte_end == h.decl_byte_end
+                            && d.name.as_deref() == Some(h.subtype.as_str())),
+                    "no stored definition for {h:?}"
+                );
+            }
+            rows.push((
+                h.subtype.clone(),
+                h.relation,
+                h.supertype_text.clone(),
+                h.supertype_name.clone(),
+            ));
+        }
+        rows.sort();
+        rows
+    }
+
+    fn heritage_expected(rows: &[(&str, &'static str, &str, Option<&str>)]) -> Vec<HeritageRow> {
+        let mut out: Vec<HeritageRow> = rows
+            .iter()
+            .map(|(a, b, c, d)| (a.to_string(), *b, c.to_string(), d.map(str::to_string)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn heritage_names_strip_type_arguments_and_pointer_marks_only() {
+        for (text, name) in [
+            ("B", Some("B")),
+            ("mod.C", Some("mod.C")),
+            ("ns::Base", Some("ns::Base")),
+            ("pkg.Type", Some("pkg.Type")),
+            ("Base<T>", Some("Base")),
+            ("Generic[T]", Some("Generic")),
+            ("Gen[int]", Some("Gen")),
+            ("*Ptr", Some("Ptr")),
+            ("*pkg.Type", Some("pkg.Type")),
+            ("std::vector<int>", Some("std::vector")),
+            ("List<Map<K, V>>", Some("List")),
+            ("ns::Tpl<A, B>", Some("ns::Tpl")),
+            ("$base", Some("$base")),
+            ("Étendue", Some("Étendue")),
+            ("mixin(F)", None),
+            ("make_base()", None),
+            ("a.b()", None),
+            ("", None),
+            ("<T>", None),
+            ("A::", None),
+            (".B", None),
+        ] {
+            assert_eq!(
+                super::heritage_name(text, true).as_deref(),
+                name,
+                "{text:?}"
+            );
+        }
+        // Square brackets are type arguments only in Python and Go (`brackets`):
+        // elsewhere they index. A number, an index or a pack is never a name.
+        for (text, brackets, name) in [
+            ("Gen[int]", true, Some("Gen")),
+            ("Gen[int]", false, None),
+            ("Generic[T]", false, None),
+            ("bases[0]", true, None),
+            ("bases[-1]", true, None),
+            ("bases[+1]", true, None),
+            ("bases[ 0]", true, None),
+            ("bases[:2]", true, None),
+            ("bases[0]", false, None),
+            ("m[\"k\"]", true, None),
+            ("123", true, None),
+            ("2x", true, None),
+            ("pkg.v2", true, Some("pkg.v2")),
+            ("Bs...", true, None),
+            ("Base<T>", false, Some("Base")),
+        ] {
+            assert_eq!(
+                super::heritage_name(text, brackets).as_deref(),
+                name,
+                "{text:?} brackets={brackets}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_heritage_lists_each_base_and_skips_keyword_arguments() {
+        let src = "class B :\n    pass\nclass A(B, mod.C, metaclass=M):\n    pass\nclass F(Generic[T]):\n    pass\nclass Q(make_base()):\n    pass\nclass K():\n    pass\nclass N :\n    pass\nclass Z(*bases):\n    pass\nclass D(123):\n    pass\nclass PN(None):\n    pass\nclass PT(True):\n    pass\nclass S(bases[0]):\n    pass\nclass Outer:\n    class Inner(B):\n        pass\n";
+        assert_eq!(
+            heritage_rows(Language::Python, src),
+            heritage_expected(&[
+                ("A", "extends", "B", Some("B")),
+                ("A", "extends", "mod.C", Some("mod.C")),
+                ("F", "extends", "Generic[T]", Some("Generic")),
+                ("Q", "extends", "make_base()", None),
+                ("D", "extends", "123", None),
+                ("PN", "extends", "None", None),
+                ("PT", "extends", "True", None),
+                ("S", "extends", "bases[0]", None),
+                ("Inner", "extends", "B", Some("B")),
+            ])
+        );
+    }
+
+    #[test]
+    fn javascript_heritage_keeps_an_expression_base_without_a_name() {
+        let src = "class B {}\nclass D extends B {}\nclass E extends ns.D {}\nclass G extends mixin(B) {}\nclass H {}\nclass K extends /* note */ B {}\nclass M extends bases[0] {}\nclass N extends null {}\nclass U extends undefined {}\n";
+        assert_eq!(
+            heritage_rows(Language::JavaScript, src),
+            heritage_expected(&[
+                ("K", "extends", "B", Some("B")),
+                ("M", "extends", "bases[0]", None),
+                ("N", "extends", "null", None),
+                ("U", "extends", "undefined", None),
+                ("D", "extends", "B", Some("B")),
+                ("E", "extends", "ns.D", Some("ns.D")),
+                ("G", "extends", "mixin(B)", None),
+            ])
+        );
+    }
+
+    #[test]
+    fn typescript_heritage_covers_extends_implements_and_interfaces() {
+        let src = "interface I1 {}\ninterface I2 {}\nclass Base<T> {}\nclass A extends Base<number> implements I1, I2 {}\ninterface J extends I1, I2 {}\nabstract class Abs extends Base<string> {}\nclass Plain {}\n";
+        assert_eq!(
+            heritage_rows(Language::TypeScript, src),
+            heritage_expected(&[
+                ("A", "extends", "Base<number>", Some("Base")),
+                ("A", "implements", "I1", Some("I1")),
+                ("A", "implements", "I2", Some("I2")),
+                ("J", "extends", "I1", Some("I1")),
+                ("J", "extends", "I2", Some("I2")),
+                ("Abs", "extends", "Base<string>", Some("Base")),
+            ])
+        );
+        assert_eq!(
+            heritage_rows(Language::TypeScript, "class N extends null {}\n"),
+            heritage_expected(&[("N", "extends", "null", None)])
+        );
+        let tsx = "class B {}\nclass A extends B {}\n";
+        assert_eq!(
+            heritage_rows(Language::Tsx, tsx),
+            heritage_expected(&[("A", "extends", "B", Some("B"))])
+        );
+    }
+
+    #[test]
+    fn java_heritage_covers_classes_interfaces_enums_and_records() {
+        let src = "interface I1 {}\ninterface I2 {}\ninterface J extends I1, I2 {}\nclass B {}\nclass A extends B implements I1, I2 {}\nenum E implements I1 { X }\nrecord R(int x) implements I2 {}\nclass G extends B<String> {}\nclass P extends java.util.ArrayList<String> {}\nclass Q extends /* n */ B {}\nclass Plain {}\n";
+        assert_eq!(
+            heritage_rows(Language::Java, src),
+            heritage_expected(&[
+                ("Q", "extends", "B", Some("B")),
+                ("J", "extends", "I1", Some("I1")),
+                ("J", "extends", "I2", Some("I2")),
+                ("A", "extends", "B", Some("B")),
+                ("A", "implements", "I1", Some("I1")),
+                ("A", "implements", "I2", Some("I2")),
+                ("E", "implements", "I1", Some("I1")),
+                ("R", "implements", "I2", Some("I2")),
+                ("G", "extends", "B<String>", Some("B")),
+                (
+                    "P",
+                    "extends",
+                    "java.util.ArrayList<String>",
+                    Some("java.util.ArrayList")
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn rust_heritage_is_a_trait_impl_and_nothing_else() {
+        // An inherent impl and a trait with supertraits give no row.
+        let src = "trait Tr {}\ntrait Sup: Tr {}\nstruct Foo;\nstruct Bar;\nimpl std::fmt::Display for Foo {\n    fn fmt(&self) {}\n}\nimpl<T> From<T> for Bar {\n    fn from(t: T) -> Bar { Bar }\n}\nimpl Tr for Vec<u8> {}\nimpl !Send for Foo {}\nimpl Foo {\n    fn inherent() {}\n}\n";
+        assert_eq!(
+            heritage_rows(Language::Rust, src),
+            heritage_expected(&[
+                (
+                    "Foo",
+                    "implements",
+                    "std::fmt::Display",
+                    Some("std::fmt::Display")
+                ),
+                ("Bar", "implements", "From<T>", Some("From")),
+                ("Vec<u8>", "implements", "Tr", Some("Tr")),
+            ])
+        );
+    }
+
+    #[test]
+    fn cpp_heritage_lists_bases_without_access_specifiers() {
+        let src = "namespace ns { struct C {}; }\nstruct B {};\nclass D {};\nclass A : public B, private ns::C, public D<int> {};\nstruct S : B {};\nclass V : virtual public B {};\ntemplate <class T> class X : public Base<T> {};\nclass AD : [[deprecated]] public B {};\ntemplate <class... Bs> struct PK : Bs... {};\ntemplate <class... Bs> struct PK2 : public B, Bs... {};\ntemplate <class... Bs> struct PK3 : Bs /* c */ ... {};\nclass Fwd;\nclass Plain {};\n";
+        assert_eq!(
+            heritage_rows(Language::Cpp, src),
+            heritage_expected(&[
+                ("AD", "extends", "B", Some("B")),
+                // A pack stands for any number of bases: its text and range
+                // keep the `...`, and it has no single lookup name.
+                ("PK", "extends", "Bs...", None),
+                ("PK2", "extends", "B", Some("B")),
+                ("PK2", "extends", "Bs...", None),
+                ("PK3", "extends", "Bs /* c */ ...", None),
+                ("A", "extends", "B", Some("B")),
+                ("A", "extends", "ns::C", Some("ns::C")),
+                ("A", "extends", "D<int>", Some("D")),
+                ("S", "extends", "B", Some("B")),
+                ("V", "extends", "B", Some("B")),
+                ("X", "extends", "Base<T>", Some("Base")),
+            ])
+        );
+    }
+
+    #[test]
+    fn go_heritage_is_an_embedded_struct_field() {
+        // A named field is no heritage, interface embedding is not recorded,
+        // and a struct nested in a field gives its outer type no row.
+        let src = "package p\ntype Base struct{}\ntype Ptr struct{}\ntype Other struct{}\ntype Gen[T any] struct{}\ntype S struct {\n\tBase\n\t*Ptr\n\tpkg.Other\n\tGen[int]\n\tname string\n}\ntype I interface {\n\tBase\n}\ntype A = Base\ntype T struct {\n\tInner struct {\n\t\tBase\n\t}\n}\n";
+        assert_eq!(
+            heritage_rows(Language::Go, src),
+            heritage_expected(&[
+                ("S", "embeds", "Base", Some("Base")),
+                ("S", "embeds", "*Ptr", Some("Ptr")),
+                ("S", "embeds", "pkg.Other", Some("pkg.Other")),
+                ("S", "embeds", "Gen[int]", Some("Gen")),
+            ])
+        );
+    }
+
+    #[test]
+    fn c_has_no_heritage() {
+        let src = "struct B { int x; };\nstruct S { struct B b; };\n";
+        assert!(heritage_rows(Language::C, src).is_empty());
+    }
+
+    // Containment facts (PR 6): the nearest enclosing container of a stored
+    // definition or of a symbol-less container (namespace, impl, module).
+    type ContainmentRow = (String, String, String, String);
+
+    /// The containment rows of a source as (child kind, child name, parent
+    /// kind, parent name), sorted. Each row is also checked: the child lies
+    /// strictly inside the parent; a child or parent that is not symbol-less
+    /// has exactly the kind, name and byte range of a stored definition; and
+    /// a container used both as a parent and as a child has one identity.
+    fn containment_rows(lang: Language, src: &str) -> Vec<ContainmentRow> {
+        let facts = parse_source(lang, src.as_bytes());
+        let symbol_less = ["namespace", "impl", "module"];
+        let stored = |kind: &str, name: &Option<String>, start: usize, end: usize| {
+            facts.definitions.iter().any(|d| {
+                d.kind == kind && d.name == *name && d.byte_start == start && d.byte_end == end
+            })
+        };
+        let mut identities = std::collections::BTreeMap::new();
+        let mut rows = Vec::new();
+        for c in &facts.containment {
+            let (child, parent) = (
+                (c.child_byte_start, c.child_byte_end),
+                (c.parent_byte_start, c.parent_byte_end),
+            );
+            assert!(
+                parent.0 <= child.0 && child.1 <= parent.1 && parent != child,
+                "{c:?}"
+            );
+            if !symbol_less.contains(&c.child_kind) {
+                assert!(
+                    stored(c.child_kind, &c.child_name, child.0, child.1),
+                    "{c:?}"
+                );
+            }
+            if !symbol_less.contains(&c.parent_kind) {
+                assert!(
+                    stored(c.parent_kind, &c.parent_name, parent.0, parent.1),
+                    "{c:?}"
+                );
+            }
+            for (range, kind, name) in [
+                (child, c.child_kind, &c.child_name),
+                (parent, c.parent_kind, &c.parent_name),
+            ] {
+                let seen = identities.entry(range).or_insert((kind, name.clone()));
+                assert_eq!(*seen, (kind, name.clone()), "one identity per range: {c:?}");
+            }
+            rows.push((
+                c.child_kind.to_string(),
+                c.child_name.clone().unwrap_or_default(),
+                c.parent_kind.to_string(),
+                c.parent_name.clone().unwrap_or_default(),
+            ));
+        }
+        rows.sort();
+        rows
+    }
+
+    fn containment_expected(rows: &[(&str, &str, &str, &str)]) -> Vec<ContainmentRow> {
+        let mut out: Vec<ContainmentRow> = rows
+            .iter()
+            .map(|(a, b, c, d)| (a.to_string(), b.to_string(), c.to_string(), d.to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn python_containment_is_the_nearest_enclosing_class() {
+        // `deep` sits in a method, and a function is no container, so its
+        // parent is the class around the method.
+        let src = "class Outer:\n    class Inner:\n        def m(self):\n            def deep():\n                pass\n    def f(self):\n        pass\ndef top():\n    pass\n";
+        assert_eq!(
+            containment_rows(Language::Python, src),
+            containment_expected(&[
+                ("class", "Inner", "class", "Outer"),
+                ("function", "m", "class", "Inner"),
+                ("function", "deep", "class", "Inner"),
+                ("function", "f", "class", "Outer"),
+            ])
+        );
+    }
+
+    #[test]
+    fn javascript_containment_covers_methods_and_bound_functions_of_a_class() {
+        let src = "class C {\n  m() {}\n  f = () => {};\n  static s() {}\n}\nfunction top() {}\nconst g = () => {};\nclass D {}\n";
+        assert_eq!(
+            containment_rows(Language::JavaScript, src),
+            containment_expected(&[
+                ("method", "m", "class", "C"),
+                ("method", "f", "class", "C"),
+                ("method", "s", "class", "C"),
+            ])
+        );
+    }
+
+    #[test]
+    fn typescript_containment_chains_namespaces_and_keeps_a_dotted_name_whole() {
+        let src = "namespace A {\n  namespace B {\n    class C {\n      m() {}\n    }\n  }\n}\nnamespace X.Y {\n  interface I {}\n  enum E { P }\n}\nfunction top() {}\n";
+        assert_eq!(
+            containment_rows(Language::TypeScript, src),
+            containment_expected(&[
+                ("namespace", "B", "namespace", "A"),
+                ("class", "C", "namespace", "B"),
+                ("method", "m", "class", "C"),
+                ("interface", "I", "namespace", "X.Y"),
+                ("type", "E", "namespace", "X.Y"),
+            ])
+        );
+    }
+
+    #[test]
+    fn java_containment_covers_nested_types_constructors_and_enum_methods() {
+        let src = "class Outer {\n  class Inner {\n    Inner() {}\n    void m() {}\n  }\n  void f() {}\n  enum E { X; void g() {} }\n}\ninterface I {\n  default void d() {}\n}\n";
+        assert_eq!(
+            containment_rows(Language::Java, src),
+            containment_expected(&[
+                ("class", "Inner", "class", "Outer"),
+                ("method", "Inner", "class", "Inner"),
+                ("method", "m", "class", "Inner"),
+                ("method", "f", "class", "Outer"),
+                ("type", "E", "class", "Outer"),
+                ("method", "g", "type", "E"),
+                ("method", "d", "interface", "I"),
+            ])
+        );
+    }
+
+    #[test]
+    fn rust_containment_chains_modules_impls_and_traits() {
+        let src = "mod outer {\n    mod inner {\n        struct Foo;\n        impl Foo {\n            fn m() {}\n        }\n        trait T {\n            fn sig();\n            fn dflt() {}\n        }\n    }\n    fn free() {}\n}\nfn top() {}\n";
+        assert_eq!(
+            containment_rows(Language::Rust, src),
+            containment_expected(&[
+                ("module", "inner", "module", "outer"),
+                ("struct", "Foo", "module", "inner"),
+                ("impl", "Foo", "module", "inner"),
+                ("function", "m", "impl", "Foo"),
+                ("interface", "T", "module", "inner"),
+                ("function", "sig", "interface", "T"),
+                ("function", "dflt", "interface", "T"),
+                ("function", "free", "module", "outer"),
+            ])
+        );
+    }
+
+    #[test]
+    fn cpp_containment_chains_namespaces_and_keeps_an_out_of_line_name_whole() {
+        // `m` has a body, so it is a stored definition (a bare declaration is
+        // not). `namespace c::d` is one container; the out-of-line
+        // `Widget::run` is parented by its namespace only; the anonymous
+        // namespace has no name.
+        let src = "namespace a {\n  namespace b {\n    class C {\n      void m() {}\n    };\n  }\n}\nnamespace c::d {\n  struct S {\n    int f;\n  };\n}\nnamespace n {\n  void Widget::run() {}\n}\nnamespace {\n  void anon() {}\n}\nclass Top {};\nvoid free_fn() {}\n";
+        assert_eq!(
+            containment_rows(Language::Cpp, src),
+            containment_expected(&[
+                ("namespace", "b", "namespace", "a"),
+                ("class", "C", "namespace", "b"),
+                ("function", "m", "class", "C"),
+                ("struct", "S", "namespace", "c::d"),
+                ("field", "f", "struct", "S"),
+                ("function", "Widget::run", "namespace", "n"),
+                ("function", "anon", "namespace", ""),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_cpp_typedef_struct_is_a_parent_by_its_stored_definition_range() {
+        // The stored definition of `typedef struct Pt {...} Pt;` covers the
+        // whole typedef, so that range, not the struct node's, is the parent.
+        let src = "typedef struct Pt {\n  int x;\n} Pt;\n";
+        assert_eq!(
+            containment_rows(Language::Cpp, src),
+            containment_expected(&[("field", "x", "struct", "Pt")])
+        );
+    }
+
+    #[test]
+    fn go_and_c_record_no_containment() {
+        let go = "package p\ntype S struct{}\nfunc (s S) M() {}\nfunc F() {}\n";
+        assert!(containment_rows(Language::Go, go).is_empty());
+        let c = "struct S { int f; };\nint g(void) { return 0; }\n";
+        assert!(containment_rows(Language::C, c).is_empty());
+    }
+
+    #[test]
+    fn a_macro_headed_cpp_class_is_the_parent_of_its_member_functions() {
+        // `class EXPORT W {...}` is stored as a class through a function
+        // definition node, and its member functions with bodies are stored as
+        // plain functions: the stored class is their nearest container.
+        let src = "class EXPORT W {\n  void run() {}\n};\n";
+        assert_eq!(
+            containment_rows(Language::Cpp, src),
+            containment_expected(&[("function", "run", "class", "W")])
+        );
+    }
+
+    // Doc comments (PR 6): the comment block above a definition, and a Python
+    // docstring. Every expectation is written from the fixture source.
+    type DocRow = (String, &'static str, String);
+
+    /// The doc rows of a source as (definition name, form, text), sorted. Each
+    /// row is also checked: it belongs to a stored definition (by byte range),
+    /// a definition has at most one row per form, the block bytes are the
+    /// source under the recorded range, and the text is that block, cut only
+    /// when it is longer than the cap.
+    fn doc_rows(lang: Language, src: &str) -> Vec<DocRow> {
+        let facts = parse_source(lang, src.as_bytes());
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rows = Vec::new();
+        for d in &facts.doc_comments {
+            let def = facts
+                .definitions
+                .iter()
+                .find(|f| f.byte_start == d.def_byte_start && f.byte_end == d.def_byte_end)
+                .unwrap_or_else(|| panic!("no stored definition for {d:?}"));
+            assert!(
+                seen.insert((d.def_byte_start, d.def_byte_end, d.form)),
+                "two {} rows for one definition: {d:?}",
+                d.form
+            );
+            let block = &src[d.byte_start..d.byte_end];
+            if d.truncated {
+                assert!(block.len() > super::DOC_TEXT_CAP && block.starts_with(&d.text));
+                assert!(d.text.len() <= super::DOC_TEXT_CAP && d.text.len() < block.len());
+            } else {
+                assert_eq!(block, d.text, "{d:?}");
+            }
+            rows.push((def.name.clone().unwrap_or_default(), d.form, d.text.clone()));
+        }
+        rows.sort();
+        rows
+    }
+
+    fn doc_expected(rows: &[(&str, &'static str, &str)]) -> Vec<DocRow> {
+        let mut out: Vec<DocRow> = rows
+            .iter()
+            .map(|(a, b, c)| (a.to_string(), *b, c.to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    const JS_DOCS: &str = "// dangling header\n\n/** Adds. */\n/** second line of block. */\nfunction add() {}\n\n// detached by a blank line\n\nfunction detached() {}\nrun(); // explains run\nfunction afterTrailing() {}\nconst x = 1; /* trailing block\n  ends above */\nfunction afterBlock() {}\n// before export\nexport function exported() {}\n// above const\nexport const bound = () => {};\nfunction sameLine() {} // after\n/* before, same line */ function sameLine2() {}\nclass K {\n  // member doc\n  m() {}\n}\n";
+
+    #[test]
+    fn javascript_doc_comments_attach_only_as_a_contiguous_block_on_its_own_lines() {
+        assert_eq!(
+            doc_rows(Language::JavaScript, JS_DOCS),
+            doc_expected(&[
+                ("add", "above", "/** Adds. */\n/** second line of block. */"),
+                ("exported", "above", "// before export"),
+                ("bound", "above", "// above const"),
+                ("m", "above", "// member doc"),
+            ])
+        );
+    }
+
+    #[test]
+    fn crlf_line_endings_attach_the_same_comments() {
+        let crlf = JS_DOCS.replace('\n', "\r\n");
+        let names = |src: &str| -> Vec<(String, &'static str)> {
+            doc_rows(Language::JavaScript, src)
+                .into_iter()
+                .map(|(name, form, _)| (name, form))
+                .collect()
+        };
+        assert_eq!(names(&crlf), names(JS_DOCS));
+        assert_eq!(names(&crlf).len(), 4);
+    }
+
+    #[test]
+    fn python_doc_comments_are_a_hash_block_and_a_docstring() {
+        let src = "# header\n\n# a: first\n# a: second\ndef a():\n    \"\"\"Docstring of a.\"\"\"\n\n# only above\ndef b():\n    pass\n\nx = 1  # note\ndef c():\n    pass\n\n# deco doc\n@decorator\ndef d():\n    pass\n\n# both\nclass E :\n    \"\"\"Class doc.\"\"\"\n    def m(self):\n        '''method doc'''\n    def n(self):\n        # inside, not a doc\n        pass\n";
+        assert_eq!(
+            doc_rows(Language::Python, src),
+            doc_expected(&[
+                ("a", "above", "# a: first\n# a: second"),
+                ("a", "docstring", "\"\"\"Docstring of a.\"\"\""),
+                ("b", "above", "# only above"),
+                ("d", "above", "# deco doc"),
+                ("E", "above", "# both"),
+                ("E", "docstring", "\"\"\"Class doc.\"\"\""),
+                ("m", "docstring", "'''method doc'''"),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_python_docstring_may_follow_a_comment_and_a_non_string_first_statement_has_none() {
+        // Comments are no statements, so the string is still the first one.
+        let src = "def g():\n    # note\n    \"\"\"after a comment\"\"\"\n    pass\ndef h():\n    x = 1\n    \"\"\"not first\"\"\"\ndef i():\n    f\"\"\"{x}\"\"\"\n";
+        assert_eq!(
+            doc_rows(Language::Python, src),
+            doc_expected(&[("g", "docstring", "\"\"\"after a comment\"\"\"")])
+        );
+    }
+
+    #[test]
+    fn typescript_doc_comments_pass_through_export_and_find_class_members() {
+        let src = "/** I doc. */\nexport interface I {}\n/** Abs doc. */\nexport abstract class Abs {\n  /** field doc */\n  public f = () => {};\n}\n";
+        assert_eq!(
+            doc_rows(Language::TypeScript, src),
+            doc_expected(&[
+                ("I", "above", "/** I doc. */"),
+                ("Abs", "above", "/** Abs doc. */"),
+                ("f", "above", "/** field doc */"),
+            ])
+        );
+    }
+
+    #[test]
+    fn rust_doc_comments_pass_over_every_attribute() {
+        let src = "/// Doc of s.\n#[derive(Debug)]\n#[allow(dead_code)]\nstruct S;\n\n/// Detached doc.\n\n#[inline]\nfn detached() {}\n\n// plain comment\nfn plain() {}\n\n/** block doc */\npub fn blk() {}\n\nfn after() {} // trailing\nfn next() {}\n";
+        assert_eq!(
+            doc_rows(Language::Rust, src),
+            doc_expected(&[
+                ("S", "above", "/// Doc of s."),
+                ("plain", "above", "// plain comment"),
+                ("blk", "above", "/** block doc */"),
+            ])
+        );
+    }
+
+    #[test]
+    fn cpp_doc_comments_pass_through_template_and_typedef() {
+        let src = "// header\n\n/// Doc of Tpl.\ntemplate <class T>\nclass Tpl {};\n\n// doc of S\nstruct S {\n  // field f doc\n  int f;\n  int g; // trailing on g\n  int h;\n};\n// for typedef\ntypedef struct Pt { int x; } Pt;\nint k();\nvoid run() {} // trailing\nvoid next() {}\n";
+        assert_eq!(
+            doc_rows(Language::Cpp, src),
+            doc_expected(&[
+                ("Tpl", "above", "/// Doc of Tpl."),
+                ("S", "above", "// doc of S"),
+                ("f", "above", "// field f doc"),
+                ("Pt", "above", "// for typedef"),
+            ])
+        );
+    }
+
+    #[test]
+    fn c_doc_comments_attach_like_cpp_ones() {
+        let src = "// c doc\nint f(void) { return 0; }\nint g(void) { return 1; } // trailing\nint h(void) { return 2; }\n";
+        assert_eq!(
+            doc_rows(Language::C, src),
+            doc_expected(&[("f", "above", "// c doc")])
+        );
+    }
+
+    #[test]
+    fn java_doc_comments_sit_above_the_annotation_that_is_inside_the_declaration() {
+        let src = "class A {\n    /** Javadoc of m. */\n    @Override\n    public void m() {}\n\n    // line doc\n    void n() {}\n}\n/** Class doc. */\n@Deprecated\nclass B {}\n";
+        assert_eq!(
+            doc_rows(Language::Java, src),
+            doc_expected(&[
+                ("m", "above", "/** Javadoc of m. */"),
+                ("n", "above", "// line doc"),
+                ("B", "above", "/** Class doc. */"),
+            ])
+        );
+    }
+
+    #[test]
+    fn go_doc_comments_sit_above_the_type_keyword_or_the_spec_in_a_group() {
+        // An ungrouped `type S ...` is wrapped by its `type` keyword on the same
+        // line; inside `type ( ... )` the comment sits directly above the spec.
+        let src = "package p\n\n// S is a type.\ntype S struct{}\n\n// F does f.\nfunc F() {}\n\n// Grouped.\ntype (\n\t// A doc.\n\tA int\n\t// B doc.\n\tB int\n)\n";
+        assert_eq!(
+            doc_rows(Language::Go, src),
+            doc_expected(&[
+                ("S", "above", "// S is a type."),
+                ("F", "above", "// F does f."),
+                ("A", "above", "// A doc."),
+                ("B", "above", "// B doc."),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_doc_text_is_cut_at_4096_bytes_on_a_character_boundary() {
+        let doc = |comment: &str| {
+            let src = format!("{comment}\nfunction big() {{}}\n");
+            let facts = parse_source(Language::JavaScript, src.as_bytes());
+            assert_eq!(facts.doc_comments.len(), 1, "{}", comment.len());
+            let d = facts.doc_comments[0].clone();
+            (d.text, d.truncated, comment.to_string())
+        };
+        // Exactly the cap: whole, not truncated.
+        let exact = format!("// {}", "a".repeat(4093));
+        let (text, truncated, _) = doc(&exact);
+        assert_eq!((text.len(), truncated), (4096, false));
+        // One byte over: cut to the cap, flagged.
+        let over = format!("// {}", "a".repeat(5000));
+        let (text, truncated, comment) = doc(&over);
+        assert_eq!((text.len(), truncated), (4096, true));
+        assert_eq!(text, comment[..4096]);
+        // A three-byte character straddles byte 4096 (it spans 4094..4097):
+        // the cut falls before it.
+        let straddle = format!("// {}€€ end", "a".repeat(4091));
+        let (text, truncated, comment) = doc(&straddle);
+        assert_eq!((text.len(), truncated), (4094, true));
+        assert_eq!(text, comment[..4094]);
     }
 }

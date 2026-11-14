@@ -17,5 +17,7 @@ matching bindings exist at other offsets. When anchor resolution fails,
 `unresolved_reason` describes the failure. Callers should also inspect
 freshness and pagination before drawing conclusions.
 
-The code-index schema version is unchanged. A live database open adds the
-lookup index; read-only MCP queries do not modify stores.
+This change did not alter the code-index schema version. A live database open
+adds the lookup index; read-only MCP queries do not modify stores. (A later
+change, the heritage, containment, doc-comment and concept-search structures,
+moved the schema to version 6; see the changelog.)

@@ -300,7 +300,7 @@ fn reimport_revalidates_every_import_without_changing_snapshot() {
         db(&h)
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
 }
 

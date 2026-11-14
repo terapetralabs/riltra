@@ -1380,7 +1380,7 @@ fn db_path(cfg: &Path, name: &str) -> PathBuf {
 }
 
 /// The code-index schema version this binary supports (`PRAGMA user_version`).
-const CODE_INDEX_SCHEMA: u32 = 5;
+const CODE_INDEX_SCHEMA: u32 = 6;
 
 fn user_version(path: &Path) -> u32 {
     let conn = rusqlite::Connection::open(path).unwrap();

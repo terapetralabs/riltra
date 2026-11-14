@@ -180,6 +180,7 @@ fn finish_snapshot_tx(
     } else {
         "stale"
     };
+    crate::concept::build_concept_index(&tx, snapshot_id)?;
     store::finish_snapshot(&tx, snapshot_id, &post, status)?;
     tx.commit().map_err(|e| e.to_string())?;
     summary.timings_ms.verify = t_verify.elapsed().as_millis() as u64;
@@ -518,6 +519,73 @@ fn ingest_file(
                         end_col: occurrence.span.end_col,
                         byte_start: occurrence.byte_start,
                         byte_end: occurrence.byte_end,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
+                    },
+                )?;
+            }
+            for heritage in &facts.heritage {
+                store::insert_heritage(
+                    conn,
+                    snapshot_id,
+                    &store::HeritageRow {
+                        file_id,
+                        subtype: heritage.subtype.clone(),
+                        relation: heritage.relation.to_string(),
+                        supertype_text: heritage.supertype_text.clone(),
+                        supertype_name: heritage.supertype_name.clone(),
+                        start_line: heritage.span.start_line,
+                        start_col: heritage.span.start_col,
+                        end_line: heritage.span.end_line,
+                        end_col: heritage.span.end_col,
+                        byte_start: heritage.byte_start,
+                        byte_end: heritage.byte_end,
+                        decl_byte_start: heritage.decl_byte_start,
+                        decl_byte_end: heritage.decl_byte_end,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
+                    },
+                )?;
+            }
+            for containment in &facts.containment {
+                store::insert_containment(
+                    conn,
+                    snapshot_id,
+                    &store::ContainmentRow {
+                        file_id,
+                        child_kind: containment.child_kind.to_string(),
+                        child_name: containment.child_name.clone(),
+                        child_byte_start: containment.child_byte_start,
+                        child_byte_end: containment.child_byte_end,
+                        parent_kind: containment.parent_kind.to_string(),
+                        parent_name: containment.parent_name.clone(),
+                        parent_byte_start: containment.parent_byte_start,
+                        parent_byte_end: containment.parent_byte_end,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
+                    },
+                )?;
+            }
+            for doc in &facts.doc_comments {
+                store::insert_doc_comment(
+                    conn,
+                    snapshot_id,
+                    &store::DocCommentRow {
+                        file_id,
+                        def_byte_start: doc.def_byte_start,
+                        def_byte_end: doc.def_byte_end,
+                        form: doc.form.to_string(),
+                        text: doc.text.clone(),
+                        truncated: doc.truncated,
+                        start_line: doc.span.start_line,
+                        start_col: doc.span.start_col,
+                        end_line: doc.span.end_line,
+                        end_col: doc.span.end_col,
+                        byte_start: doc.byte_start,
+                        byte_end: doc.byte_end,
                         provider: "syntax".to_string(),
                         grammar: grammar.clone(),
                         language: language.clone(),
@@ -3979,6 +4047,8 @@ mod tests {
             occurrences: Vec<SymRow>,
             imports: Vec<ImpRow>,
             calls: Vec<CallRow>,
+            /// The PR 6 fact tables, every column but the ids, the file as a path.
+            structures: Vec<(String, Vec<String>)>,
         }
         fn dump(conn: &rusqlite::Connection, snap_id: i64) -> Facts {
             let files = store::files_of(conn, snap_id).unwrap();
@@ -4108,12 +4178,53 @@ mod tests {
             occurrences.sort();
             imports.sort();
             calls.sort();
+            let mut structures = Vec::new();
+            for table in ["heritage", "containment", "doc_comments"] {
+                // Columns: id, snapshot_id, file_id, then the fact itself.
+                let mut st = conn
+                    .prepare(&format!("SELECT * FROM {table} WHERE snapshot_id = ?1"))
+                    .unwrap();
+                let columns = st.column_count();
+                let mut rows: Vec<String> = st
+                    .query_map([snap_id], |row| {
+                        let mut cells = vec![path_of(row.get::<_, i64>(2)?)];
+                        for i in 3..columns {
+                            cells.push(format!("{:?}", row.get::<_, rusqlite::types::Value>(i)?));
+                        }
+                        Ok(cells.join("|"))
+                    })
+                    .unwrap()
+                    .map(|r| r.unwrap())
+                    .collect();
+                rows.sort();
+                structures.push((table.to_string(), rows));
+            }
+            // The concept rows, addressed by the symbol they were built for:
+            // symbol ids differ between an incremental and a full build.
+            let mut concept: Vec<String> = conn
+                .prepare("SELECT f.path, s.kind, s.name, s.byte_start, s.byte_end, c.tokens, c.path, c.doc FROM concept_fts c JOIN symbols s ON s.id = c.rowid JOIN files f ON f.id = s.file_id WHERE s.snapshot_id = ?1")
+                .unwrap()
+                .query_map([snap_id], |row| {
+                    let mut cells = Vec::new();
+                    for i in 0..8 {
+                        cells.push(format!("{:?}", row.get::<_, rusqlite::types::Value>(i)?));
+                    }
+                    // The path comes first and is bare, like the other tables.
+                    cells[0] = row.get::<_, String>(0)?;
+                    Ok(cells.join("|"))
+                })
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            concept.sort();
+            structures.push(("concept_fts".to_string(), concept));
             Facts {
                 files: file_vec,
                 symbols,
                 occurrences,
                 imports,
                 calls,
+                structures,
             }
         }
         let home_b = tmpdir("idx-par-b-home");
@@ -4142,11 +4253,18 @@ mod tests {
         .unwrap();
         std::fs::write(repo.join("bin.py"), b"\x00\x01").unwrap();
         std::fs::write(repo.join("note.xyz"), b"plain\n").unwrap();
+        // Heritage facts: this file is unchanged (its rows are copied), while
+        // `b.py` gains a class in stage 1 (its rows are extracted again).
+        std::fs::write(
+            repo.join("h.py"),
+            b"# doc of P\nclass P :\n    def pm(self):\n        pass\nclass Q(P):\n    pass\n",
+        )
+        .unwrap();
         build_full(&home_b, "r", &repo).unwrap();
         // Stage 1: modify. Stage 2: add + delete. Stage 3: rename.
         std::fs::write(
             repo.join("b.py"),
-            b"import sys\ndef beta():\n    return sys.argv\n",
+            b"import sys\ndef beta():\n    return sys.argv\nclass Y(sys.X):\n    def ym(self):\n        \"\"\"ym doc\"\"\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -4183,6 +4301,396 @@ mod tests {
         assert_eq!(
             roles_in("moving.cpp"),
             vec!["address-of-binding", "member-access"]
+        );
+        let structures = read(&home_b).structures;
+        let table = |name: &str| -> Vec<String> {
+            structures
+                .iter()
+                .find(|(t, _)| t == name)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let rows_in = |name: &str, path: &str| -> usize {
+            table(name)
+                .iter()
+                .filter(|r| r.starts_with(&format!("{path}|")))
+                .count()
+        };
+        // h.py is copied by the incremental build, b.py is extracted again.
+        assert_eq!(rows_in("heritage", "h.py"), 1, "{:?}", table("heritage"));
+        assert_eq!(rows_in("heritage", "b.py"), 1, "{:?}", table("heritage"));
+        assert_eq!(
+            rows_in("containment", "h.py"),
+            1,
+            "{:?}",
+            table("containment")
+        );
+        assert_eq!(
+            rows_in("containment", "b.py"),
+            1,
+            "{:?}",
+            table("containment")
+        );
+        for path in ["h.py", "b.py"] {
+            assert_eq!(
+                rows_in("doc_comments", path),
+                1,
+                "{path}: {:?}",
+                table("doc_comments")
+            );
+        }
+        // Concept rows: one per symbol, and the copied file's doc text is in
+        // its row (the rows are rebuilt from the staging snapshot's symbols).
+        let concept = table("concept_fts");
+        assert_eq!(concept.len(), read(&home_b).symbols.len());
+        assert!(
+            concept
+                .iter()
+                .any(|r| r.starts_with("h.py|") && r.contains("# doc of P")),
+            "{concept:?}"
+        );
+    }
+
+    fn concept_hits(conn: &rusqlite::Connection, word: &str) -> Vec<String> {
+        conn.prepare("SELECT s.name FROM concept_fts c JOIN symbols s ON s.id = c.rowid WHERE concept_fts MATCH ?1 ORDER BY s.name")
+            .unwrap()
+            .query_map([word], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn concept_search_finds_a_definition_by_name_path_and_doc_words() {
+        let home = tmpdir("idx-concept-home");
+        let repo = tmpdir("idx-concept");
+        std::fs::write(
+            repo.join("http_client.py"),
+            b"# Fetches the remote payload.\ndef parseHTTPResponse(raw):\n    \"\"\"Decodes the wire bytes.\"\"\"\n    pass\n\ndef other():\n    pass\n",
+        )
+        .unwrap();
+        std::fs::create_dir(repo.join("net")).unwrap();
+        std::fs::write(repo.join("net/retryPolicy.py"), b"def run():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        // Name tokens, doc words of both forms, and path tokens (a camelCase
+        // path segment is split too).
+        for (word, expected) in [
+            ("response", vec!["parseHTTPResponse"]),
+            // `other` shares the file `http_client.py`, so its path matches too.
+            ("http", vec!["other", "parseHTTPResponse"]),
+            ("parse", vec!["parseHTTPResponse"]),
+            ("payload", vec!["parseHTTPResponse"]),
+            ("decodes", vec!["parseHTTPResponse"]),
+            ("wire", vec!["parseHTTPResponse"]),
+            ("retry", vec!["run"]),
+            ("policy", vec!["run"]),
+            ("net", vec!["run"]),
+            ("client", vec!["other", "parseHTTPResponse"]),
+            ("absentword", vec![]),
+        ] {
+            assert_eq!(concept_hits(&conn, word), expected, "{word}");
+        }
+        let row = |name: &str| -> (String, String, String) {
+            conn.query_row(
+                "SELECT c.tokens, c.path, c.doc FROM concept_fts c JOIN symbols s ON s.id = c.rowid WHERE s.name = ?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            row("parseHTTPResponse"),
+            (
+                "parse http response".to_string(),
+                "http_client.py http client py".to_string(),
+                "# Fetches the remote payload.\n\"\"\"Decodes the wire bytes.\"\"\"".to_string()
+            ),
+            "the doc is the `above` text, one newline, the docstring"
+        );
+        assert_eq!(
+            row("run"),
+            (
+                "run".to_string(),
+                "net/retryPolicy.py net retry policy py".to_string(),
+                String::new()
+            )
+        );
+        let count = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count("concept_fts"), count("symbols"), "one row per symbol");
+    }
+
+    #[test]
+    fn concept_rows_follow_every_rebuild_without_leaving_stale_entries() {
+        let home_inc = tmpdir("idx-concept-inc-home");
+        let home_full = tmpdir("idx-concept-full-home");
+        let repo = tmpdir("idx-concept-life");
+        std::fs::write(
+            repo.join("m.py"),
+            b"# stale doc word\ndef oldName():\n    pass\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("del.py"), b"def doomed():\n    pass\n").unwrap();
+        std::fs::write(repo.join("mv.py"), b"def traveler():\n    pass\n").unwrap();
+        std::fs::write(repo.join("keep.py"), b"def keeper():\n    pass\n").unwrap();
+        build_full(&home_inc, "r", &repo).unwrap();
+        // One incremental step: rename a definition and change its doc,
+        // delete a file, move a file.
+        std::fs::write(
+            repo.join("m.py"),
+            b"# fresh doc word\ndef newName():\n    pass\n",
+        )
+        .unwrap();
+        std::fs::remove_file(repo.join("del.py")).unwrap();
+        std::fs::create_dir(repo.join("sub")).unwrap();
+        std::fs::rename(repo.join("mv.py"), repo.join("sub/moved.py")).unwrap();
+        build(&home_inc, "r", &repo, false).unwrap();
+        build_full(&home_full, "r", &repo).unwrap();
+        for (label, home) in [("incremental", &home_inc), ("full", &home_full)] {
+            let conn = store::open_live(&store::db_path(home, "r")).unwrap();
+            let none: Vec<&str> = vec![];
+            for word in ["old", "stale", "doomed"] {
+                assert_eq!(concept_hits(&conn, word), none, "{label}: {word}");
+            }
+            for (word, expected) in [
+                ("new", "newName"),
+                ("fresh", "newName"),
+                ("traveler", "traveler"),
+                ("moved", "traveler"),
+                ("sub", "traveler"),
+            ] {
+                assert_eq!(concept_hits(&conn, word), vec![expected], "{label}: {word}");
+            }
+            let paths: Vec<String> = conn
+                .prepare("SELECT path FROM concept_fts")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            for path in &paths {
+                assert!(
+                    !path.contains("del.py") && !path.contains("mv.py"),
+                    "{label}: stale path {path}"
+                );
+            }
+            let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+            assert_eq!(count("SELECT COUNT(*) FROM concept_fts"), 3, "{label}");
+            assert_eq!(count("SELECT COUNT(*) FROM symbols"), 3, "{label}");
+            assert_eq!(
+                count("SELECT COUNT(*) FROM concept_fts c LEFT JOIN symbols s ON s.id = c.rowid WHERE s.id IS NULL"),
+                0,
+                "{label}: every concept row belongs to a symbol"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_build_stores_heritage_rows_with_their_provenance() {
+        let home = tmpdir("idx-heritage-home");
+        let repo = tmpdir("idx-heritage");
+        std::fs::write(
+            repo.join("a.py"),
+            b"class B :\n    pass\nclass A(B, mod.C):\n    pass\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("b.ts"),
+            b"interface I {}\nclass K<T> {}\nclass D extends K<number> implements I {}\n",
+        )
+        .unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        type Row = (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+        );
+        let rows: Vec<Row> = conn
+            .prepare("SELECT f.path, h.subtype, h.relation, h.supertype_text, h.supertype_name, h.provider, h.language FROM heritage h JOIN files f ON f.id = h.file_id ORDER BY f.path, h.subtype, h.relation, h.supertype_text")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let row = |path: &str, sub: &str, rel: &str, text: &str, name: &str, lang: &str| -> Row {
+            (
+                path.into(),
+                sub.into(),
+                rel.into(),
+                text.into(),
+                Some(name.to_string()),
+                "syntax".into(),
+                lang.into(),
+            )
+        };
+        assert_eq!(
+            rows,
+            vec![
+                row("a.py", "A", "extends", "B", "B", "python"),
+                row("a.py", "A", "extends", "mod.C", "mod.C", "python"),
+                row("b.ts", "D", "extends", "K<number>", "K", "typescript"),
+                row("b.ts", "D", "implements", "I", "I", "typescript"),
+            ]
+        );
+        // The declaring range is the range of the stored definition.
+        let joined: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM heritage h JOIN symbols s ON s.file_id = h.file_id AND s.byte_start = h.decl_byte_start AND s.byte_end = h.decl_byte_end AND s.name = h.subtype",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(joined, 4);
+    }
+
+    #[test]
+    fn an_index_build_stores_doc_comment_rows_for_their_definition() {
+        let home = tmpdir("idx-doc-home");
+        let repo = tmpdir("idx-doc");
+        std::fs::write(
+            repo.join("a.py"),
+            b"# above f\ndef f():\n    \"\"\"in f\"\"\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("b.rs"), b"/// above g\nfn g() {}\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        type Row = (String, String, String, i64, String, String);
+        let rows: Vec<Row> = conn
+            .prepare("SELECT f.path, d.form, d.text, d.truncated, d.provider, d.language FROM doc_comments d JOIN files f ON f.id = d.file_id ORDER BY f.path, d.form")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let row = |path: &str, form: &str, text: &str, lang: &str| -> Row {
+            (
+                path.into(),
+                form.into(),
+                text.into(),
+                0,
+                "syntax".into(),
+                lang.into(),
+            )
+        };
+        assert_eq!(
+            rows,
+            vec![
+                row("a.py", "above", "# above f", "python"),
+                row("a.py", "docstring", "\"\"\"in f\"\"\"", "python"),
+                row("b.rs", "above", "/// above g", "rust"),
+            ]
+        );
+        // The definition is addressed by file and byte range, as `symbols`
+        // stores it, and the block keeps its own span.
+        let joined: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM doc_comments d JOIN symbols s ON s.file_id = d.file_id AND s.byte_start = d.def_byte_start AND s.byte_end = d.def_byte_end AND s.name IN ('f', 'g')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(joined, 3);
+        let lines: Vec<(String, i64, i64)> = conn
+            .prepare("SELECT d.form, d.start_line, d.end_line FROM doc_comments d JOIN files f ON f.id = d.file_id WHERE f.path = 'a.py' ORDER BY d.form")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![("above".to_string(), 1, 1), ("docstring".to_string(), 3, 3)]
+        );
+    }
+
+    #[test]
+    fn an_index_build_stores_containment_rows_addressed_by_byte_range() {
+        let home = tmpdir("idx-contain-home");
+        let repo = tmpdir("idx-contain");
+        std::fs::write(
+            repo.join("a.py"),
+            b"class A :\n    def m(self):\n        pass\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("r.rs"), b"mod m {\n    fn f() {}\n}\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        type Row = (String, String, String, String, String, String, String);
+        let rows: Vec<Row> = conn
+            .prepare("SELECT f.path, c.child_kind, c.child_name, c.parent_kind, c.parent_name, c.provider, c.language FROM containment c JOIN files f ON f.id = c.file_id ORDER BY f.path, c.child_name")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let row = |path: &str, child: &str, parent_kind: &str, parent: &str, lang: &str| -> Row {
+            (
+                path.into(),
+                "function".into(),
+                child.into(),
+                parent_kind.into(),
+                parent.into(),
+                "syntax".into(),
+                lang.into(),
+            )
+        };
+        assert_eq!(
+            rows,
+            vec![
+                row("a.py", "m", "class", "A", "python"),
+                row("r.rs", "f", "module", "m", "rust"),
+            ]
+        );
+        // Identity is the file and the byte range: both children and the class
+        // parent are stored symbols, the Rust module has no symbol at all.
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM containment c JOIN symbols s ON s.file_id = c.file_id AND s.byte_start = c.child_byte_start AND s.byte_end = c.child_byte_end AND s.kind = c.child_kind AND s.name = c.child_name"),
+            2
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM containment c JOIN symbols s ON s.file_id = c.file_id AND s.byte_start = c.parent_byte_start AND s.byte_end = c.parent_byte_end AND s.kind = c.parent_kind AND s.name = c.parent_name"),
+            1,
+            "only the class parent is a stored symbol"
         );
     }
 

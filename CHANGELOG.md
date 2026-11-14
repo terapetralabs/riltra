@@ -27,8 +27,22 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 - `impact --summary` and `--include-tests` (MCP: `summary`, `include_tests`) add a counted summary of the impact traversal: totals by distance and basis, distinct dependent files, and a labelled test-path heuristic. The summary describes this traversal, `--limit` also caps candidates per node (so a small limit can lower the counts; `candidates_complete: false` says so), and `paths` is never filtered. `summary.verdict` and `summary.unresolved` are copied from the document, so they can differ with `--offset` or `--limit` (the counts do not depend on `--offset`); `candidates_complete` is also false after a path or edge budget stop, not only after the candidate cap.
 
+- `riltra index` stores heritage (supertypes), containment (nearest enclosing
+  container) and doc-comment facts, and a concept-search word table (identifier
+  words, path words and doc text of every symbol). No command or tool reports
+  them yet and `scan` output is unchanged. Scope and limits are in
+  [capabilities](docs/guide/capabilities.md#structure-and-documentation-facts):
+  names are lookup keys only and nothing is resolved; a C++ pack expansion base
+  (`Bs...`) is recorded as written and, like any base that is not a name
+  (`bases[0]`, `123`), has no lookup name.
+
 ### Changed
 
+- The code-index schema is now 6 and `PARSER_VERSION` is 14. After upgrading,
+  every code-index read answers `schema_outdated` until `riltra index` is run,
+  and `riltra changes` keeps its symbols but reports caller counts as
+  unavailable until then. The knowledge store is a separate database and is
+  not affected.
 - `impact` now lists name-matched callers as paths with `basis: "candidate-name"`, without following them further. Each impact path gains a `basis` key (`proven`, `unproven` or `candidate-name`), and the answer gains a `candidates` object. The verdict is unchanged and stays `UNKNOWN` while a candidate path exists; `completeness` counts and `visits.edges` include the candidate paths and rows.
 - `callers`, `callees`, `trace`, `impact` and `context` add `candidates` and `candidate_scope` to each `POTENTIAL_CALL` edge: the count of name-matched function and method definitions (declarations included) and their place relative to the caller (`same-file`, `imported-file`, `other-file`, `none`). `imported-file` is a file-level link, not a resolution. In the CLI output of `callers`, `callees`, `trace` and `impact` they are the last two keys of the edge object; `context` and the MCP tools sort their keys, so the two keys sit in sorted order there. Derived at read time; no schema or parser change, and the edge is not promoted to `CALLS`.
 

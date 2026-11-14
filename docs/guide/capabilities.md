@@ -50,6 +50,40 @@ automatically. Knowledge records are revisioned, and explicit bindings point
 to one record revision. A binding records a relationship, not whether the
 record itself is true.
 
+## Structure and documentation facts
+
+`riltra index` also stores three more kinds of syntax fact and a word index for
+concept search. No command or MCP tool reports them yet; they exist so that
+later answers can use them, and `scan` output is unchanged.
+
+- **Heritage**: the supertypes a declaration names. Python base classes (not
+  keyword arguments or `*splat` bases), JavaScript `extends`, TypeScript and
+  Java `extends` and `implements`, a Rust `impl Trait for Type`, C++ base
+  classes, and Go embedded struct fields. Each row keeps the supertype as
+  written and a normalised name used only as a lookup key (`Base<T>` gives
+  `Base`); nothing is resolved, so two types with the same name are not told
+  apart. A base that is not a name (a call, an index such as `bases[0]`, a
+  number, a C++ pack `Bs...`) keeps its text and has no lookup name. Rust supertraits (`trait A: B`), Go interface embedding and class
+  expressions are not recorded.
+- **Containment**: the nearest enclosing class, struct, interface, enum,
+  record, Rust `impl`, `trait` or `mod`, C++ namespace or TypeScript namespace
+  of each definition. A definition nested in a function is attached to the
+  container around that function. Go and C record none (a C macro-headed
+  struct is the exception).
+- **Doc comments**: the comment block directly above a definition (through
+  decorators, `export`, `template <...>` and Rust attributes), and a Python
+  docstring. A comment that follows code on its own line, or that is
+  separated by a blank line, is not attached; a licence header with no blank
+  line before the first definition is. Text is kept as written, cut at 4096
+  bytes.
+- **Concept words**: each symbol's name split into words (`parseHTTPResponse`
+  gives `parse`, `http`, `response`), its path split the same way, and its doc
+  text, in one full-text table.
+
+The index schema moved to version 6 for these. After upgrading, code-index
+reads answer `schema_outdated` until `riltra index` is run; the knowledge store
+is separate and is not affected.
+
 ## Changed definitions
 
 `riltra changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]`

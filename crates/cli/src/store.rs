@@ -10,7 +10,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 /// Current schema version (`PRAGMA user_version`).
 /// 5: the `reference_occurrences` table (E7 Slice 2).
-pub const SCHEMA_VERSION: u32 = 5;
+/// 6: the `heritage`, `containment` and `doc_comments` tables and the `concept_fts` search table (PR 6; nothing reads them yet).
+pub const SCHEMA_VERSION: u32 = 6;
 /// Parser/extraction version. Bump whenever `syntax.rs` extraction or the
 /// syntax edges derived from it change; freshness treats a mismatch as stale
 /// (never silently current).
@@ -32,7 +33,8 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// bound to a function are definitions (their calls stay unowned).
 /// 13: C/C++ `class EXPORT Name {...}` (a macro between the keyword and the name)
 /// is a class or struct definition, not a function.
-pub const PARSER_VERSION: u32 = 13;
+/// 14: heritage, containment and doc-comment facts are extracted and stored (no document reports them yet).
+pub const PARSER_VERSION: u32 = 14;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.
@@ -230,6 +232,37 @@ CREATE TABLE IF NOT EXISTS reference_occurrences (
   provider TEXT NOT NULL, grammar TEXT NOT NULL, language TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ref_occ_name ON reference_occurrences(snapshot_id, name);
+CREATE TABLE IF NOT EXISTS heritage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+  file_id INTEGER NOT NULL, subtype TEXT NOT NULL, relation TEXT NOT NULL,
+  supertype_text TEXT NOT NULL, supertype_name TEXT NULL,
+  start_line INTEGER NOT NULL, start_col INTEGER NOT NULL,
+  end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
+  byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+  decl_byte_start INTEGER NOT NULL, decl_byte_end INTEGER NOT NULL,
+  provider TEXT NOT NULL, grammar TEXT NOT NULL, language TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS containment (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+  file_id INTEGER NOT NULL,
+  child_kind TEXT NOT NULL, child_name TEXT NULL,
+  child_byte_start INTEGER NOT NULL, child_byte_end INTEGER NOT NULL,
+  parent_kind TEXT NOT NULL, parent_name TEXT NULL,
+  parent_byte_start INTEGER NOT NULL, parent_byte_end INTEGER NOT NULL,
+  provider TEXT NOT NULL, grammar TEXT NOT NULL, language TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS doc_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+  file_id INTEGER NOT NULL,
+  def_byte_start INTEGER NOT NULL, def_byte_end INTEGER NOT NULL,
+  form TEXT NOT NULL, text TEXT NOT NULL, truncated INTEGER NOT NULL,
+  start_line INTEGER NOT NULL, start_col INTEGER NOT NULL,
+  end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
+  byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+  provider TEXT NOT NULL, grammar TEXT NOT NULL, language TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_doc_comments_def ON doc_comments(snapshot_id, file_id, def_byte_start, def_byte_end);
+CREATE VIRTUAL TABLE IF NOT EXISTS concept_fts USING fts5(tokens, path, doc, tokenize='unicode61');
 CREATE TABLE IF NOT EXISTS code_edges (
   id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
   file_id INTEGER NOT NULL,
@@ -301,7 +334,8 @@ fn ensure_additive_indexes(conn: &Connection) -> Result<(), String> {
 /// Bring any database to the current schema in ONE explicit transaction:
 /// empty files are built at current, v1 gains nonce backfill, v2 gains the
 /// semantic tables, v3 gains the callee columns + the edges table, v4 gains
-/// the occurrence table. Any failure rolls back: version marker and readable
+/// the occurrence table, v5 gains the heritage, containment, doc_comments and
+/// concept_fts structures. Any failure rolls back: version marker and readable
 /// data stay exactly as before. Newer versions are rejected, never guessed.
 pub fn migrate(conn: &Connection) -> Result<(), String> {
     let version: u32 = conn
@@ -424,6 +458,68 @@ pub struct SymbolRow {
     pub file_id: i64,
     pub kind: String,
     pub name: Option<String>,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub provider: String,
+    pub grammar: String,
+    pub language: String,
+}
+
+/// One heritage fact (PR 6): a type declaration naming a supertype. The
+/// supertype is stored as written, with its lookup key; the declaring range is
+/// the stored definition's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeritageRow {
+    pub file_id: i64,
+    pub subtype: String,
+    pub relation: String,
+    pub supertype_text: String,
+    pub supertype_name: Option<String>,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub decl_byte_start: usize,
+    pub decl_byte_end: usize,
+    pub provider: String,
+    pub grammar: String,
+    pub language: String,
+}
+
+/// One containment fact (PR 6): a definition, or a symbol-less container, and
+/// its nearest enclosing container, each addressed by file and byte range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainmentRow {
+    pub file_id: i64,
+    pub child_kind: String,
+    pub child_name: Option<String>,
+    pub child_byte_start: usize,
+    pub child_byte_end: usize,
+    pub parent_kind: String,
+    pub parent_name: Option<String>,
+    pub parent_byte_start: usize,
+    pub parent_byte_end: usize,
+    pub provider: String,
+    pub grammar: String,
+    pub language: String,
+}
+
+/// One doc comment fact (PR 6): the block above a definition, or its docstring,
+/// addressed by the definition's file and byte range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocCommentRow {
+    pub file_id: i64,
+    pub def_byte_start: usize,
+    pub def_byte_end: usize,
+    pub form: String,
+    pub text: String,
+    pub truncated: bool,
     pub start_line: u32,
     pub start_col: u32,
     pub end_line: u32,
@@ -1227,10 +1323,11 @@ pub fn live_base(conn: &Connection) -> Result<PromoteBase, String> {
 /// Copy one staging snapshot into the live database inside a single
 /// transaction: readers see the old snapshot or the new one, never a mix.
 /// FTS rows follow automatically through the insert/delete triggers. The
-/// staging build must have been based on `base`: any live advance (new
-/// snapshot or committed semantic import) aborts with a `semantic-changed`
-/// error and the live database untouched. On any other failure the live
-/// snapshot is rolled back intact.
+/// concept rows are copied explicitly, keeping their rowids, because
+/// `concept_fts` has no triggers. The staging build must have been based on
+/// `base`: any live advance (new snapshot or committed semantic import) aborts
+/// with a `semantic-changed` error and the live database untouched. On any
+/// other failure the live snapshot is rolled back intact.
 pub fn promote_staging(
     live: &Connection,
     staging: &Path,
@@ -1257,12 +1354,20 @@ pub fn promote_staging(
              DELETE FROM semantic_facts;
              DELETE FROM semantic_imports;
              DELETE FROM code_edges;
+             DELETE FROM heritage;
+             DELETE FROM containment;
+             DELETE FROM doc_comments;
+             DELETE FROM concept_fts;
              INSERT INTO snapshots SELECT * FROM src.snapshots;
              INSERT INTO files SELECT * FROM src.files;
              INSERT INTO symbols SELECT * FROM src.symbols;
              INSERT INTO imports SELECT * FROM src.imports;
              INSERT INTO calls SELECT * FROM src.calls;
              INSERT INTO reference_occurrences SELECT * FROM src.reference_occurrences;
+             INSERT INTO heritage SELECT * FROM src.heritage;
+             INSERT INTO containment SELECT * FROM src.containment;
+             INSERT INTO doc_comments SELECT * FROM src.doc_comments;
+             INSERT INTO concept_fts(rowid, tokens, path, doc) SELECT rowid, tokens, path, doc FROM src.concept_fts;
              INSERT INTO semantic_imports SELECT * FROM src.semantic_imports;
              INSERT INTO semantic_facts SELECT * FROM src.semantic_facts;
              INSERT INTO code_edges SELECT * FROM src.code_edges;
@@ -1370,8 +1475,11 @@ pub fn record_file_map(staging: &Connection, old_id: i64, new_id: i64) -> Result
     Ok(())
 }
 
-/// Bulk-copy every mapped file's symbols/imports/calls/occurrences in four
-/// joined statements. Column lists mirror the matching `insert_*` functions.
+/// Bulk-copy every mapped file's symbols/imports/calls/occurrences/heritage/
+/// containment/doc comments in seven joined statements. Column lists mirror
+/// the matching `insert_*` functions. `concept_fts` is NOT copied here: it is
+/// rebuilt from the staging snapshot's own symbols at the end of every build
+/// (a later round), because symbol ids are new in staging.
 /// Rejected alternative: per-file filtered child copies — one full snapshot
 /// scan per file without a `file_id` index (quadratic at MMSP scale).
 pub fn copy_mapped_facts(
@@ -1379,13 +1487,18 @@ pub fn copy_mapped_facts(
     new_snapshot_id: i64,
     old_snapshot_id: i64,
 ) -> Result<CopiedTotals, String> {
-    // The occurrence copy has no counter of its own: no document reports it.
-    let mut counts = [0u64; 4];
+    // Only counts[0..3] (symbols, imports, calls) are reported. The occurrence,
+    // heritage, containment and doc-comment copies have no counter of their
+    // own: no document reports them yet.
+    let mut counts = [0u64; 7];
     for (i, (table, extra)) in [
         ("symbols", "kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
         ("imports", "text, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
         ("calls", "name, start_line, start_col, end_line, end_col, byte_start, byte_end, callee_start_line, callee_start_col, callee_end_line, callee_end_col, callee_byte_start, callee_byte_end, tcallee_start_line, tcallee_start_col, tcallee_end_line, tcallee_end_col, tcallee_byte_start, tcallee_byte_end, unresolved, provider, grammar, language"),
         ("reference_occurrences", "name, role, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
+        ("heritage", "subtype, relation, supertype_text, supertype_name, start_line, start_col, end_line, end_col, byte_start, byte_end, decl_byte_start, decl_byte_end, provider, grammar, language"),
+        ("containment", "child_kind, child_name, child_byte_start, child_byte_end, parent_kind, parent_name, parent_byte_start, parent_byte_end, provider, grammar, language"),
+        ("doc_comments", "def_byte_start, def_byte_end, form, text, truncated, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
     ]
     .iter()
     .enumerate()
@@ -1641,6 +1754,94 @@ pub fn insert_reference_occurrence(
             occurrence.provider,
             occurrence.grammar,
             occurrence.language,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn insert_heritage(
+    conn: &Connection,
+    snapshot_id: i64,
+    heritage: &HeritageRow,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO heritage (snapshot_id, file_id, subtype, relation, supertype_text, supertype_name, start_line, start_col, end_line, end_col, byte_start, byte_end, decl_byte_start, decl_byte_end, provider, grammar, language) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+        params![
+            snapshot_id,
+            heritage.file_id,
+            heritage.subtype,
+            heritage.relation,
+            heritage.supertype_text,
+            heritage.supertype_name,
+            heritage.start_line as i64,
+            heritage.start_col as i64,
+            heritage.end_line as i64,
+            heritage.end_col as i64,
+            heritage.byte_start as i64,
+            heritage.byte_end as i64,
+            heritage.decl_byte_start as i64,
+            heritage.decl_byte_end as i64,
+            heritage.provider,
+            heritage.grammar,
+            heritage.language,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn insert_containment(
+    conn: &Connection,
+    snapshot_id: i64,
+    row: &ContainmentRow,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO containment (snapshot_id, file_id, child_kind, child_name, child_byte_start, child_byte_end, parent_kind, parent_name, parent_byte_start, parent_byte_end, provider, grammar, language) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            snapshot_id,
+            row.file_id,
+            row.child_kind,
+            row.child_name,
+            row.child_byte_start as i64,
+            row.child_byte_end as i64,
+            row.parent_kind,
+            row.parent_name,
+            row.parent_byte_start as i64,
+            row.parent_byte_end as i64,
+            row.provider,
+            row.grammar,
+            row.language,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn insert_doc_comment(
+    conn: &Connection,
+    snapshot_id: i64,
+    row: &DocCommentRow,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO doc_comments (snapshot_id, file_id, def_byte_start, def_byte_end, form, text, truncated, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+        params![
+            snapshot_id,
+            row.file_id,
+            row.def_byte_start as i64,
+            row.def_byte_end as i64,
+            row.form,
+            row.text,
+            row.truncated as i64,
+            row.start_line as i64,
+            row.start_col as i64,
+            row.end_line as i64,
+            row.end_col as i64,
+            row.byte_start as i64,
+            row.byte_end as i64,
+            row.provider,
+            row.grammar,
+            row.language,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -3880,7 +4081,6 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 5, "the occurrence table is schema v5");
         assert!(table_exists(&conn, "reference_occurrences"));
         assert!(occurrence_names(&conn).is_empty());
     }
@@ -4000,6 +4200,263 @@ mod tests {
             occurrence_names(&live),
             vec!["kept_a".to_string(), "kept_b".to_string()],
             "exactly the staging rows, none of the previous snapshot's"
+        );
+    }
+
+    // Schema v6 (PR 6): three fact tables and one concept-search table.
+    const NEW_STRUCTURES: [&str; 4] = ["heritage", "containment", "doc_comments", "concept_fts"];
+
+    /// One row in each new structure, written with the column names the
+    /// schema fixes. `tag` marks the row (it is a single FTS token, so it
+    /// carries no underscore); `concept_rowid` plays the symbol id.
+    fn raw_fact_rows(
+        conn: &rusqlite::Connection,
+        snapshot: i64,
+        file_id: i64,
+        tag: &str,
+        concept_rowid: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO heritage (snapshot_id, file_id, subtype, relation, supertype_text, supertype_name, start_line, start_col, end_line, end_col, byte_start, byte_end, decl_byte_start, decl_byte_end, provider, grammar, language) VALUES (?1,?2,?3,'extends','Base<T>','Base',1,10,1,17,9,16,0,40,'syntax','python:0.25.0','python')",
+            rusqlite::params![snapshot, file_id, tag],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO containment (snapshot_id, file_id, child_kind, child_name, child_byte_start, child_byte_end, parent_kind, parent_name, parent_byte_start, parent_byte_end, provider, grammar, language) VALUES (?1,?2,'function',?3,10,30,'class','C',0,40,'syntax','python:0.25.0','python')",
+            rusqlite::params![snapshot, file_id, tag],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO doc_comments (snapshot_id, file_id, def_byte_start, def_byte_end, form, text, truncated, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language) VALUES (?1,?2,10,30,'above',?3,0,1,1,1,9,0,8,'syntax','python:0.25.0','python')",
+            rusqlite::params![snapshot, file_id, tag],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO concept_fts (rowid, tokens, path, doc) VALUES (?1, ?2, 'a py', 'doc text')",
+            rusqlite::params![concept_rowid, tag],
+        )
+        .unwrap();
+    }
+
+    /// Every row of every new structure, rowid first, every cell as text.
+    fn dump_all(conn: &rusqlite::Connection) -> Vec<(String, Vec<String>)> {
+        NEW_STRUCTURES
+            .iter()
+            .map(|table| {
+                let mut statement = conn
+                    .prepare(&format!("SELECT rowid, * FROM {table} ORDER BY rowid"))
+                    .unwrap();
+                let columns = statement.column_count();
+                let rows = statement
+                    .query_map([], |row| {
+                        let mut cells = Vec::with_capacity(columns);
+                        for i in 0..columns {
+                            cells.push(format!("{:?}", row.get::<_, rusqlite::types::Value>(i)?));
+                        }
+                        Ok(cells.join("|"))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                (table.to_string(), rows)
+            })
+            .collect()
+    }
+
+    fn concept_matches(conn: &rusqlite::Connection, word: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM concept_fts WHERE concept_fts MATCH ?1",
+            [word],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_v5_database_gains_the_new_fact_structures_and_keeps_its_data() {
+        let dir = tmpdir("store-v6-migrate");
+        let path = dir.join("v5.db");
+        {
+            // A v5 database is the current schema without the four structures.
+            let conn = open_live(&path).unwrap();
+            insert_snapshot(&conn, &sample_snapshot()).unwrap();
+            conn.execute_batch(
+                "DROP TABLE heritage; DROP TABLE containment; DROP TABLE doc_comments;
+                 DROP TABLE concept_fts; PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for table in NEW_STRUCTURES {
+            assert!(!table_exists(&conn, table), "{table} must be gone");
+        }
+        migrate(&conn).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        for (table, rows) in dump_all(&conn) {
+            assert!(table_exists(&conn, &table), "{table} must exist");
+            assert!(rows.is_empty(), "{table} starts empty");
+        }
+        assert_eq!(
+            latest_snapshot(&conn).unwrap().unwrap().nonce,
+            "test-nonce-1",
+            "the existing snapshot survives the migration"
+        );
+    }
+
+    #[test]
+    fn a_v5_database_is_outdated_for_reads() {
+        let dir = tmpdir("store-v6-outdated");
+        let path = dir.join("v5.db");
+        {
+            let conn = open_live(&path).unwrap();
+            conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+        }
+        match open_read(&path) {
+            IndexRead::Outdated(5) => {}
+            other => panic!("expected Outdated(5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn promotion_replaces_every_new_fact_structure_with_the_staging_rows() {
+        let dir = tmpdir("store-v6-promote");
+        let live = open_live(&dir.join("live.db")).unwrap();
+        let old = insert_snapshot(&live, &sample_snapshot()).unwrap();
+        raw_fact_rows(&live, old, 1, "leftover", 7);
+        let staging_path = dir.join("staging.db");
+        let staging = open_live(&staging_path).unwrap();
+        let new = insert_snapshot(&staging, &sample_snapshot()).unwrap();
+        raw_fact_rows(&staging, new, 1, "keptone", 3);
+        raw_fact_rows(&staging, new, 1, "kepttwo", 9);
+        let expected = dump_all(&staging);
+        for (table, rows) in &expected {
+            assert_eq!(rows.len(), 2, "{table}: the fixture holds two rows");
+        }
+        drop(staging);
+        let base = live_base(&live).unwrap();
+        promote_staging(&live, &staging_path, &base).unwrap();
+        // Table by table: exactly the staging rows, rowids and snapshot ids
+        // included, none of the previous snapshot's.
+        for ((table, live_rows), (_, staging_rows)) in dump_all(&live).iter().zip(&expected) {
+            assert_eq!(live_rows, staging_rows, "{table}");
+        }
+        assert_eq!(concept_matches(&live, "leftover"), 0);
+        assert_eq!(concept_matches(&live, "keptone"), 1);
+        let rowid: i64 = live
+            .query_row(
+                "SELECT rowid FROM concept_fts WHERE concept_fts MATCH 'kepttwo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rowid, 9,
+            "a concept row keeps the symbol id it was built for"
+        );
+    }
+
+    #[test]
+    fn a_failed_promotion_leaves_every_new_fact_structure_as_it_was() {
+        for failure in ["semantic-changed", "mid-copy"] {
+            let dir = tmpdir(&format!("store-v6-fail-{failure}"));
+            let live = open_live(&dir.join("live.db")).unwrap();
+            let old = insert_snapshot(&live, &sample_snapshot()).unwrap();
+            raw_fact_rows(&live, old, 1, "oldrow", 5);
+            let base = live_base(&live).unwrap();
+            let staging_path = dir.join("staging.db");
+            {
+                let staging = open_live(&staging_path).unwrap();
+                let mut next = sample_snapshot();
+                next.nonce = "nonce-next".to_string();
+                let new = insert_snapshot(&staging, &next).unwrap();
+                raw_fact_rows(&staging, new, 1, "newrow", 8);
+            }
+            let before = dump_all(&live);
+            for (table, rows) in &before {
+                assert_eq!(rows.len(), 1, "{table}: the fixture holds one live row");
+            }
+            let expected_error = if failure == "semantic-changed" {
+                // A committed semantic import advances the live base.
+                meta_set(&live, "semantic_generation", "1").unwrap();
+                "semantic-changed"
+            } else {
+                // The copy fails after the earlier statements have run.
+                live.execute_batch(
+                    "CREATE TRIGGER reject_containment BEFORE INSERT ON containment
+                     BEGIN SELECT RAISE(ABORT,'containment fail'); END;",
+                )
+                .unwrap();
+                "containment fail"
+            };
+            let err = promote_staging(&live, &staging_path, &base).unwrap_err();
+            assert!(err.contains(expected_error), "{failure}: {err}");
+            assert!(live.is_autocommit(), "{failure}: the rollback finished");
+            assert_eq!(dump_all(&live), before, "{failure}: rows identical");
+            assert_eq!(concept_matches(&live, "oldrow"), 1, "{failure}");
+            assert_eq!(concept_matches(&live, "newrow"), 0, "{failure}");
+        }
+    }
+
+    #[test]
+    fn the_incremental_copy_remaps_file_ids_for_the_three_fact_tables() {
+        use super::{copy_mapped_facts, create_file_map, record_file_map};
+        let file = |path: &str| FileRow {
+            path: path.to_string(),
+            language: "python".to_string(),
+            bytes: 10,
+            digest: "d".to_string(),
+            errors: 0,
+        };
+        let dir = tmpdir("store-v6-copy");
+        let live_path = dir.join("live.db");
+        let live = open_live(&live_path).unwrap();
+        let old = insert_snapshot(&live, &sample_snapshot()).unwrap();
+        let kept_old = insert_file(&live, old, &file("kept.py")).unwrap();
+        let gone_old = insert_file(&live, old, &file("gone.py")).unwrap();
+        raw_fact_rows(&live, old, kept_old, "keptrow", 11);
+        raw_fact_rows(&live, old, gone_old, "gonerow", 12);
+
+        let staging = open_live(&dir.join("staging.db")).unwrap();
+        attach_src(&staging, &live_path).unwrap();
+        let mut next = sample_snapshot();
+        next.nonce = "nonce-next".to_string();
+        let new = insert_snapshot(&staging, &next).unwrap();
+        // A padding file makes the map a real remapping: kept.py changes id.
+        insert_file(&staging, new, &file("pad.py")).unwrap();
+        let kept_new = insert_file(&staging, new, &file("kept.py")).unwrap();
+        assert_ne!(kept_old, kept_new, "the fixture must remap the file id");
+        create_file_map(&staging).unwrap();
+        record_file_map(&staging, kept_old, kept_new).unwrap();
+        copy_mapped_facts(&staging, new, old).unwrap();
+        detach_src(&staging).unwrap();
+
+        for (table, name_column) in [
+            ("heritage", "subtype"),
+            ("containment", "child_name"),
+            ("doc_comments", "text"),
+        ] {
+            let rows: Vec<(i64, i64, String)> = staging
+                .prepare(&format!(
+                    "SELECT snapshot_id, file_id, {name_column} FROM {table}"
+                ))
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![(new, kept_new, "keptrow".to_string())],
+                "{table}: only the mapped file's row, bound to the new ids"
+            );
+        }
+        assert_eq!(
+            concept_matches(&staging, "keptrow"),
+            0,
+            "concept search rows are rebuilt from the staging symbols, never copied"
         );
     }
 }

@@ -43,6 +43,7 @@ pub struct ContextResult {
     pub graph: Vec<ContextNode>,
     pub trace: index::TraceQueryOut,
     pub knowledge: ContextKnowledge,
+    pub facts: index::FactSections,
     pub limit: usize,
     pub omitted_nodes: usize,
     pub max_bytes: usize,
@@ -178,18 +179,25 @@ fn query_conn_inner(
 ) -> Result<ContextResult, String> {
     let (canon, rel) = validate_request(root, request)?;
     let trace_request = trace_request(request);
-    let trace = index::graph_query_conn(
-        conn,
-        repo,
-        &canon,
-        &rel,
-        None,
-        &trace_request,
-        Instant::now(),
-        pinned,
-        true,
-        false,
-    )?;
+    // One read transaction: the graph and every fact section see the same
+    // pinned snapshot. The knowledge store is a separate database, read after.
+    let (trace, facts) = {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let trace = index::graph_query_tx(
+            &tx,
+            repo,
+            &canon,
+            &rel,
+            None,
+            &trace_request,
+            Instant::now(),
+            pinned,
+            true,
+            false,
+        )?;
+        let facts = fact_sections(&tx, repo, &canon, &rel, request, &trace)?;
+        (trace, facts)
+    };
     let mut graph = context_nodes(&trace);
     let omitted_nodes = graph.len().saturating_sub(request.limit);
     graph.truncate(request.limit);
@@ -198,9 +206,83 @@ fn query_conn_inner(
         graph,
         trace,
         knowledge,
+        facts,
         limit: request.limit,
         omitted_nodes,
         max_bytes: request.max_bytes,
+    })
+}
+
+/// The four fact sections, read on the caller's transaction. Only identity
+/// problems make a fact section unavailable; every other failure is an error.
+fn fact_sections(
+    tx: &rusqlite::Transaction<'_>,
+    repo: &str,
+    canon: &Path,
+    rel: &str,
+    request: &ContextRequest<'_>,
+    trace: &index::TraceQueryOut,
+) -> Result<index::FactSections, String> {
+    let snapshot_id = trace.snapshot.id;
+    let identity = index::fact_identity(tx, snapshot_id, canon, &trace.anchor)?;
+    let imports = index::import_facts(tx, snapshot_id, rel, request.limit)?;
+    let callees = index::edge_query_tx(
+        tx,
+        repo,
+        canon,
+        rel,
+        &index::EdgeRequest {
+            anchor: index::SpanQuery {
+                rel,
+                line1: request.line,
+                col1: request.col,
+                refs: false,
+            },
+            symbol: request.symbol,
+            direction: index::EdgeDir::Callees,
+            limit: request.limit,
+            offset: 0,
+        },
+        || {},
+        Some((&trace.freshness, &trace.freshness_reasons)),
+    )?;
+    let (containment, heritage) = match &identity {
+        index::FactIdentity::Span {
+            file_id,
+            byte_start,
+            byte_end,
+            name,
+            is_type,
+        } => {
+            let span = (*byte_start, *byte_end);
+            let containment = index::containment_facts(
+                tx,
+                snapshot_id,
+                canon,
+                rel,
+                *file_id,
+                span,
+                request.limit,
+            )?;
+            let heritage = index::heritage_facts(
+                tx,
+                snapshot_id,
+                *file_id,
+                span,
+                name.as_deref(),
+                *is_type,
+                request.limit,
+            )?;
+            (Some(containment), Some(heritage))
+        }
+        index::FactIdentity::Unavailable { .. } => (None, None),
+    };
+    Ok(index::FactSections {
+        identity,
+        containment,
+        heritage,
+        imports,
+        callees,
     })
 }
 
@@ -981,5 +1063,65 @@ mod tests {
         assert_eq!(distance(&right), Some(1));
         assert_eq!(distance(&root), Some(2));
         assert_eq!(distance(&other_scope), None);
+    }
+
+    #[test]
+    fn fact_sections_keep_the_pinned_snapshot_during_promotion() {
+        let home = tmpdir("context-facts-pin-home");
+        let root = tmpdir("context-facts-pin-repo").canonicalize().unwrap();
+        std::fs::write(
+            root.join("a.py"),
+            b"class Box :\n    def old_member(self):\n        return 1\n",
+        )
+        .unwrap();
+        index::build_full(&home, "r", &root).unwrap();
+        let entry = registry::RepoEntry {
+            name: "r".to_string(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+        let mut code = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let pinned_nonce = store::latest_snapshot(&code).unwrap().unwrap().nonce;
+        let request = ContextRequest {
+            path: "a.py",
+            line: 1,
+            col: 7,
+            symbol: None,
+            query: None,
+            semantic: false,
+            depth: 3,
+            limit: 20,
+            max_bytes: DEFAULT_MAX_BYTES,
+        };
+        // The promoted snapshot gains a subclass of Box in a new file. The
+        // anchor's own bytes do not change, so the pinned anchor still resolves.
+        let result = query_conn_with_hooks(
+            &mut code,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &request,
+            || {
+                std::fs::write(root.join("b.py"), b"class Child(Box):\n    pass\n").unwrap();
+                index::build_full(&home, "r", &root).unwrap();
+            },
+            || {},
+        )
+        .unwrap();
+
+        let live = store::open_live(&store::db_path(&home, "r")).unwrap();
+        assert_ne!(
+            store::latest_snapshot(&live).unwrap().unwrap().nonce,
+            pinned_nonce
+        );
+        assert_eq!(result.trace.snapshot.nonce, pinned_nonce);
+        let heritage = result.facts.heritage.as_ref().unwrap();
+        assert_eq!(heritage.subtypes.total, Some(0));
+        assert!(heritage.subtypes.rows.is_empty());
+        let members = &result.facts.containment.as_ref().unwrap().members;
+        assert_eq!(members.total, Some(1));
+        assert_eq!(members.rows[0].name.as_deref(), Some("old_member"));
+        assert!(result.facts.imports.imported_by.rows.is_empty());
     }
 }

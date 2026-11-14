@@ -53,8 +53,9 @@ record itself is true.
 ## Structure and documentation facts
 
 `riltra index` also stores three more kinds of syntax fact and a word index for
-concept search. No command or MCP tool reports them yet; they exist so that
-later answers can use them, and `scan` output is unchanged.
+concept search. `context` reports the containment and heritage facts (see
+[context fact sections](#context-fact-sections)); no other command or MCP tool
+reports the doc-comment and concept-word facts yet, and `scan` output is unchanged.
 
 - **Heritage**: the supertypes a declaration names. Python base classes (not
   keyword arguments or `*splat` bases), JavaScript `extends`, TypeScript and
@@ -83,6 +84,67 @@ later answers can use them, and `scan` output is unchanged.
 The index schema moved to version 6 for these. After upgrading, code-index
 reads answer `schema_outdated` until `riltra index` is run; the knowledge store
 is separate and is not affected.
+
+## Context fact sections
+
+`context` (by position or `--target`) always appends four sections, read on the
+same pinned snapshot as its graph. There is no flag: the byte budget bounds the
+cost. `--limit` applies to each list separately, and when `--max-bytes` is too
+small, rows are dropped in this order: imported_by, imports, subtypes,
+implementations, supertypes, members, callees, then ancestors outermost first.
+Every section has a `label`, a `status` (`ok`, `none-recorded`, `truncated` or
+`unavailable`), a `reason`, and per-list `total`, `returned`, `omitted_by_limit`
+and `omitted_by_budget`.
+
+- **containment** (label `Syntax`): `ancestors` are the enclosing scopes of the
+  anchor, innermost first, at most 16 read. A deeper chain sets
+  `truncated_depth` and `total: null`. `members` are the direct children. A
+  container's `line` comes from the live file only when those bytes still match
+  the indexed digest; otherwise it is `null`. `symbol: false` only says that no
+  symbol row exists at that container's range.
+- **heritage** (label `Heuristic`; names are lookup keys, nothing is resolved):
+  `supertypes` are the bases declared at the anchor. `implementations` (a
+  `basis` of `name-match`) are rows naming the anchor's name from another
+  declaration, for example a Rust `impl Display for Foo` for `struct Foo`.
+  `subtypes` (also `name-match`) are rows in any file whose base has the
+  anchor's name. `same_name_definitions` counts definitions with that name, and
+  same-named types are never merged. The two name lookups run only when the
+  anchor is a type (class, struct, interface, type, enum or trait, as stored);
+  for any other anchor the reason is `anchor-not-a-type`. Supertype text is cut
+  at 512 bytes (`text_truncated`).
+- **imports** (label `Syntax`, file level): `imports` are the files the anchor's
+  file imports, and `imported_by` the files that import it, each with the line of
+  the import statement. An import resolves only when its text names an indexed
+  file: Python module paths, literal relative JavaScript and TypeScript imports,
+  C and C++ `#include "..."`, and Rust `use crate::`. Other forms, and external
+  modules, are counted in `unresolved` and never listed as files.
+  The match is a text match of each import statement against indexed file
+  paths, not the `IMPORTS` edges (those carry no target). A C or C++ include
+  matches only a file of exactly the name it writes; the JavaScript and
+  TypeScript suffixes are never tried for it. A link is a lead to open, never a
+  resolution.
+- **callees**: the same edges, with the same fields, as `riltra callees` for
+  this anchor. `label` is the anchor's precision. `POTENTIAL_CALL` stays
+  `POTENTIAL_CALL`.
+
+Statuses: `none-recorded` means every list is empty. Its reason is
+`syntax-facts-none-recorded` (containment and heritage), `anchor-not-a-type` or
+`empty-result-not-coverage-proof` (imports and callees), so an empty list is
+never a proof of absence. `--target` is resolved by name on its own read before the snapshot is
+pinned (as for the other by-name commands), so a reindex between the two reads
+can pair the position with a newer snapshot; the sections themselves are all
+read on the one pinned snapshot. `unavailable` is only an identity problem: the anchor
+has no single syntax definition (`no-syntax-identity`, or
+`ambiguous-syntax-identity` with `candidates`), and the containment and heritage
+sections then say so while the graph and callees still answer. A missing index,
+an outdated schema and every other failure stay command errors, with no sections.
+
+Limits: Rust supertraits, Go interface embedding, class expressions and
+`declare` or `extern "C"` wrappers are not recorded. A Rust impl's name is its
+type text as written, so `impl<T> Display for Wrapper<T>` is stored as
+`Wrapper<T>` and does not match a `Wrapper` anchor. A semantic (SCIP) anchor is
+mapped to its enclosing syntax definition by position, never by its occurrence
+span.
 
 ## Changed definitions
 

@@ -6542,3 +6542,51 @@ fn git_or_skip() -> bool {
     }
     present
 }
+
+#[test]
+fn context_fact_sections_match_the_cli_and_stay_byte_stable_per_path() {
+    let h = home("ctx-facts");
+    let r = home("ctx-facts-repo");
+    std::fs::create_dir_all(&r).unwrap();
+    std::fs::write(
+        r.join("a.py"),
+        "class A :\n    pass\n\n\nclass B(A):\n    def m(self):\n        return 1\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &r, "w");
+    let mut s = ready(&h);
+    let first = call_tool(
+        &mut s,
+        2,
+        "riltra_context",
+        &json!({"repo": "w", "target": "A"}),
+    );
+    let second = call_tool(
+        &mut s,
+        3,
+        "riltra_context",
+        &json!({"repo": "w", "target": "A"}),
+    );
+    assert!(!is_error(&first), "{first}");
+    let got = doc(&first);
+    for key in ["containment", "heritage", "imports", "callees"] {
+        assert!(got.get(key).is_some(), "{key} missing: {got}");
+    }
+    assert_eq!(got["heritage"]["subtypes"]["rows"][0]["subtype"], "B");
+    // The MCP and CLI documents agree as JSON; bytes are checked per path.
+    assert_eq!(
+        got,
+        cli_json(&h, &["context", "--repo", "w", "--target", "A"])
+    );
+    assert_eq!(
+        first["content"][0]["text"], second["content"][0]["text"],
+        "MCP bytes must be stable"
+    );
+    let (a, b) = (
+        run_cli(&h, &["context", "--repo", "w", "--target", "A"]).1,
+        run_cli(&h, &["context", "--repo", "w", "--target", "A"]).1,
+    );
+    assert_eq!(a, b, "CLI bytes must be stable");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}

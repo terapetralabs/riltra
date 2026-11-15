@@ -99,6 +99,30 @@ parameter is tuned.
 Selectivity (B1 and B3): a token matching more than 50 files is dropped and counted. The count is
 taken on the tool's raw result (supported-language files, tests included), before the universe filter.
 
+- **R lexical concept search (PR 9)**: one `riltra query --repo t --text <query text> --limit 1000`
+  call on B3's scratch index, in the same per-task loop (no second index build). Symbols collapse
+  to files at their best rank, restricted to the candidate universe. There is one call and no
+  paging, so rows past the first 1000 symbols are unreachable and are not measured. The ranker is
+  the frozen rule set R0 in `ranker-2026-11.md`. It is lexical only: it follows no call edges.
+  - Status per task: `ok`; `index-failed` when B3's index was not built (the same detail as B3);
+    `search-error` (non-zero exit, unparsable JSON, or a `reason` other than `no-match` or
+    `no-extractable-term`). A failure is never recorded as an empty list.
+  - `abstained` = status `ok` with `reason` `no-extractable-term`. Abstentions are counted apart
+    from failures. In the pair verdicts an abstention is an `ok` task with found@10 = 0.
+
+**name_hint (per task, descriptive heuristic)**: true when a gold path, or its lowercase file stem,
+occurs as a substring of the lowercase query text. It uses git and the manifest only, never Riltra
+output. It is **not a ceiling and not a lower or upper bound**, and it errs in both directions: a
+gold `storage.rs` with the query `evict_entry` is false, although the symbol name is a direct hint;
+the stem `main` matches inside `maintain`, although no file `main` is named. The plan's ceiling
+("tasks whose gold file is named nowhere in the text") is deferred: a sound version needs symbol
+names, which come from a parser, not from git.
+
+**Output change (PR 9)**: `run` output gains the `R` block per task, the `R` summary (with
+`abstained`), three pairs (`R-B1`, `R-B2`, `R-B3`), and the `name_hint` true/false counts. PR 8
+outputs are therefore not byte-comparable with PR 9 outputs. `rules_version` stays `pr8-rules-1`:
+the task rules did not change.
+
 ## Metrics and verdicts
 
 Per task and per baseline, counts only: `n` (scored gold files), `found@5`, `found@10` (gold files in

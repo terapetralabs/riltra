@@ -48,6 +48,11 @@ pub enum Command {
         /// Also list the name occurrences of the exact symbol name.
         occurrences: bool,
     },
+    Query {
+        repo: String,
+        text: String,
+        limit: Option<String>,
+    },
     Semantic {
         op: SemanticOp,
     },
@@ -417,6 +422,27 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     offset,
                     occurrences,
                 }),
+                _ => Err(crate::usage()),
+            }
+        }
+        "query" => {
+            let mut repo = None;
+            let mut text = None;
+            let mut limit = None;
+            let mut i = 1;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--text") {
+                    text = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--limit") {
+                    limit = Some(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            match (repo, text) {
+                (Some(repo), Some(text)) => Ok(Command::Query { repo, text, limit }),
                 _ => Err(crate::usage()),
             }
         }
@@ -1105,6 +1131,23 @@ mod tests {
 
     fn p(args: &[&str]) -> Result<Command, String> {
         parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn query_takes_the_text_value_even_when_it_starts_with_a_dash() {
+        assert!(matches!(
+            p(&["query", "--repo", "r", "--text", "--save", "--limit", "5"]),
+            Ok(Command::Query { ref repo, ref text, limit: Some(ref l) })
+                if repo == "r" && text == "--save" && l == "5"
+        ));
+        assert!(matches!(
+            p(&["query", "--repo=r", "--text=a b"]),
+            Ok(Command::Query { limit: None, .. })
+        ));
+        assert!(p(&["query", "--repo", "r"]).is_err());
+        assert!(p(&["query", "--text", "a"]).is_err());
+        assert!(p(&["query", "--repo", "r", "--text", "a", "--offset", "1"]).is_err());
+        assert!(p(&["query", "--repo", "r", "--text"]).is_err());
     }
 
     #[test]

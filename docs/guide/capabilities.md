@@ -37,6 +37,18 @@ adds an exact-name census of occurrences such as member accesses, address of a
 member, and same-file macro arguments. It is a name census, not a resolved
 binding; an empty result does not prove that a name is unused.
 
+`query --repo <name> --text <text> [--limit <n>]` (MCP `riltra_code_query`) is
+lexical concept search: it ranks indexed definitions for a free text by the
+words of their names, paths and doc comments (BM25 over the concept index). It
+is lexical only: it does not follow call edges, does not match meaning, and
+does not print its score. Terms are the distinct lowercase words of the text
+with at least three letters, at most 64, with no stoplist and no stemming. Test
+paths rank after production paths unless a term names tests. Each result is a
+symbol with `path`, `line`, `name`, `kind` and the terms that matched it. The
+default limit is 20 and the maximum is 1000; the text is at most 16384 bytes.
+A text with no term answers `no-extractable-term`, and a text that matches no
+indexed definition answers `no-match`; neither proves that a concept is absent.
+
 Syntax-only call sites are `POTENTIAL_CALL` candidates matched by name. They
 are not resolved to targets. A `CALLS` edge requires semantic evidence that
 Riltra checked against the source. Traces are bounded plausible paths, not
@@ -299,7 +311,7 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves fifteen local stdio tools. Fourteen read repository,
+`riltra mcp` serves sixteen local stdio tools. Fifteen read repository,
 index, code, and knowledge data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the

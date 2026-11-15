@@ -33,8 +33,11 @@ SHORT = 12                # short sha length used in tracked rows
 BM25_K1 = 1.2
 BM25_B = 0.75
 TASK_INDEX_NAME = "t"
-BASELINES = ("B1", "B2", "B3")
-PAIRS = (("B1", "B2"), ("B1", "B3"), ("B2", "B3"))
+BASELINES = ("B1", "B2", "B3", "R")
+PAIRS = (("B1", "B2"), ("B1", "B3"), ("B2", "B3"), ("R", "B1"), ("R", "B2"), ("R", "B3"))
+QUERY_LIMIT = 1000        # R: one `riltra query` call, the maximum page; rows past it are unreachable
+R_ABSTAIN = "no-extractable-term"   # R abstains (status ok) when the query text has no term
+R_REASONS = (None, "no-match", R_ABSTAIN)
 EXCLUSION_KEYS = ("merges", "over_max_files", "no_supported_file", "no_gold")
 
 # Rule 1 step 3: the extension list copied from classify() in crates/cli/src/syntax.rs
@@ -328,6 +331,18 @@ def git_grep_files(repo, parent, token):
     return files
 
 
+def name_hint(gold, query_text):
+    """Descriptive heuristic, not a ceiling and not a bound: a gold path, or the lowercase
+    stem of one, occurs as a substring of the lowercase query text. Git and the manifest only."""
+    text = query_text.lower()
+    for path in gold:
+        low = path.lower()
+        stem = posixpath.splitext(posixpath.basename(low))[0]
+        if low in text or (stem and stem in text):
+            return True
+    return False
+
+
 def b1_collect(repo, parent, tokens):
     """B1 raw matches per token: files of the parent tree (supported pathspecs, tests included)."""
     return {token: git_grep_files(repo, parent, token) for token in tokens}
@@ -371,6 +386,57 @@ def compare_pair(row, a, b):
     return "tie"
 
 
+def parse_query(stdout):
+    """(reason, [paths]) from one query document, or None when the JSON is not the expected shape."""
+    try:
+        doc = json.loads(stdout.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    results = doc.get("results")
+    total = doc.get("total")
+    reason = doc.get("reason")
+    if not isinstance(results, list) or not isinstance(total, int) or isinstance(total, bool):
+        return None
+    if reason is not None and not isinstance(reason, str):
+        return None
+    paths = []
+    for hit in results:
+        if not isinstance(hit, dict) or not isinstance(hit.get("path"), str):
+            return None
+        paths.append(hit["path"])
+    return reason, paths
+
+
+def r_measure(riltra, env, query_text, universe, gold):
+    """R on the task's scratch index (B3's, no second build): one query call, symbols
+    collapsed to files at best rank, restricted to the candidate universe. A failure is a
+    search-error row, never an empty list."""
+    args = ["query", "--repo", TASK_INDEX_NAME, "--text", query_text, "--limit", str(QUERY_LIMIT)]
+    try:
+        code, stdout = run_riltra(riltra, args, env)
+    except OSError as error:
+        return {"status": "search-error", "detail": "cannot start riltra for query (%s)" % error.strerror}
+    if code != 0:
+        return {"status": "search-error", "detail": "query exited %d" % code}
+    parsed = parse_query(stdout)
+    if parsed is None:
+        return {"status": "search-error", "detail": "unparsable query JSON"}
+    reason, paths = parsed
+    if reason not in R_REASONS:
+        return {"status": "search-error", "detail": "unexpected query reason"}
+    allowed = set(universe)
+    ranked = []
+    seen = set()
+    for path in paths:
+        if path in allowed and path not in seen:
+            seen.add(path)
+            ranked.append(path)
+    return dict(status="ok", abstained=(reason == R_ABSTAIN), reason=reason,
+                **metrics(ranked, gold))
+
+
 def extract_tree(repo, rev, dest):
     data = git_bytes(repo, "archive", rev)
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
@@ -402,7 +468,7 @@ def parse_page(stdout):
     return total, paths
 
 
-def b3_index_and_search(riltra, repo, parent, tokens, task_dir):
+def b3_index_and_search(riltra, repo, parent, tokens, task_dir, after_index=None):
     src = os.path.join(task_dir, "src")
     home = os.path.join(task_dir, "home")
     os.makedirs(src)
@@ -420,6 +486,8 @@ def b3_index_and_search(riltra, repo, parent, tokens, task_dir):
                 return "index-failed", "riltra %s exited %d" % (args[0], code), None
     except OSError as error:
         return "index-failed", "cannot start riltra (%s)" % error.strerror, None
+    if after_index is not None:
+        after_index(env)
     sets = {}
     for token in tokens:
         files = set()
@@ -449,15 +517,16 @@ def b3_index_and_search(riltra, repo, parent, tokens, task_dir):
     return "ok", "", sets
 
 
-def b3_collect(riltra, repo, parent, tokens, task_dir):
+def b3_collect(riltra, repo, parent, tokens, task_dir, after_index=None):
     """B3 raw matches per token from a fresh index of the parent tree.
 
-    Returns (status, detail, sets); sets is None unless status is ok. task_dir must not exist;
-    it is removed afterwards.
+    Returns (status, detail, sets); sets is None unless status is ok. after_index(env), when
+    given, runs on the same scratch index before it is removed (R uses it). task_dir must not
+    exist; it is removed afterwards.
     """
     os.makedirs(task_dir)
     try:
-        return b3_index_and_search(riltra, repo, parent, tokens, task_dir)
+        return b3_index_and_search(riltra, repo, parent, tokens, task_dir, after_index)
     finally:
         remove_tree(task_dir)
 
@@ -490,12 +559,20 @@ def measure_task(repo, riltra, work, row):
     result["B1"] = dict(status="ok", dropped=dropped, **metrics(ranked, gold))
     ranked = [path for path, _ in bm25_rank(universe, query)]
     result["B2"] = dict(status="ok", **metrics(ranked, gold))
-    status, detail, sets = b3_collect(riltra, repo, parent, tokens, os.path.join(work, row["sha"]))
+    r_rows = {}
+
+    def run_r(env):
+        r_rows["R"] = r_measure(riltra, env, query, universe, gold)
+
+    status, detail, sets = b3_collect(riltra, repo, parent, tokens, os.path.join(work, row["sha"]), run_r)
     if status == "ok":
         ranked, dropped = score_sets(sets, universe)
         result["B3"] = dict(status="ok", dropped=dropped, **metrics(ranked, gold))
     else:
         result["B3"] = {"status": status, "detail": detail, "token_count": len(tokens)}
+    # R needs B3's scratch index: when that index was never built, R fails with the same detail.
+    result["R"] = r_rows.get("R", {"status": status, "detail": detail})
+    result["name_hint"] = name_hint(gold, query)
     return result
 
 
@@ -505,6 +582,10 @@ def summarize(results):
         ok = [r for r in results if r[name]["status"] == "ok"]
         summary[name] = {"ok": len(ok), "failed": len(results) - len(ok),
                          "hits_at_10": sum(1 for r in ok if r[name]["found10"] >= 1)}
+        if name == "R":
+            summary[name]["abstained"] = sum(1 for r in ok if r[name].get("abstained") is True)
+    hints = [r["name_hint"] for r in results]
+    summary["name_hint"] = {"true": sum(1 for h in hints if h), "false": sum(1 for h in hints if not h)}
     pairs = {}
     for a, b in PAIRS:
         verdicts = [compare_pair(r, a, b) for r in results]

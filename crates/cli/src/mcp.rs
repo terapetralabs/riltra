@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CacheScope, CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams,
-    ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolResult, ContentBlock, Implementation, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::schemars::JsonSchema;
 use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
@@ -27,6 +27,7 @@ use crate::changes;
 #[cfg(feature = "semantic-knowledge")]
 use crate::json;
 use crate::knowledge_store_absent;
+use crate::lexical;
 use crate::{
     context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_search,
     knowledge_store, paths, registry, response, store,
@@ -56,6 +57,18 @@ struct CodeSearchInput {
     /// the address of a member, same-file macro arguments): a name census,
     /// not a binding. Off by default; the document is unchanged without it.
     occurrences: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct QueryInput {
+    /// Registered repository name.
+    repo: String,
+    /// Free text. Its words become the query terms: lowercase words of at least 3 characters, words made only of numeric characters (any script) dropped, at most 64.
+    text: String,
+    /// Maximum results (default 20, range 1 to 1000).
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -364,6 +377,20 @@ impl RiltraMcp {
     }
 
     #[tool(
+        name = "riltra_code_query",
+        description = "Rank indexed symbols by the words of a free text (same document as CLI `query`). Lexical only: BM25 over symbol names, paths and doc comments, with no call-graph expansion and no semantic matching; test paths rank last unless a term names tests. When to call: to find a definition from a description in words, before the graph tools that take a `path`, `line` and `col`.",
+        annotations(
+            title = "Search indexed symbols by free text",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_query(&self, Parameters(input): Parameters<QueryInput>) -> CallToolResult {
+        blocking(move || query_doc(&input)).await
+    }
+
+    #[tool(
         name = "riltra_code_callers",
         description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: before changing a function or method, to see what appears to call it.",
         annotations(
@@ -636,6 +663,18 @@ fn doc(json_text: &str) -> CallToolResult {
             &format!("internal response assembly error: {e}"),
         ),
     }
+}
+
+/// Like `doc`, but the content text is the formatter's own bytes, so its key
+/// order matches the CLI stdout. Used by `riltra_code_query` only; every other
+/// tool keeps the `doc` behaviour. `structuredContent` is unchanged.
+fn exact_doc(json_text: &str) -> CallToolResult {
+    let mut result = doc(json_text);
+    // A parse failure comes back as an error result; its message text stays.
+    if result.is_error != Some(true) {
+        result.content = vec![ContentBlock::text(json_text)];
+    }
+    result
 }
 
 fn structured_doc(value: serde_json::Value) -> CallToolResult {
@@ -925,6 +964,49 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                 &hits,
                 census.as_ref(),
             )
+        }
+    }
+}
+
+fn query_doc(input: &QueryInput) -> CallToolResult {
+    let limit = input.limit.unwrap_or(lexical::DEFAULT_LIMIT);
+    if let Err(message) = lexical::validate(&input.text, limit) {
+        return tool_error("invalid_input", &message);
+    }
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(reg) => reg,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let entry = match registry::find(&reg, &input.repo) {
+        Some(entry) => entry,
+        None => {
+            return tool_error(
+                "not_registered",
+                &format!("unknown repository: '{}'", input.repo),
+            )
+        }
+    };
+    let recorded = entry.root.clone();
+    match store::open_read(&store::db_path(&home, &input.repo)) {
+        store::IndexRead::Missing => exact_doc(&lexical::no_index_document(
+            &input.repo,
+            &recorded,
+            &input.text,
+        )),
+        store::IndexRead::Outdated(version) => tool_error(
+            "schema_outdated",
+            &lexical::outdated_message(&input.repo, version),
+        ),
+        store::IndexRead::Ahead(version) => {
+            tool_error("schema_ahead", &lexical::ahead_message(version))
+        }
+        store::IndexRead::Error(message) => tool_error("store_error", &message),
+        store::IndexRead::Ready(mut conn) => {
+            match lexical::ready_document(&mut conn, &input.repo, &recorded, &input.text, limit) {
+                Ok(text) => exact_doc(&text),
+                Err(message) => tool_error("store_error", &message),
+            }
         }
     }
 }
@@ -2016,6 +2098,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_code_callers",
                 "riltra_code_changes",
                 "riltra_code_impact",
+                "riltra_code_query",
                 "riltra_code_search",
                 "riltra_code_semantic",
                 "riltra_code_trace",

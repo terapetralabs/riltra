@@ -6,6 +6,12 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Added
 
+- `query` (CLI) and MCP tool `riltra_code_query`: lexical concept search. It ranks
+  indexed definitions for a free text by BM25 over the concept index (names, paths and doc
+  comments), read-only and with no schema change. It is lexical only: no call-edge expansion,
+  no semantic matching, no printed score. Limits and rules are in
+  [capabilities](docs/guide/capabilities.md#search-relationships-and-freshness).
+
 - `context` (CLI and MCP `riltra_context`) appends four read-only sections: `containment`
   (enclosing scopes and direct members), `heritage` (declared supertypes, name-matched
   implementations and subtypes), `imports` (file imports and importers, with an unresolved

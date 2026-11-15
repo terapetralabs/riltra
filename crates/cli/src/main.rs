@@ -27,6 +27,7 @@ mod knowledge_search;
 mod knowledge_store;
 #[cfg(feature = "semantic-knowledge")]
 mod knowledge_vector;
+mod lexical;
 mod lsp;
 mod mcp;
 mod paths;
@@ -56,13 +57,13 @@ pub(crate) const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]\n  {NAME} query --repo <name> --text <text> [--limit <n>]
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n"
+  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  query        Rank indexed symbols by the words of a text (lexical) as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n"
     )
 }
 
@@ -307,6 +308,78 @@ fn parse_count(value: Option<&str>, fallback: usize, arg: &str) -> Result<usize,
         Some(text) => text
             .parse::<usize>()
             .map_err(|_| format!("invalid --{arg} value: '{text}'")),
+    }
+}
+
+/// `query` (PR 9): lexical concept search. Storage is only read through
+/// `open_read`: a missing index answers `no-index` and nothing is created;
+/// an outdated or newer database is refused and never migrated.
+fn cmd_query(
+    name: &str,
+    text: &str,
+    limit: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let limit = match parse_count(limit, lexical::DEFAULT_LIMIT, "limit") {
+        Ok(n) => n,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    if let Err(e) = lexical::validate(text, limit) {
+        err.push_str(&format!("error: {e}\n"));
+        return 2;
+    }
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let entry = match registry::find(&reg, name) {
+        Some(e) => e,
+        None => {
+            err.push_str(&format!("error: unknown repository: '{name}'\n"));
+            return 3;
+        }
+    };
+    let recorded = entry.root.clone();
+    match store::open_read(&store::db_path(&home, name)) {
+        store::IndexRead::Missing => {
+            *out = lexical::no_index_document(name, &recorded, text) + "\n";
+            0
+        }
+        store::IndexRead::Outdated(version) => {
+            err.push_str(&format!(
+                "error: {}\n",
+                lexical::outdated_message(name, version)
+            ));
+            3
+        }
+        store::IndexRead::Ahead(version) => {
+            err.push_str(&format!("error: {}\n", lexical::ahead_message(version)));
+            3
+        }
+        store::IndexRead::Error(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+        store::IndexRead::Ready(mut conn) => {
+            match lexical::ready_document(&mut conn, name, &recorded, text, limit) {
+                Ok(document) => {
+                    *out = document + "\n";
+                    0
+                }
+                Err(refusal) => {
+                    err.push_str(&format!("error: {}\n", refusal.message));
+                    3
+                }
+            }
+        }
     }
 }
 
@@ -624,6 +697,7 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             out,
             err,
         ),
+        Command::Query { repo, text, limit } => cmd_query(&repo, &text, limit.as_deref(), out, err),
         Command::Semantic { op } => cmd_semantic(op, out, err),
         Command::Edge { op } => cmd_edge(op, out, err),
         Command::Trace(args) => cmd_trace(args, out, err),

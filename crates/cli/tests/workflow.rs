@@ -1293,3 +1293,349 @@ fn a_cpp_qualified_definition_counts_for_its_terminal_name_only() {
     assert_eq!(edges[0]["candidates"], 1, "{edges:?}");
     assert_eq!(edges[0]["candidate_scope"], "other-file", "{edges:?}");
 }
+
+// --- PR 9: `query`, lexical concept search over `concept_fts` ----------------
+
+fn query_json(home: &Path, repo: &str, text: &str, extra: &[&str]) -> (i32, Value, String) {
+    let mut args = vec!["query", "--repo", repo, "--text", text];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(home, &args);
+    let doc = if code == 0 {
+        json_of(&out)
+    } else {
+        Value::Null
+    };
+    (code, doc, err)
+}
+
+fn query_raw(home: &Path, text: &str, extra: &[&str]) -> (i32, String, String) {
+    let mut args = vec!["query", "--repo", "r", "--text", text];
+    args.extend_from_slice(extra);
+    run(home, &args)
+}
+
+fn ranked(doc: &Value) -> Vec<(String, u64)> {
+    doc["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap().to_string(),
+                r["line"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn db_file(home: &Path, repo: &str) -> PathBuf {
+    home.join("index").join(format!("{repo}.db"))
+}
+
+#[test]
+fn query_without_an_index_is_no_index_and_creates_nothing() {
+    let h = home("q-noindex");
+    let dir = fixture(&h, "q-noindex");
+    let (code, _out, err) = run(
+        &h,
+        &["init", "--repo", &dir.to_string_lossy(), "--name", "r"],
+    );
+    assert_eq!(code, 0, "init: {err}");
+    let before = listing(&h);
+    let (code, doc, err) = query_json(&h, "r", "save", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(doc["reason"], "no-index", "{doc}");
+    assert_eq!(doc["freshness"], "unknown", "{doc}");
+    assert!(doc["results"].as_array().unwrap().is_empty());
+    assert_eq!(listing(&h), before, "a query must not create storage");
+}
+
+#[test]
+fn query_document_has_the_frozen_key_order_and_basis() {
+    let h = home("q-keys");
+    indexed(&h, "r");
+    let (code, out, err) = run(&h, &["query", "--repo", "r", "--text", "save"]);
+    assert_eq!(code, 0, "{err}");
+    let keys = [
+        "\"repo\":",
+        "\"root\":",
+        "\"snapshot\":",
+        "\"freshness\":",
+        "\"reasons\":",
+        "\"terms\":",
+        "\"results\":",
+        "\"total\":",
+        "\"truncated\":",
+        "\"reason\":",
+        "\"basis\":\"lexical-bm25-concept-fts\"",
+    ];
+    let mut at = 0;
+    for key in keys {
+        let found = out[at..]
+            .find(key)
+            .unwrap_or_else(|| panic!("{key} missing or out of order: {out}"));
+        at += found + key.len();
+    }
+    let doc = json_of(&out);
+    assert_eq!(doc["terms"], serde_json::json!(["save"]));
+    assert_eq!(doc["reason"], Value::Null);
+    assert_eq!(doc["truncated"], false);
+}
+
+#[test]
+fn query_without_a_term_is_exit_zero_with_no_extractable_term() {
+    let h = home("q-noterm");
+    indexed(&h, "r");
+    let (code, doc, err) = query_json(&h, "r", "-- ++ 12 ab", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(doc["reason"], "no-extractable-term", "{doc}");
+    assert_eq!(doc["terms"], serde_json::json!([]));
+    assert!(doc["results"].as_array().unwrap().is_empty());
+    assert_eq!(doc["total"], 0);
+}
+
+#[test]
+fn query_with_no_matching_definition_is_no_match_not_an_error() {
+    let h = home("q-nomatch");
+    indexed(&h, "r");
+    let (code, doc, err) = query_json(&h, "r", "zzqwerty", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(doc["reason"], "no-match", "{doc}");
+    assert_eq!(doc["total"], 0);
+}
+
+#[test]
+fn a_doc_comment_only_match_is_found_and_why_names_the_term() {
+    let h = home("q-doc");
+    indexed_files(
+        &h,
+        "r",
+        &[(
+            "docs.py",
+            "def brew():\n    \"\"\"Frobnicate the gizmo.\"\"\"\n    return 1\n",
+        )],
+    );
+    let (code, doc, err) = query_json(&h, "r", "gizmo", &[]);
+    assert_eq!(code, 0, "{err}");
+    let row = &doc["results"][0];
+    assert_eq!(row["name"], "brew", "{doc}");
+    assert_eq!(row["why"], serde_json::json!(["gizmo"]), "{doc}");
+}
+
+#[test]
+fn why_follows_fts_so_accents_fold_and_camel_case_does_not_split() {
+    let h = home("q-why");
+    indexed_files(
+        &h,
+        "r",
+        &[
+            (
+                "cafe.py",
+                "def brew():\n    \"\"\"café\"\"\"\n    return 1\n",
+            ),
+            (
+                "net/fetcher.py",
+                "def handler():\n    \"\"\"parseHTTP\"\"\"\n    return 1\n",
+            ),
+            ("svc/w.py", "def parse_http():\n    return 1\n"),
+        ],
+    );
+    let (code, doc, err) = query_json(&h, "r", "cafe", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        doc["results"][0]["why"],
+        serde_json::json!(["cafe"]),
+        "{doc}"
+    );
+    let (code, doc, err) = query_json(&h, "r", "parse http handler", &[]);
+    assert_eq!(code, 0, "{err}");
+    let fetcher = doc["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "net/fetcher.py")
+        .unwrap_or_else(|| panic!("the handler row is not returned: {doc}"));
+    assert_eq!(fetcher["why"], serde_json::json!(["handler"]), "{doc}");
+    let (code, doc, err) = query_json(&h, "r", "parse http", &[]);
+    assert_eq!(code, 0, "{err}");
+    let named = doc["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "parse_http")
+        .unwrap_or_else(|| panic!("parse_http is not returned: {doc}"));
+    assert_eq!(named["why"], serde_json::json!(["parse", "http"]), "{doc}");
+}
+
+#[test]
+fn ties_order_by_path_then_line_and_repeat_byte_for_byte() {
+    let h = home("q-order");
+    indexed_files(
+        &h,
+        "r",
+        &[
+            ("p/bb.py", "def widget_maker():\n    return 1\n"),
+            (
+                "p/aa.py",
+                "def widget_maker():\n    return 1\n\n\ndef widget_maker():\n    return 2\n",
+            ),
+        ],
+    );
+    let (code, first, err) = run(&h, &["query", "--repo", "r", "--text", "widget"]);
+    assert_eq!(code, 0, "{err}");
+    let (_, second, _) = run(&h, &["query", "--repo", "r", "--text", "widget"]);
+    assert_eq!(first, second, "two runs must be byte-identical");
+    assert_eq!(
+        ranked(&json_of(&first)),
+        [
+            ("p/aa.py".to_string(), 1),
+            ("p/aa.py".to_string(), 5),
+            ("p/bb.py".to_string(), 1),
+        ]
+    );
+}
+
+#[test]
+fn a_test_path_comes_last_unless_a_term_names_tests() {
+    let h = home("q-demote");
+    indexed_files(
+        &h,
+        "r",
+        &[
+            (
+                "tests/test_w.py",
+                "def widget_maker():\n    \"\"\"widget widget\"\"\"\n    return 1\n",
+            ),
+            ("src/w.py", "def widget_maker():\n    return 1\n"),
+        ],
+    );
+    let (_, doc, _) = query_json(&h, "r", "widget", &[]);
+    assert_eq!(
+        ranked(&doc),
+        [
+            ("src/w.py".to_string(), 1),
+            ("tests/test_w.py".to_string(), 1)
+        ]
+    );
+    let (_, doc, _) = query_json(&h, "r", "widget tests", &[]);
+    assert_eq!(
+        ranked(&doc),
+        [
+            ("tests/test_w.py".to_string(), 1),
+            ("src/w.py".to_string(), 1)
+        ]
+    );
+}
+
+#[test]
+fn bad_limit_and_text_are_usage_errors_with_a_named_cause() {
+    let h = home("q-usage");
+    indexed(&h, "r");
+    let long = "a".repeat(16385);
+    let cases: [(&str, Vec<&str>, &str); 5] = [
+        ("save", vec!["--limit", "0"], "--limit"),
+        ("save", vec!["--limit", "1001"], "--limit"),
+        ("save", vec!["--limit", "many"], "--limit"),
+        ("", vec![], "--text"),
+        (long.as_str(), vec![], "16384"),
+    ];
+    for (text, extra, cause) in cases {
+        let (code, out, err) = query_raw(&h, text, &extra);
+        assert_eq!(code, 2, "{extra:?}: {err}");
+        assert!(err.contains(cause), "{err}");
+        assert!(out.is_empty(), "a refused query prints nothing on stdout");
+    }
+}
+
+#[test]
+fn a_text_with_newlines_backticks_and_accents_and_a_dash_led_text_are_read_as_text() {
+    let h = home("q-text");
+    indexed(&h, "r");
+    let (code, doc, err) = query_json(&h, "r", "`save`\nCafé\tname", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(doc["terms"], serde_json::json!(["save", "café", "name"]));
+    let (code, doc, err) = query_json(&h, "r", "--save", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(doc["terms"], serde_json::json!(["save"]));
+    assert!(!doc["results"].as_array().unwrap().is_empty(), "{doc}");
+}
+
+#[test]
+fn a_migrated_index_with_no_concept_rows_is_refused_not_answered_no_match() {
+    // `search` migrates a v5 index to v6 and leaves `concept_fts` empty; the schema
+    // version alone then looks current. Simulate that state: schema 6, no concept rows.
+    let h = home("q-unbuilt");
+    indexed(&h, "r");
+    let db = db_file(&h, "r");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let symbols: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+        .unwrap();
+    assert!(symbols > 0, "the fixture has symbols");
+    conn.execute("DELETE FROM concept_fts", []).unwrap();
+    drop(conn);
+    let (code, out, err) = query_raw(&h, "save", &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("concept") && err.contains("riltra index --repo r"),
+        "{err}"
+    );
+    assert!(!err.contains("no-match"), "{err}");
+}
+
+#[test]
+fn an_outdated_database_is_refused_and_not_migrated() {
+    let h = home("q-outdated");
+    indexed(&h, "r");
+    let db = db_file(&h, "r");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("PRAGMA user_version = 5", [])
+        .unwrap();
+    let (code, out, err) = query_raw(&h, "save", &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.is_empty());
+    assert!(
+        err.contains("outdated")
+            && err.contains("riltra index --repo r")
+            && !err.contains("migrate"),
+        "{err}"
+    );
+    let version: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 5, "a query must not migrate");
+}
+
+#[test]
+fn a_newer_database_is_schema_ahead_with_a_different_hint() {
+    let h = home("q-ahead");
+    indexed(&h, "r");
+    rusqlite::Connection::open(db_file(&h, "r"))
+        .unwrap()
+        .execute("PRAGMA user_version = 7", [])
+        .unwrap();
+    let (code, out, err) = query_raw(&h, "save", &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("newer than supported v6"), "{err}");
+    assert!(err.contains("use a riltra binary"), "{err}");
+    assert!(!err.contains("outdated"), "{err}");
+}
+
+#[test]
+fn an_unreadable_database_file_is_a_store_error_with_exit_three() {
+    let h = home("q-garbage");
+    indexed(&h, "r");
+    std::fs::write(
+        db_file(&h, "r"),
+        b"this is not a sqlite database file at all",
+    )
+    .unwrap();
+    let (code, out, err) = query_raw(&h, "save", &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.is_empty());
+    assert!(err.starts_with("error: "), "{err}");
+}

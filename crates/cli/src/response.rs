@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use crate::{edges, git, ignore, index, json, knowledge, knowledge_store, semantic, store, syntax};
+use crate::{
+    edges, git, ignore, index, json, knowledge, knowledge_store, lexical, semantic, store, syntax,
+};
 
 /// One snapshot identity block, shared by search and index-status output.
 pub(crate) fn snapshot_json(snapshot: &store::Snapshot) -> String {
@@ -136,6 +138,77 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
         results.join(","),
         truncated,
         occurrences
+    )
+}
+
+// --- lexical query ---------------------------------------------------------
+
+/// Parameters for one `query` document (PR 9). `reason` is `None` when rows
+/// exist; the other values are the fixed words `no-index`, `no-match` and
+/// `no-extractable-term`.
+pub(crate) struct QueryResponse<'a> {
+    pub repo: &'a str,
+    pub root: &'a str,
+    pub snapshot: Option<&'a store::Snapshot>,
+    pub freshness: &'a str,
+    pub reasons: &'a [String],
+    pub terms: &'a [String],
+    pub answer: &'a lexical::Answer,
+    pub reason: Option<&'a str>,
+}
+
+fn query_hit_json(hit: &lexical::Hit) -> String {
+    let why: Vec<String> = hit
+        .why
+        .iter()
+        .map(|w| format!("\"{}\"", json::escape(w)))
+        .collect();
+    format!(
+        "{{\"path\":\"{}\",\"line\":{},\"name\":{},\"kind\":\"{}\",\"why\":[{}]}}",
+        json::escape(&hit.path),
+        hit.line,
+        match &hit.name {
+            Some(n) => format!("\"{}\"", json::escape(n)),
+            None => "null".to_string(),
+        },
+        json::escape(&hit.kind),
+        why.join(",")
+    )
+}
+
+/// One `query` document: the search envelope's leading keys, then `terms`,
+/// `results`, `total`, `truncated`, `reason` and `basis`.
+pub(crate) fn query_response_json(response: &QueryResponse<'_>) -> String {
+    let results: Vec<String> = response.answer.hits.iter().map(query_hit_json).collect();
+    let terms: Vec<String> = response
+        .terms
+        .iter()
+        .map(|t| format!("\"{}\"", json::escape(t)))
+        .collect();
+    let reasons: Vec<String> = response
+        .reasons
+        .iter()
+        .map(|r| format!("\"{r}\""))
+        .collect();
+    format!(
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"terms\":[{}],\"results\":[{}],\"total\":{},\"truncated\":{},\"reason\":{},\"basis\":\"{}\"}}",
+        json::escape(response.repo),
+        json::escape(response.root),
+        match response.snapshot {
+            Some(snapshot) => snapshot_json(snapshot),
+            None => "null".to_string(),
+        },
+        response.freshness,
+        reasons.join(","),
+        terms.join(","),
+        results.join(","),
+        response.answer.total,
+        response.answer.truncated,
+        match response.reason {
+            Some(reason) => format!("\"{reason}\""),
+            None => "null".to_string(),
+        },
+        lexical::BASIS
     )
 }
 

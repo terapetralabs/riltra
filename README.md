@@ -74,11 +74,11 @@ Run `riltra --help` for the full command list. Git is needed for repository
 fingerprints; without it, Riltra reports that status as unavailable instead of
 guessing.
 
-## MCP server (fourteen read-only tools, one provider-backed tool)
+## MCP server (fifteen read-only tools, one provider-backed tool)
 
 <a id="mcp-server-twelve-read-only-tools-one-provider-backed-tool"></a>
 
-Run `riltra mcp` to start a local stdio MCP server with fifteen tools: fourteen
+Run `riltra mcp` to start a local stdio MCP server with sixteen tools: fifteen
 read-only tools for repository, code, and knowledge queries, plus
 `riltra_code_semantic`, which starts the language server configured by the
 operator. That server may write its own cache, run project tools, or access the

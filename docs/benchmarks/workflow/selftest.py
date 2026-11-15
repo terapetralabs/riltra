@@ -368,25 +368,96 @@ def test_b3_control(riltra, root):
     check(status == "ok" and sets["zzqqnomatchzz"] == set(), "B3 token with no match is ok with no files")
 
 
+def test_name_hint():
+    """name_hint is a descriptive heuristic: a gold path or its lowercase stem as a substring of the query."""
+    check(H.name_hint(["base/core.py"], "Fix core parsing") is True, "name_hint: a gold stem is a substring")
+    check(H.name_hint(["Parser.java"], "fix PARSER bug") is True, "name_hint: matching is case-insensitive")
+    check(H.name_hint(["src/a/b.py"], "touch src/a/b.py now") is True, "name_hint: a gold path is a substring")
+    check(H.name_hint(["a/zq.py"], "nothing relevant here") is False, "name_hint: no gold path or stem occurs")
+    # Failure direction 1: a symbol name is a direct hint, but the file name does not occur.
+    check(H.name_hint(["storage.rs"], "evict_entry") is False,
+          "name_hint is false although the symbol name hints at the file")
+    # Failure direction 2: the stem occurs inside an unrelated word.
+    check(H.name_hint(["main.rs"], "maintain the cache") is True,
+          "name_hint is true because the stem main occurs inside maintain")
+
+
+def test_r_win_loss():
+    gold = ["g1", "g2"]
+    b1 = ["x1", "x2", "x3", "g1", "x4", "x5", "x6", "x7", "g2", "x8"]   # found@10 = 2
+    r_low = ["g1"] + ["y%d" % i for i in range(1, 10)] + ["g2"]         # found@10 = 1 (g2 at rank 11)
+    r_high = ["g1", "g2"] + ["y%d" % i for i in range(1, 9)]             # found@10 = 2
+    m1 = H.metrics(b1, gold)
+    row = {"B1": dict(m1, status="ok"), "R": dict(H.metrics(r_low, gold), status="ok")}
+    check(H.compare_pair(row, "R", "B1") == "B1", "R-B1 pair: the baseline with higher found@10 wins")
+    row["R"] = dict(H.metrics(r_high, gold), status="ok")
+    check(H.compare_pair(row, "R", "B1") == "tie", "R-B1 pair: equal found@10 is a tie")
+    row["R"] = {"status": "search-error", "detail": "x"}
+    check(H.compare_pair(row, "R", "B1") is None, "R-B1 pair: a failed R task is not part of the pair")
+    rows = [dict(row, B2={"status": "index-failed", "detail": "x"}, B3={"status": "index-failed", "detail": "x"},
+                 name_hint=False)]
+    rows[0]["R"] = dict(H.metrics(r_high, gold), status="ok", abstained=False)
+    summary = H.summarize(rows)
+    check("R-B1" in summary["pairs"] and "R-B2" in summary["pairs"] and "R-B3" in summary["pairs"],
+          "summary carries the three R pairs")
+    check(summary["R"]["ok"] == 1 and summary["R"]["failed"] == 0, "summary counts R ok and failed")
+
+
+def test_r_bogus_binary(root, repo, sha):
+    row = {"sha": short(sha["C2"]), "parent": short(sha["C1"]), "split": "tune",
+           "gold": ["base/core.py"], "test_gold": [], "gold_added_not_findable": 0}
+    work = os.path.join(root, "work-r-bogus")
+    os.makedirs(work)
+    result = H.measure_task(repo, os.path.join(root, "no-such-riltra.exe"), work, row)
+    check(result["R"]["status"] == "index-failed" and "returned" not in result["R"],
+          "R with a bogus binary is index-failed, never an empty list")
+
+
+def test_r_doc_comment(riltra, root):
+    if riltra is None:
+        print("R doc-comment control: SKIPPED, no --riltra given (R paths not exercised by this run)")
+        return
+    repo = os.path.join(root, "docrepo")
+    os.makedirs(repo)
+    git_run(repo, ["init", "-q", "-b", "main"])
+    write_files(repo, {"src/store.py": 'def handler():\n    """Frobnicate the gizmo."""\n    return 1\n',
+                       "misc/other.py": "def other():\n    return 2\n"})
+    parent = commit(repo, "Base", 1)
+    write_files(repo, {"src/store.py": 'def handler():\n    """Frobnicate the gizmo."""\n    return 3\n'})
+    sha = commit(repo, "Frobnicate the gizmo", 2)
+    row = {"sha": short(sha), "parent": short(parent), "split": "tune",
+           "gold": ["src/store.py"], "test_gold": [], "gold_added_not_findable": 0}
+    work = os.path.join(root, "work-r-doc")
+    os.makedirs(work)
+    result = H.measure_task(repo, riltra, work, row)
+    check(result["R"]["status"] == "ok" and result["R"]["found10"] == 1 and result["R"]["first_gold_rank"] == 1,
+          "R finds a gold file reachable only through a doc comment at rank 1")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--riltra", default=None)
     args = parser.parse_args()
+    riltra_path = os.path.abspath(args.riltra) if args.riltra else None
     test_set_mismatch()
     test_rule_tables()
     test_path_words_and_bm25()
     test_extract_tokens()
     test_clean_query()
     test_win_loss()
+    test_name_hint()
+    test_r_win_loss()
     if shutil.which("git") is None:
-        print("GIT-BASED CHECKS: SKIPPED, git is not on PATH (freeze, measurements, B3 not exercised)")
+        print("GIT-BASED CHECKS: SKIPPED, git is not on PATH (freeze, measurements, B3 and R not exercised)")
         print("SELFTEST PASSED: %d checks" % PASSED)
         return
     with tempfile.TemporaryDirectory() as root:
         repo, sha = test_freeze_and_rules(root)
         test_measurements(root, repo, sha)
+        test_r_bogus_binary(root, repo, sha)
         test_b3_extract_failure(root)
-        test_b3_control(os.path.abspath(args.riltra) if args.riltra else None, root)
+        test_b3_control(riltra_path, root)
+        test_r_doc_comment(riltra_path, root)
     print("SELFTEST PASSED: %d checks" % PASSED)
 
 

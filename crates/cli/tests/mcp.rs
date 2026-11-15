@@ -187,7 +187,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_fifteen_tools() {
+fn mcp_tools_list_advertises_the_sixteen_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -206,6 +206,7 @@ fn mcp_tools_list_advertises_the_fifteen_tools() {
             "riltra_code_callers",
             "riltra_code_changes",
             "riltra_code_impact",
+            "riltra_code_query",
             "riltra_code_search",
             "riltra_code_semantic",
             "riltra_code_trace",
@@ -218,7 +219,7 @@ fn mcp_tools_list_advertises_the_fifteen_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the fifteen tools"
+        "the server advertises exactly the sixteen tools"
     );
     let code_search_tool = tools
         .iter()
@@ -319,6 +320,7 @@ fn mcp_tools_list_advertises_the_fifteen_tools() {
         "riltra_code_callers",
         "riltra_code_changes",
         "riltra_code_impact",
+        "riltra_code_query",
         "riltra_code_search",
         "riltra_code_semantic",
         "riltra_code_trace",
@@ -823,6 +825,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_code_callers",
             "riltra_code_changes",
             "riltra_code_impact",
+            "riltra_code_query",
             "riltra_code_search",
             "riltra_code_semantic",
             "riltra_code_trace",
@@ -835,7 +838,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the fifteen tools"
+        "the health document must list the sixteen tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -6587,6 +6590,187 @@ fn context_fact_sections_match_the_cli_and_stay_byte_stable_per_path() {
         run_cli(&h, &["context", "--repo", "w", "--target", "A"]).1,
     );
     assert_eq!(a, b, "CLI bytes must be stable");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+// --- PR 9: `riltra_code_query` ------------------------------------------------
+
+#[test]
+fn code_query_is_read_only_and_its_schema_takes_repo_text_and_limit() {
+    let h = home("q-schema");
+    let mut s = ready(&h);
+    s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    let v = s.recv();
+    let tool = v["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|t| t["name"] == "riltra_code_query")
+        .expect("the query tool is advertised")
+        .clone();
+    assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+    assert_eq!(tool["annotations"]["idempotentHint"], true, "{tool}");
+    assert_eq!(tool["annotations"]["openWorldHint"], false, "{tool}");
+    let schema = &tool["inputSchema"];
+    let mut names: Vec<&str> = schema["properties"]
+        .as_object()
+        .expect("properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["limit", "repo", "text"], "{schema}");
+    assert_eq!(schema["required"], json!(["repo", "text"]), "{schema}");
+    assert_eq!(schema["additionalProperties"], false, "{schema}");
+    let description = tool["description"].as_str().unwrap();
+    assert!(description.contains("When to call"), "{description}");
+    assert!(
+        description.to_lowercase().contains("lexical only"),
+        "{description}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn code_query_refuses_an_index_whose_concept_rows_were_never_built() {
+    let h = home("q-unbuilt");
+    let r = home("q-unbuilt-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let db = h.join("index").join("r.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM concept_fts", []).unwrap();
+    drop(conn);
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_query",
+        &json!({"repo": "r", "text": "alpha one"}),
+    );
+    assert!(is_error(&res), "{res}");
+    let d = doc(&res);
+    assert_eq!(d["kind"], "concept_not_built", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("riltra index --repo r"),
+        "{d}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn code_query_matches_the_cli_document_byte_for_byte_and_refuses_bad_input() {
+    let h = home("q-parity");
+    let r = home("q-parity-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_query",
+        &json!({"repo": "r", "text": "alpha one"}),
+    );
+    assert!(!is_error(&res), "{res}");
+    let got = doc(&res);
+    assert_eq!(
+        got,
+        cli_json(&h, &["query", "--repo", "r", "--text", "alpha one"]),
+        "MCP/CLI parity"
+    );
+    // Byte parity: the raw text of the tool result is the CLI stdout minus its newline,
+    // so the key order is the formatter's, not a re-serialization's.
+    let (cli_code, cli_out, cli_err) =
+        run_cli(&h, &["query", "--repo", "r", "--text", "alpha one"]);
+    assert_eq!(cli_code, 0, "{cli_err}");
+    assert_eq!(
+        res["content"][0]["text"].as_str().unwrap(),
+        cli_out
+            .strip_suffix('\n')
+            .expect("CLI output ends with a newline"),
+        "raw text parity"
+    );
+    assert!(cli_out.starts_with("{\"repo\":\"r\""), "{cli_out}");
+    assert_eq!(got["basis"], "lexical-bm25-concept-fts");
+    assert!(!got["results"].as_array().unwrap().is_empty(), "{got}");
+    for (id, args) in [
+        (3i64, json!({"repo": "r", "text": ""})),
+        (4, json!({"repo": "r", "text": "alpha", "limit": 0})),
+        (5, json!({"repo": "r", "text": "alpha", "limit": 1001})),
+        (6, json!({"repo": "r", "text": "alpha", "bogus": 1})),
+    ] {
+        let res = call_tool(&mut s, id, "riltra_code_query", &args);
+        assert!(is_error(&res), "{args}: {res}");
+        if args.get("bogus").is_none() {
+            assert_eq!(doc(&res)["kind"], "invalid_input", "{args}: {res}");
+        }
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn code_query_without_an_index_is_no_index_and_creates_nothing() {
+    let h = home("q-noindex");
+    let r = home("q-noindex-repo");
+    write_search_fixture(&r);
+    init_repo(&h, &r, "r");
+    let before = listing(&h);
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_query",
+        &json!({"repo": "r", "text": "alpha"}),
+    );
+    assert!(!is_error(&res), "{res}");
+    assert_eq!(doc(&res)["reason"], "no-index", "{res}");
+    assert_eq!(listing(&h), before, "no database may be created");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn code_query_refuses_outdated_and_newer_databases_with_their_own_kinds() {
+    let h = home("q-versions");
+    let r = home("q-versions-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let db = db_path(&h, "r");
+    let mut s = ready(&h);
+    set_user_version(&db, 5);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_query",
+        &json!({"repo": "r", "text": "alpha"}),
+    );
+    assert!(is_error(&res), "{res}");
+    assert_eq!(doc(&res)["kind"], "schema_outdated", "{res}");
+    assert_eq!(user_version(&db), 5, "MCP must not migrate");
+    set_user_version(&db, 99);
+    let res = call_tool(
+        &mut s,
+        3,
+        "riltra_code_query",
+        &json!({"repo": "r", "text": "alpha"}),
+    );
+    assert!(is_error(&res), "{res}");
+    let d = doc(&res);
+    assert_eq!(d["kind"], "schema_ahead", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("use a riltra binary"),
+        "{d}"
+    );
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 }

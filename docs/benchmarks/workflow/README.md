@@ -1,17 +1,22 @@
-# Workflow query task set and baselines (PR 8)
+# Workflow query task set and baselines (PR 8; measurement rules as of PR 9b)
 
 This folder holds a frozen set of concept-search tasks built from git history alone, the
-Python 3 standard-library harness that builds and measures it, and the three baselines measured
-on its tuning split. Nothing here changes Riltra's Rust code, schema, parser, commands or MCP
-tools. PR 9 (the ranker) is the first consumer; it is the only one allowed to use the held-out
-split.
+Python 3 standard-library harness that builds and measures it, and the frozen baselines measured
+on its tuning split: B1, B2, B3 (PR 8), R (the lexical ranker, PR 9) and S (a text-free size
+control, PR 9b). Nothing here changes Riltra's Rust code, schema, parser, commands or MCP
+tools. PR 9 (the ranker) was the first consumer. The held-out split is used only by one final
+run, which needs an explicit owner instruction given after PR 9b is merged with green CI (see Split).
+PR 9b closes the lexical evaluation's measurement; edge expansion (`via`) is a separate later PR,
+so Task 8 is not complete.
 
 Files:
 
-- `harness.py`: `freeze` (builds a task manifest from git history) and `run` (measures B1, B2, B3).
+- `harness.py`: `freeze` (builds a task manifest from git history) and `run` (measures B1, B2, B3, R, S).
 - `selftest.py`: controls. Run before any measurement; it exits non-zero on the first failure.
 - `tasks-riltra.jsonl` and `tasks-riltra.sha256`: the frozen Riltra manifest (header line, then one line per task).
-- `baseline-2026-11.md`: the tuning-split results for the Riltra repository, with limits.
+- `baseline-2026-11.md`: the PR 8 tuning-split results for the Riltra repository, with limits.
+- `ranker-2026-11.md`: the R0 ranker rules and the tuning-split results with the PR 9b measurement
+  (mention classes, strata, control S, limits).
 
 ## Task definition
 
@@ -57,8 +62,9 @@ move the boundary. A manifest is written once; a different tip needs a new file 
 header records the label, tip, `rules_version`, the non-merge count, the exclusion counts, and the
 split sizes.
 
-**Held-out is never run in this PR.** `run --split heldout` is refused unless `--final` is passed,
-and PR 8 does not pass it. Only the held-out task count is reported. Reason: with only 36
+**Held-out is not run in PR 8 or PR 9b.** `run --split heldout` is refused unless `--final` is passed,
+and neither PR passes it. A held-out run needs an explicit owner instruction given after PR 9b is merged
+with green CI; this README does not authorize it. Only the held-out task count is reported. Reason: with only 36
 held-out Riltra tasks (the plan estimated about a dozen), per-task results would steer the ranker, and the baselines have no
 tunable parameter, so PR 9 loses nothing by running them once with the ranker.
 
@@ -110,29 +116,70 @@ taken on the tool's raw result (supported-language files, tests included), befor
   - `abstained` = status `ok` with `reason` `no-extractable-term`. Abstentions are counted apart
     from failures. In the pair verdicts an abstention is an `ok` task with found@10 = 0.
 
-**name_hint (per task, descriptive heuristic)**: true when a gold path, or its lowercase file stem,
-occurs as a substring of the lowercase query text. It uses git and the manifest only, never Riltra
-output. It is **not a ceiling and not a lower or upper bound**, and it errs in both directions: a
-gold `storage.rs` with the query `evict_entry` is false, although the symbol name is a direct hint;
-the stem `main` matches inside `maintain`, although no file `main` is named. The plan's ceiling ("tasks whose gold file is named nowhere in the text") is not measured; the measurement is not finished. `name_hint` is only a descriptive heuristic; the definition and measurement of how a text mentions its gold files will be handled separately.
+**S, text-free size control (PR 9b).** The files of the parent tree that are in the candidate
+universe, ranked by size in bytes, largest first, ties by path ascending (`git ls-tree -r -l` on the
+parent). S ignores the query and is always `ok`. It is a **control, not a competitor**. It exists
+because a repository whose changed files are mostly its largest ones saturates `found@10` for a ranker
+that returns big files, so a high `found@10` alone says little. S returns the whole universe, so its
+`returned` equals the universe size.
 
-**Output change (PR 9)**: `run` output gains the `R` block per task, the `R` summary (with
-`abstained`), three pairs (`R-B1`, `R-B2`, `R-B3`), and the `name_hint` true/false counts. PR 8
-outputs are therefore not byte-comparable with PR 9 outputs. `rules_version` stays `pr8-rules-1`:
-the task rules did not change.
+**Mention class M1 (per task, PR 9b; replaces `name_hint`).** Computed from git and the manifest only,
+never from Riltra output, over the manifest's `gold` (not `test_gold`), on the clean query text
+lowercased. A word character is `[a-z0-9_]`; an occurrence counts only when the characters directly
+before and after it are not word characters (or the text edge). Per gold file, the levels in order:
+
+- `path`: the full repository path (lowercased) occurs.
+- `name`: the basename with extension occurs.
+- `stem`: the basename without extension occurs. The stem must be at least 4 characters and not one of
+  `main`, `index`, `init`, `test`, `tests`, `spec`, `specs`, `utils`, `types`, `common`.
+
+Per task: `named` when any gold file is at `path` or `name`; otherwise `stem` when any gold file is at
+`stem`; otherwise `none`. `none` means exactly "no mention that M1 accepts". It does not mean "no gold
+file is named in the text": M1 ignores short and generic stems on purpose. It is the closest M1 gets to
+the plan's ceiling stratum, not that ceiling, and it is a descriptive class, not a bound on what any
+ranker can find. Its limits, in both directions:
+
+- (a) a stem that is an ordinary word, such as `store`, counts as `stem` even when the text means
+  something else;
+- (b) a file whose symbol is named in the text but whose file name is not counts as `none` (the
+  `evict_entry` case: a gold `storage.rs` is not named);
+- (c) gold `src/index.ts` with the text `index`, and gold `src/lib.rs` with the text `lib`, are `none`:
+  the stem is generic or under 4 characters, although the bare file name is given. These two cases are
+  kept as named limits, and selftest asserts the class `none` for both;
+- (d) M1 is literal: a non-ASCII letter is not a word character, so `éstore` counts as a mention of
+  `store`.
+
+The plan's ceiling ("tasks whose gold file is named nowhere in the text") is not measured by M1.
+
+**Output change (PR 9b)**: `run` output gains the `S` block per task and in the summary, the pair
+`R-S`, the per-task `mention` class (replacing `name_hint`), the summary `mention` counts, the
+`strata` block, and the `hits_at_5`, `first_gold_rank` and `returned_median` fields per baseline. The
+run header gains `measure_version` (`pr9b-measure-1`) beside `rules_version`. PR 8 and PR 9 outputs are
+therefore not byte-comparable with PR 9b outputs; the values of B1 to B3 and of R are unchanged (checked
+against the PR 9 tuning table, see `ranker-2026-11.md`). `rules_version` stays `pr8-rules-1`: the task
+rules did not change.
 
 ## Metrics and verdicts
 
 Per task and per baseline, counts only: `n` (scored gold files), `found@5`, `found@10` (gold files in
 the top k of the ranked list), `first_gold_rank` (null if none returned), `returned` (list length).
 
-Aggregate per baseline: tasks with at least one gold file in the top 10, out of the tasks with status
-`ok` for that baseline. Tuning-task total and failure count are reported beside it.
+Aggregate per baseline, over its `ok` tasks: `hits_at_5` and `hits_at_10` (tasks with at least one gold
+file in the top 5 or the top 10); `first_gold_rank` as `{found, none, median, rank1, le3}` (`found`
+counts tasks with a rank, `none` the rest, `median` the lower median of those ranks, `rank1` and `le3`
+count first ranks of 1 and of at most 3); and `returned_median` (the same lower median over `returned`).
+The lower median is element `(n-1)//2` of the ascending sort, and `null` when there is none. The
+tuning-task total and failure count are reported beside them.
 
 Win/loss, frozen: for a pair of baselines on one task, the higher `found@10` wins, the lower loses,
-equal is a tie. Only tasks where both are `ok` count. `found@5` and `first_gold_rank` are reported
-beside the verdict and never folded into it. Every number carries its sample size. Samples this
-small cannot support any threshold.
+equal is a tie. Only tasks where both are `ok` count. The pair `R-S` follows the same rule; no new
+verdict rule is added. `found@5` and `first_gold_rank` are reported beside the verdict and never folded
+into it. Every number carries its sample size. Samples this small cannot support any threshold.
+
+Strata: the same hit and first-rank block is repeated per baseline for each M1 class (`named`, `stem`,
+`none`), with the task count of each class and, per baseline, the `ok` and failed counts, so a failed
+task keeps its place in the denominator. Hits are counted over `ok` tasks only. Counts only; the strata
+are small and nothing is inferred from them.
 
 ## How to rerun
 
@@ -145,7 +192,7 @@ python -I docs/benchmarks/workflow/harness.py run --split tune --manifest docs/b
 ```
 
 `run` writes JSON lines to stdout: a run header (manifest digest, binary digest and `--version`,
-split, `rules_version`), one line per task, and a summary with per-baseline counts and pair
+split, `rules_version`, `measure_version`), one line per task, and a summary with per-baseline counts and pair
 win/loss/tie counts. Two runs are comparable only when their headers match. Output contains no
 timings, so two runs of the same input are byte-identical.
 
@@ -181,6 +228,15 @@ bumping `RULES_VERSION` and regenerating the manifest.
 12. A parent tree that cannot be extracted (for example a path over the Windows 260-character limit when long paths are not enabled) is
     B3 `index-failed` with detail `extract`, counted with the other B3 failures. It is not an
     empty result and does not stop the run. Found by the first tune attempt; the selftest covers it.
+13. (PR 9b) M1 compares lowercased gold paths and file names with the lowercased query text, so the
+    case of a path in the manifest does not matter.
+14. (PR 9b) S sorts the universe by the sizes `git ls-tree -l` prints for the parent. A candidate with
+    no numeric blob size stops the run (`HarnessError`); no size is guessed.
+15. (PR 9b) Medians are lower medians (element `(n-1)//2`). `returned_median` is taken over `ok` tasks,
+    abstentions included (an abstention has `returned` 0).
+16. (PR 9b) The mention classes partition the tasks, so the stratum task counts sum to the task count.
+17. (PR 9b) `MEASURE_VERSION` is `pr9b-measure-1`. Any change to M1, to the S order or to the summary
+    fields needs a new `MEASURE_VERSION`. `RULES_VERSION` is unchanged, because the task rules are.
 
 ## Limits
 
@@ -199,7 +255,10 @@ bumping `RULES_VERSION` and regenerating the manifest.
   file content beyond the tokens' presence.
 - The selftest covers the rules with a synthetic repository of known answer; it does not
   establish that the real history was read correctly beyond the counts it prints.
-- No comparison or savings claim is made in this PR.
+- S saturates `found@10` where a repository's changed files are mostly its largest ones. S is a
+  control, not a competitor, and a high S value does not say that a ranker is poor.
+- M1 classes are descriptive and small in number per class (see Strata); they make no inference.
+- No comparison or savings claim is made in this PR or in PR 9b.
 
 ## Confidentiality
 

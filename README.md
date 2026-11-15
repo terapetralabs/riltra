@@ -34,6 +34,8 @@ change is safe. See [capabilities and limits](docs/guide/capabilities.md).
 - A bounded relationship graph and revisioned knowledge store with explicit
   source bindings.
 - Optional SCIP import and operator-configured language-server queries.
+- `riltra agent-block` prints a Markdown instruction block for your agent's
+  instruction file. It is plain text, not JSON, and it writes nothing.
 - Optional local vector search for knowledge records. It is off by default,
   requires separately provisioned assets, and falls back to lexical search
   when unavailable. It does not index source code; see the [local inference

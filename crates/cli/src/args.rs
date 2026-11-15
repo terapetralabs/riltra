@@ -68,6 +68,8 @@ pub enum Command {
         op: KnowledgeOp,
     },
     Mcp,
+    /// Print the agent instruction block (Markdown text, not JSON). No arguments.
+    AgentBlock,
 }
 
 #[derive(Debug, PartialEq)]
@@ -281,6 +283,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "-V" | "--version" | "version" if args.len() == 1 => Ok(Command::Version),
         "status" if args.len() == 1 => Ok(Command::Status),
         "mcp" if args.len() == 1 => Ok(Command::Mcp),
+        "agent-block" if args.len() == 1 => Ok(Command::AgentBlock),
         "init" => {
             let mut repo = None;
             let mut name = None;
@@ -1417,6 +1420,14 @@ mod tests {
         ));
         assert!(p(&["search", "--repo", "r"]).is_err());
         assert!(p(&["search", "--symbol", "f"]).is_err());
+    }
+
+    #[test]
+    fn parses_agent_block_without_arguments_only() {
+        assert!(matches!(p(&["agent-block"]), Ok(Command::AgentBlock)));
+        assert!(p(&["agent-block", "extra"]).is_err());
+        assert!(p(&["agent-block", "--repo", "x"]).is_err());
+        assert!(p(&["agent-block", "--help"]).is_err());
     }
 
     #[test]

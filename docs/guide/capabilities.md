@@ -319,6 +319,8 @@ network. The MCP handlers themselves do not create, migrate, or replace a
 database: a missing index returns `no-index`, and an unsupported schema is
 refused with `schema_outdated`.
 
+`riltra agent-block` prints the agent instruction block as plain Markdown text, not JSON. It reads no registry or index and writes no file.
+
 See the [agent setup guide](agent-setup.md) for tool selection, output labels,
 and client configuration. For the core and provider security details, read the
 [security policy](../../SECURITY.md).

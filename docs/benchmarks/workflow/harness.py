@@ -22,6 +22,7 @@ import tarfile
 from collections import Counter
 
 RULES_VERSION = "pr8-rules-1"
+MEASURE_VERSION = "pr9b-measure-1"   # the mention rule M1, the summary and the S control; see README.md
 
 if sys.version_info < (3, 12):
     raise SystemExit("harness.py needs Python 3.12 or newer (tarfile extraction filter)")
@@ -33,8 +34,9 @@ SHORT = 12                # short sha length used in tracked rows
 BM25_K1 = 1.2
 BM25_B = 0.75
 TASK_INDEX_NAME = "t"
-BASELINES = ("B1", "B2", "B3", "R")
-PAIRS = (("B1", "B2"), ("B1", "B3"), ("B2", "B3"), ("R", "B1"), ("R", "B2"), ("R", "B3"))
+BASELINES = ("B1", "B2", "B3", "R", "S")
+PAIRS = (("B1", "B2"), ("B1", "B3"), ("B2", "B3"), ("R", "B1"), ("R", "B2"), ("R", "B3"), ("R", "S"))
+MENTION_CLASSES = ("named", "stem", "none")
 QUERY_LIMIT = 1000        # R: one `riltra query` call, the maximum page; rows past it are unreachable
 R_ABSTAIN = "no-extractable-term"   # R abstains (status ok) when the query text has no term
 R_REASONS = (None, "no-match", R_ABSTAIN)
@@ -331,16 +333,51 @@ def git_grep_files(repo, parent, token):
     return files
 
 
-def name_hint(gold, query_text):
-    """Descriptive heuristic, not a ceiling and not a bound: a gold path, or the lowercase
-    stem of one, occurs as a substring of the lowercase query text. Git and the manifest only."""
+# M1, the mention rule (MEASURE_VERSION pr9b-measure-1). Computed from git and the manifest
+# only, over the manifest's gold files, on the lowercased clean query. A word character is
+# [a-z0-9_]; an occurrence counts only when no word character is directly before or after it.
+MENTION_STOP = frozenset(("main", "index", "init", "test", "tests", "spec", "specs",
+                          "utils", "types", "common"))
+MIN_STEM = 4
+
+
+def mention_occurs(needle, text):
+    """True when needle occurs in text with no word character directly before or after it."""
+    pattern = r"(?<![a-z0-9_])" + re.escape(needle) + r"(?![a-z0-9_])"
+    return re.search(pattern, text) is not None
+
+
+def mention_class(gold, query_text):
+    """M1 class of one task: named (a gold path or file name occurs), stem (only a gold stem
+    occurs) or none. The strongest level over the gold files decides; see README.md."""
     text = query_text.lower()
+    stem_seen = False
     for path in gold:
         low = path.lower()
-        stem = posixpath.splitext(posixpath.basename(low))[0]
-        if low in text or (stem and stem in text):
-            return True
-    return False
+        name = posixpath.basename(low)
+        stem = posixpath.splitext(name)[0]
+        if mention_occurs(low, text) or mention_occurs(name, text):
+            return "named"
+        if len(stem) >= MIN_STEM and stem not in MENTION_STOP and mention_occurs(stem, text):
+            stem_seen = True
+    return "stem" if stem_seen else "none"
+
+
+def size_ranking(repo, parent, universe):
+    """Control S: the universe files by size in bytes, largest first, ties by path ascending.
+    Sizes come from `git ls-tree -r -l` on the parent tree; the query is not an input."""
+    text = git_bytes(repo, "ls-tree", "-r", "-l", "-z", "--full-tree", parent).decode("utf-8")
+    sizes = {}
+    for entry in text.split("\0"):
+        if not entry:
+            continue
+        meta, path = entry.split("\t", 1)
+        size = meta.split()[3]
+        if size.isdigit():
+            sizes[path] = int(size)
+    if any(path not in sizes for path in universe):
+        raise HarnessError("a candidate file has no blob size in the parent tree")
+    return sorted(universe, key=lambda path: (-sizes[path], path))
 
 
 def b1_collect(repo, parent, tokens):
@@ -572,20 +609,54 @@ def measure_task(repo, riltra, work, row):
         result["B3"] = {"status": status, "detail": detail, "token_count": len(tokens)}
     # R needs B3's scratch index: when that index was never built, R fails with the same detail.
     result["R"] = r_rows.get("R", {"status": status, "detail": detail})
-    result["name_hint"] = name_hint(gold, query)
+    result["S"] = dict(status="ok", **metrics(size_ranking(repo, parent, universe), gold))
+    result["mention"] = mention_class(gold, query)
     return result
+
+
+def median_lower(values):
+    """Lower median: element (n-1)//2 of the ascending sort; None when there are no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[(len(ordered) - 1) // 2]
+
+
+def first_rank_summary(ranks, ok_count):
+    """first_gold_rank block over ok tasks. ranks has one entry per ok task: its first gold
+    rank, or None when no gold file was returned."""
+    found = [rank for rank in ranks if rank is not None]
+    return {"found": len(found), "none": ok_count - len(found), "median": median_lower(found),
+            "rank1": sum(1 for rank in found if rank == 1),
+            "le3": sum(1 for rank in found if rank <= 3)}
+
+
+def baseline_block(rows, name):
+    """Counts, hits and rank summaries of one baseline over task rows; hits use ok rows only."""
+    ok = [row[name] for row in rows if row[name]["status"] == "ok"]
+    return {"ok": len(ok), "failed": len(rows) - len(ok),
+            "hits_at_5": sum(1 for m in ok if m["found5"] >= 1),
+            "hits_at_10": sum(1 for m in ok if m["found10"] >= 1),
+            "first_gold_rank": first_rank_summary([m["first_gold_rank"] for m in ok], len(ok)),
+            "returned_median": median_lower([m["returned"] for m in ok])}
 
 
 def summarize(results):
     summary = {"tasks": len(results)}
     for name in BASELINES:
-        ok = [r for r in results if r[name]["status"] == "ok"]
-        summary[name] = {"ok": len(ok), "failed": len(results) - len(ok),
-                         "hits_at_10": sum(1 for r in ok if r[name]["found10"] >= 1)}
+        summary[name] = baseline_block(results, name)
         if name == "R":
-            summary[name]["abstained"] = sum(1 for r in ok if r[name].get("abstained") is True)
-    hints = [r["name_hint"] for r in results]
-    summary["name_hint"] = {"true": sum(1 for h in hints if h), "false": sum(1 for h in hints if not h)}
+            summary[name]["abstained"] = sum(
+                1 for r in results if r["R"]["status"] == "ok" and r["R"].get("abstained") is True)
+    mentions = [r["mention"] for r in results]
+    summary["mention"] = {cls: mentions.count(cls) for cls in MENTION_CLASSES}
+    summary["strata"] = {}
+    for cls in MENTION_CLASSES:
+        members = [r for r in results if r["mention"] == cls]
+        stratum = {"tasks": len(members)}
+        for name in BASELINES:
+            stratum[name] = baseline_block(members, name)
+        summary["strata"][cls] = stratum
     pairs = {}
     for a, b in PAIRS:
         verdicts = [compare_pair(r, a, b) for r in results]
@@ -617,6 +688,7 @@ def run_split(manifest, split, final, repo, riltra, work):
     version = riltra_version(riltra)
     os.makedirs(work, exist_ok=True)
     run_header = {"label": header["label"], "split": split, "rules_version": RULES_VERSION,
+                  "measure_version": MEASURE_VERSION,
                   "manifest_sha256": digest, "riltra_sha256": riltra_digest,
                   "riltra_version": version, "tasks": len(selected)}
     lines = [json.dumps({"run": run_header}, separators=(",", ":"))]

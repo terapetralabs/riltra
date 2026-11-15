@@ -5,6 +5,7 @@ Usage: python -I selftest.py [--riltra <path to a riltra binary>]
 Without --riltra the B3 control is skipped and the skip reason is printed.
 """
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -323,6 +324,37 @@ def test_measurements(root, repo, sha):
           "B2 ranks the gold file first")
     check(first["B3"]["status"] == "index-failed" and "returned" not in first["B3"],
           "B3 with a bogus binary is index-failed, not an empty list")
+    # M1 on C2: the text has core_parse; the file core.py and the stem core are not counted (word char after).
+    check(first["mention"] == "none" and "name_hint" not in first, "M1 class of the C2 task is none; name_hint absent")
+
+
+def test_s_control(root, repo, sha):
+    """S ignores the query: two commits with one parent and one gold file get the same S block."""
+    work = os.path.join(root, "work-s")
+    os.makedirs(work)
+    rows = [{"sha": short(sha[name]), "parent": short(sha["C1"]), "split": "tune",
+             "gold": ["base/util.py"], "test_gold": [], "gold_added_not_findable": 0}
+            for name in ("C2", "C3")]
+    first = H.measure_task(repo, os.path.join(root, "no-such-riltra.exe"), work, rows[0])
+    second = H.measure_task(repo, os.path.join(root, "no-such-riltra.exe"), work, rows[1])
+    check(first["S"] == second["S"], "S block is the same for two commits with one parent and one gold file")
+    check(first["S"]["status"] == "ok" and first["S"]["returned"] == len(H.universe_of(repo, sha["C1"])),
+          "S is always ok and returns the whole candidate universe")
+
+
+def test_run_header(root):
+    """The run header carries measure_version beside rules_version; the summary closes the output."""
+    dummy = os.path.join(root, "dummy-riltra.bin")
+    with open(dummy, "wb") as handle:
+        handle.write(b"fixture file; the version call is mocked and the binary is never started")
+    manifest = os.path.join(root, "m1.jsonl")
+    repo = os.path.join(root, "synthetic")
+    with mock.patch.object(H, "riltra_version", return_value="riltra fixture"):
+        lines = H.run_split(manifest, "tune", False, repo, dummy, os.path.join(root, "w-header"))
+    head = json.loads(lines[0])["run"]
+    check(head["measure_version"] == H.MEASURE_VERSION == "pr9b-measure-1", "run header carries MEASURE_VERSION")
+    check(head["rules_version"] == "pr8-rules-1" and head["tasks"] == 2, "run header rules_version and task count")
+    check(list(json.loads(lines[-1]).keys()) == ["summary"], "the summary is the last output line")
 
 
 def test_win_loss():
@@ -368,18 +400,99 @@ def test_b3_control(riltra, root):
     check(status == "ok" and sets["zzqqnomatchzz"] == set(), "B3 token with no match is ok with no files")
 
 
-def test_name_hint():
-    """name_hint is a descriptive heuristic: a gold path or its lowercase stem as a substring of the query."""
-    check(H.name_hint(["base/core.py"], "Fix core parsing") is True, "name_hint: a gold stem is a substring")
-    check(H.name_hint(["Parser.java"], "fix PARSER bug") is True, "name_hint: matching is case-insensitive")
-    check(H.name_hint(["src/a/b.py"], "touch src/a/b.py now") is True, "name_hint: a gold path is a substring")
-    check(H.name_hint(["a/zq.py"], "nothing relevant here") is False, "name_hint: no gold path or stem occurs")
-    # Failure direction 1: a symbol name is a direct hint, but the file name does not occur.
-    check(H.name_hint(["storage.rs"], "evict_entry") is False,
-          "name_hint is false although the symbol name hints at the file")
-    # Failure direction 2: the stem occurs inside an unrelated word.
-    check(H.name_hint(["main.rs"], "maintain the cache") is True,
-          "name_hint is true because the stem main occurs inside maintain")
+def test_mention():
+    """M1 (mention_class): named, stem or none, from hand-built (gold, text, class) cases."""
+    check(not hasattr(H, "name_hint"), "name_hint is removed; M1 replaces it")
+    cases = [
+        (["src/store/lexical_ranker.rs"], "see src/store/lexical_ranker.rs now", "named"),   # path
+        (["src/store/lexical_ranker.rs"], "fix lexical_ranker.rs now", "named"),            # name
+        (["src/store/lexical_ranker.rs"], "fix lexical_ranker now", "stem"),                # stem
+        (["src/store/lexical_ranker.rs"], "nothing relevant here", "none"),
+        (["src/store/lexical_ranker.rs"], "xlexical_ranker.rs", "none"),                    # word char before
+        (["src/main.rs"], "maintain the cache", "none"),                                    # stoplisted stem
+        (["src/cache.rs"], "cached values", "none"),                                        # word char after
+        (["src/lexical.rs"], "lexical_ranker", "none"),                                     # underscore is a word char
+        (["src/lexical.rs"], "lexical::select", "stem"),                                    # colon is not a word char
+        (["src/mod.rs"], "mod", "none"),                                                    # stem under 4 characters
+        (["src/index.ts"], "index", "none"),                                                # limit control 1
+        (["src/lib.rs"], "lib", "none"),                                                    # limit control 2
+        (["src/data.rs"], "use data here", "stem"),                                         # exactly 4 characters
+        (["src/Lexical_Ranker.RS"], "Fix LEXICAL_RANKER.RS", "named"),                     # uppercase text and gold
+        (["src/lexical_ranker.rs"], "Use LEXICAL_RANKER now", "stem"),
+        (["src/store.rs"], "(store)", "stem"),                                              # punctuation boundary
+        (["src/store.rs"], "store.", "stem"),
+        (["src/store.rs"], "restore", "none"),
+        (["src/zz_one.rs", "src/store.rs"], "store", "stem"),                               # over the gold files
+        (["src/store.rs", "src/a/zz_name.rs"], "zz_name.rs and store", "named"),           # named beats stem
+    ]
+    for gold, text, expected in cases:
+        check(H.mention_class(gold, text) == expected,
+              "M1 class for %r in %r is %s" % (gold, text, expected))
+    # Limit controls (named limits of M1, kept as selftest controls): the bare word is not counted.
+    check(H.mention_class(["src/index.ts"], "index") == "none", "M1 limit control: index.ts with the word index is none")
+    check(H.mention_class(["src/lib.rs"], "lib") == "none", "M1 limit control: lib.rs with the word lib is none")
+
+
+def test_summary_arithmetic():
+    check(H.median_lower([1, 3, 5]) == 3 and H.median_lower([5]) == 5, "median of odd counts")
+    check(H.median_lower([1, 2, 3, 4]) == 2 and H.median_lower([1, 6]) == 1, "lower median of even counts")
+    check(H.median_lower([]) is None, "median of no values is None")
+    check(H.first_rank_summary([1, 3, 4, None], 4) == {"found": 3, "none": 1, "median": 3, "rank1": 1, "le3": 2},
+          "first_gold_rank block: rank1 and le3 boundaries")
+    check(H.first_rank_summary([None], 1) == {"found": 0, "none": 1, "median": None, "rank1": 0, "le3": 0},
+          "first_gold_rank block with no rank is none and median None")
+
+    gold = ["g"]
+
+    def fake_row(mention, ranked, failed=()):
+        row = {"mention": mention}
+        for name in H.BASELINES:
+            if name in failed:
+                row[name] = {"status": "index-failed", "detail": "fixture"}
+            else:
+                row[name] = dict(H.metrics(ranked, gold), status="ok")
+        return row
+
+    rows = [
+        fake_row("named", ["g"]),                                              # rank 1, returned 1
+        fake_row("stem", ["x1", "x2", "x3", "x4", "x5", "g"], failed=("B2",)),  # rank 6, returned 6
+        fake_row("none", []),                                                  # no gold, returned 0
+        fake_row("none", ["x%d" % i for i in range(12)]),                      # no gold, returned 12
+        fake_row("stem", ["x1", "x2", "x3", "x4", "x5", "g"]),                 # rank 6, returned 6
+    ]
+    s = H.summarize(rows)
+    check(s["tasks"] == 5, "summary task count")
+    check(s["mention"] == {"named": 1, "stem": 2, "none": 2}, "mention class counts")
+    check(s["B1"]["hits_at_5"] == 1 and s["B1"]["hits_at_10"] == 3, "B1 hits at 5 and 10 from fixture ranks")
+    check(s["B1"]["first_gold_rank"] == {"found": 3, "none": 2, "median": 6, "rank1": 1, "le3": 1},
+          "B1 first_gold_rank summary from fixture ranks")
+    check(s["B1"]["returned_median"] == 6, "B1 returned median over five ok tasks")
+    check(s["B2"]["ok"] == 4 and s["B2"]["failed"] == 1, "B2 ok and failed counts with one failed task")
+    check(s["B2"]["hits_at_5"] == 1 and s["B2"]["hits_at_10"] == 2, "B2 hits over ok tasks only")
+    check(s["B2"]["first_gold_rank"] == {"found": 2, "none": 2, "median": 1, "rank1": 1, "le3": 1},
+          "B2 first_gold_rank summary over ok tasks")
+    check(s["strata"]["stem"]["tasks"] == 2 and s["strata"]["stem"]["B2"]["ok"] == 1
+          and s["strata"]["stem"]["B2"]["failed"] == 1, "stratum counts carry the failed task")
+    check(s["strata"]["none"]["B1"]["first_gold_rank"] == {"found": 0, "none": 2, "median": None, "rank1": 0, "le3": 0},
+          "stratum none has no first gold rank")
+    check(sum(s["strata"][cls]["tasks"] for cls in H.MENTION_CLASSES) == s["tasks"],
+          "strata task counts sum to the task count")
+    for name in H.BASELINES:
+        check(s[name]["hits_at_5"] <= s[name]["hits_at_10"], "hits_at_5 <= hits_at_10 for " + name)
+
+
+def test_size_order(root):
+    """Control S order on a hand-built tree: size descending, a tie by path ascending, markdown out."""
+    repo = os.path.join(root, "sizes")
+    os.makedirs(repo)
+    git_run(repo, ["init", "-q", "-b", "main"])
+    write_files(repo, {"big/a.py": "x" * 100, "small/b.py": "x" * 10,
+                       "tie/y.py": "x" * 50, "tie/x.py": "x" * 50, "docs/z.md": "x" * 500})
+    rev = commit(repo, "Sizes", 1)
+    universe = H.universe_of(repo, rev)
+    check(universe == ["big/a.py", "small/b.py", "tie/x.py", "tie/y.py"], "size fixture: universe excludes markdown")
+    check(H.size_ranking(repo, rev, universe) == ["big/a.py", "tie/x.py", "tie/y.py", "small/b.py"],
+          "S order: size descending, ties by path ascending")
 
 
 def test_r_win_loss():
@@ -395,7 +508,7 @@ def test_r_win_loss():
     row["R"] = {"status": "search-error", "detail": "x"}
     check(H.compare_pair(row, "R", "B1") is None, "R-B1 pair: a failed R task is not part of the pair")
     rows = [dict(row, B2={"status": "index-failed", "detail": "x"}, B3={"status": "index-failed", "detail": "x"},
-                 name_hint=False)]
+                 S=dict(H.metrics(["s1"], gold), status="ok"), mention="none")]
     rows[0]["R"] = dict(H.metrics(r_high, gold), status="ok", abstained=False)
     summary = H.summarize(rows)
     check("R-B1" in summary["pairs"] and "R-B2" in summary["pairs"] and "R-B3" in summary["pairs"],
@@ -445,19 +558,23 @@ def main():
     test_extract_tokens()
     test_clean_query()
     test_win_loss()
-    test_name_hint()
+    test_mention()
+    test_summary_arithmetic()
     test_r_win_loss()
     if shutil.which("git") is None:
-        print("GIT-BASED CHECKS: SKIPPED, git is not on PATH (freeze, measurements, B3 and R not exercised)")
+        print("GIT-BASED CHECKS: SKIPPED, git is not on PATH (freeze, measurements, S, B3 and R not exercised)")
         print("SELFTEST PASSED: %d checks" % PASSED)
         return
     with tempfile.TemporaryDirectory() as root:
         repo, sha = test_freeze_and_rules(root)
         test_measurements(root, repo, sha)
+        test_s_control(root, repo, sha)
         test_r_bogus_binary(root, repo, sha)
         test_b3_extract_failure(root)
         test_b3_control(riltra_path, root)
         test_r_doc_comment(riltra_path, root)
+        test_size_order(root)
+        test_run_header(root)
     print("SELFTEST PASSED: %d checks" % PASSED)
 
 

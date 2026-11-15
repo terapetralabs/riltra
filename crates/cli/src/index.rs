@@ -1709,6 +1709,11 @@ fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str
                 }
             }
             let path = dirs.join("/");
+            // A C or C++ include names its file with the extension; the
+            // JavaScript and TypeScript suffixes never apply to it.
+            if matches!(language, "c" | "cpp") {
+                return target == path;
+            }
             return target == path
                 || [".js", ".ts", ".tsx", ".jsx", "/index.js", "/index.ts"]
                     .iter()
@@ -2517,16 +2522,37 @@ pub(crate) fn edge_query_conn(
     pinned: impl FnOnce(),
 ) -> Result<EdgeQueryOut, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
+    edge_query_tx(&tx, name, canon, validated, request, pinned, None)
+}
+
+/// The edge query body on one read transaction (see `edge_query_conn`).
+pub(crate) fn edge_query_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    canon: &Path,
+    validated: &str,
+    request: &EdgeRequest<'_>,
+    pinned: impl FnOnce(),
+    known_freshness: Option<(&str, &[String])>,
+) -> Result<EdgeQueryOut, String> {
+    let snapshot = store::latest_snapshot(tx)?.ok_or("no snapshot: index the repository first")?;
     pinned();
-    store::require_graph_proof(&tx, snapshot.id)?;
-    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, canon, &snapshot);
-    freshness_reasons.sort();
-    freshness_reasons.dedup();
-    let live = live_state_for(&tx, &snapshot)?;
+    store::require_graph_proof(tx, snapshot.id)?;
+    // `known_freshness` is a verdict the caller already evaluated on this same
+    // transaction and snapshot; evaluating again would re-digest every file.
+    let (freshness, freshness_reasons) = match known_freshness {
+        Some((status, reasons)) => (status.to_string(), reasons.to_vec()),
+        None => {
+            let (status, mut reasons) = evaluate_snapshot(tx, name, canon, &snapshot);
+            reasons.sort();
+            reasons.dedup();
+            (status, reasons)
+        }
+    };
+    let live = live_state_for(tx, &snapshot)?;
     let revision = crate::semantic::revision_string(&live);
     let anchor = resolve_edge_anchor(
-        &tx,
+        tx,
         snapshot.id,
         canon,
         validated,
@@ -2536,7 +2562,7 @@ pub(crate) fn edge_query_conn(
     )?;
     let endpoint = anchor_endpoint(&anchor).ok_or("anchor has no endpoint")?;
     let aliases = if request.direction == EdgeDir::Callees {
-        crate::edges::syntax_aliases(&tx, snapshot.id, &endpoint)?
+        crate::edges::syntax_aliases(tx, snapshot.id, &endpoint)?
     } else {
         Vec::new()
     };
@@ -2544,7 +2570,7 @@ pub(crate) fn edge_query_conn(
     // takes no call by name, so a same-named method call is never its caller.
     let by_name = request.direction == EdgeDir::Callers && !anchor.data_member;
     let candidates = if by_name {
-        caller_candidate_paths(&tx, snapshot.id, &anchor)?
+        caller_candidate_paths(tx, snapshot.id, &anchor)?
     } else {
         CallerCandidates {
             paths: Vec::new(),
@@ -2564,12 +2590,12 @@ pub(crate) fn edge_query_conn(
         candidate_aliases: &candidates.aliases,
         syntax_aliases: &aliases,
     };
-    let counts = store::selected_edge_counts(&tx, &selection)?;
+    let counts = store::selected_edge_counts(tx, &selection)?;
     let page = if selection.candidate_name.is_some() || !aliases.is_empty() {
-        store::selected_edge_page(&tx, &selection, request.limit as i64, request.offset as i64)?
+        store::selected_edge_page(tx, &selection, request.limit as i64, request.offset as i64)?
     } else if selection.inbound {
         store::edges_inbound(
-            &tx,
+            tx,
             snapshot.id,
             &endpoint,
             request.limit as i64,
@@ -2577,7 +2603,7 @@ pub(crate) fn edge_query_conn(
         )?
     } else {
         store::edges_outbound(
-            &tx,
+            tx,
             snapshot.id,
             &endpoint,
             request.limit as i64,
@@ -2587,7 +2613,7 @@ pub(crate) fn edge_query_conn(
     let next = request.offset + page.len();
     let truncated = next < counts.total;
     let mut read = EdgeRead {
-        tx: &tx,
+        tx,
         snapshot: &snapshot,
         live: &live,
         canon,
@@ -2909,8 +2935,7 @@ pub(crate) fn validated_trace_anchor(
 }
 
 /// The trace/impact body on a caller-provided connection (see
-/// `edge_query_conn`); `started` keeps the time budget anchored to entry,
-/// except that time spent inside the `pinned` hook is not charged to it.
+/// `edge_query_conn`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn graph_query_conn(
     conn: &mut rusqlite::Connection,
@@ -2925,15 +2950,36 @@ pub(crate) fn graph_query_conn(
     candidates: bool,
 ) -> Result<TraceQueryOut, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
+    graph_query_tx(
+        &tx, name, canon, rel, dest_path, request, started, pinned, impact, candidates,
+    )
+}
+
+/// The trace/impact body on one read transaction (see `graph_query_conn`);
+/// `started` keeps the time budget anchored to entry, except that time spent
+/// inside the `pinned` hook is not charged to it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn graph_query_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    canon: &Path,
+    rel: &str,
+    dest_path: Option<&str>,
+    request: &TraceRequest<'_>,
+    started: Instant,
+    pinned: impl FnOnce(),
+    impact: bool,
+    candidates: bool,
+) -> Result<TraceQueryOut, String> {
+    let snapshot = store::latest_snapshot(tx)?.ok_or("no snapshot: index the repository first")?;
     // `pinned` is a test seam that runs with the snapshot already pinned. Its
     // duration is not query work, so it must not consume the traversal budget.
     let hook_started = Instant::now();
     pinned();
     let started = started + hook_started.elapsed();
-    store::require_graph_proof(&tx, snapshot.id)?;
+    store::require_graph_proof(tx, snapshot.id)?;
     let anchor = resolve_edge_anchor(
-        &tx,
+        tx,
         snapshot.id,
         canon,
         rel,
@@ -2945,19 +2991,17 @@ pub(crate) fn graph_query_conn(
         .destination
         .as_ref()
         .zip(dest_path)
-        .map(|(d, p)| {
-            resolve_edge_anchor(&tx, snapshot.id, canon, p, d.line1 - 1, d.col1 - 1, None)
-        })
+        .map(|(d, p)| resolve_edge_anchor(tx, snapshot.id, canon, p, d.line1 - 1, d.col1 - 1, None))
         .transpose()?;
     let start = anchor_endpoint(&anchor).ok_or("source has no identity")?;
     let target = destination.as_ref().and_then(anchor_endpoint);
-    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, canon, &snapshot);
+    let (freshness, mut freshness_reasons) = evaluate_snapshot(tx, name, canon, &snapshot);
     freshness_reasons.sort();
     freshness_reasons.dedup();
-    let live = live_state_for(&tx, &snapshot)?;
+    let live = live_state_for(tx, &snapshot)?;
     let revision = crate::semantic::revision_string(&live);
     let mut read = EdgeRead {
-        tx: &tx,
+        tx,
         snapshot: &snapshot,
         live: &live,
         canon,
@@ -2981,16 +3025,16 @@ pub(crate) fn graph_query_conn(
         if candidates {
             budget.candidates = request.limit;
             // Loaded once per query: every node's seed reads the same inputs.
-            let inputs = CallerInputs::load(&tx, snapshot.id)?;
+            let inputs = CallerInputs::load(tx, snapshot.id)?;
             let seed_of = |endpoint: &store::EdgeEndpoint| {
-                candidate_seed(&tx, snapshot.id, &inputs, &anchor, &start, endpoint)
+                candidate_seed(tx, snapshot.id, &inputs, &anchor, &start, endpoint)
             };
-            crate::edges::traverse_impact(&tx, snapshot.id, &start, &budget, Some(&seed_of))?
+            crate::edges::traverse_impact(tx, snapshot.id, &start, &budget, Some(&seed_of))?
         } else {
-            crate::edges::traverse_impact(&tx, snapshot.id, &start, &budget, None)?
+            crate::edges::traverse_impact(tx, snapshot.id, &start, &budget, None)?
         }
     } else {
-        crate::edges::traverse(&tx, snapshot.id, &start, target.as_ref(), &budget)?
+        crate::edges::traverse(tx, snapshot.id, &start, target.as_ref(), &budget)?
     };
     let total = traversal.paths.len();
     let candidate_summary = candidates.then(|| CandidatesOut {
@@ -3192,6 +3236,648 @@ fn candidate_seed(
 /// the adapter could PROVE that the source it was answered about is no
 /// longer the source on disk (`Stale`). Any spawn/query failure becomes an
 /// explicit fallback payload (exit 0), never a fabricated relationship.
+/// Context fact sections (PR 7). These read helpers run on the caller's read
+/// transaction and return plain structs. Joins are by file path and definition
+/// byte range, never by a symbol rowid, and no name is resolved to a definition.
+pub(crate) enum FactIdentity {
+    Span {
+        file_id: i64,
+        byte_start: usize,
+        byte_end: usize,
+        name: Option<String>,
+        is_type: bool,
+    },
+    Unavailable {
+        reason: &'static str,
+        candidates: Option<usize>,
+    },
+}
+
+/// Stored definition kinds that name a type, per language.
+const TYPE_KINDS: [&str; 6] = ["class", "struct", "interface", "type", "enum", "trait"];
+/// Containment ancestors read at most; a deeper chain is reported as cut.
+pub(crate) const MAX_ANCESTORS: usize = 16;
+/// Supertype text kept per row, in bytes, cut on a char boundary.
+const SUPERTYPE_TEXT_MAX: usize = 512;
+
+/// One list of a fact section: the full count when known (`None` only for the
+/// ancestor chain at the depth cap), the rows within `--limit`, and how many
+/// rows the limit left out.
+pub(crate) struct Counted<T> {
+    pub total: Option<usize>,
+    pub rows: Vec<T>,
+    pub omitted_by_limit: usize,
+}
+
+/// Keeps at most `limit` rows; `known` is the count the query established.
+fn counted<T>(mut rows: Vec<T>, known: usize, total: Option<usize>, limit: usize) -> Counted<T> {
+    rows.truncate(limit);
+    let omitted_by_limit = known.saturating_sub(rows.len());
+    Counted {
+        total,
+        rows,
+        omitted_by_limit,
+    }
+}
+
+pub(crate) struct ContainerRow {
+    pub kind: String,
+    pub name: Option<String>,
+    pub path: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub line: Option<u32>,
+    /// A symbol row exists at the container's byte range.
+    pub symbol: bool,
+}
+
+pub(crate) struct MemberRow {
+    pub kind: String,
+    pub name: Option<String>,
+    pub path: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub line: Option<u32>,
+}
+
+pub(crate) struct ContainmentFacts {
+    /// Innermost first.
+    pub ancestors: Counted<ContainerRow>,
+    pub truncated_depth: bool,
+    pub members: Counted<MemberRow>,
+}
+
+pub(crate) struct SupertypeRow {
+    pub relation: String,
+    pub supertype_text: String,
+    pub text_truncated: bool,
+    pub supertype_name: Option<String>,
+    pub line: u32,
+}
+
+pub(crate) struct HeritageRow {
+    pub subtype: String,
+    pub relation: String,
+    pub supertype_text: String,
+    pub text_truncated: bool,
+    pub supertype_name: Option<String>,
+    pub path: String,
+    pub line: u32,
+    pub same_name_definitions: usize,
+}
+
+pub(crate) struct HeritageFacts {
+    pub supertypes: Counted<SupertypeRow>,
+    pub implementations: Counted<HeritageRow>,
+    pub subtypes: Counted<HeritageRow>,
+    pub anchor_is_type: bool,
+}
+
+pub(crate) struct FileRef {
+    pub path: String,
+    pub line: u32,
+}
+
+pub(crate) struct ImportFacts {
+    pub imports: Counted<FileRef>,
+    pub imported_by: Counted<FileRef>,
+    /// Import statements of the anchor file that resolved to no indexed file.
+    pub unresolved: usize,
+}
+
+pub(crate) struct FactSections {
+    pub identity: FactIdentity,
+    /// `None` when the identity is unavailable.
+    pub containment: Option<ContainmentFacts>,
+    /// `None` when the identity is unavailable.
+    pub heritage: Option<HeritageFacts>,
+    pub imports: ImportFacts,
+    pub callees: EdgeQueryOut,
+}
+
+enum SpanOutcome {
+    Span(usize, usize),
+    Missing,
+    Ambiguous(usize),
+}
+
+fn cap_text(text: &str) -> (String, bool) {
+    if text.len() <= SUPERTYPE_TEXT_MAX {
+        return (text.to_string(), false);
+    }
+    let mut end = SUPERTYPE_TEXT_MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+/// The live file bytes, only when they still match the digest the snapshot
+/// stored. Lines are read from these bytes; a changed file gives no line.
+fn verified_source(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    path: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some((_, digest)) = store::file_identity(tx, snapshot_id, path)? else {
+        return Ok(None);
+    };
+    let Ok(bytes) = crate::semantic::confined_read(canon, path, scan::MAX_FILE_BYTES) else {
+        return Ok(None);
+    };
+    Ok((store::content_digest(&bytes) == digest).then_some(bytes))
+}
+
+/// 1-based line of a byte offset in verified source.
+fn line_at(source: Option<&[u8]>, byte: usize) -> Option<u32> {
+    let head = source?.get(..byte)?;
+    Some(head.iter().filter(|b| **b == b'\n').count() as u32 + 1)
+}
+
+/// The syntax definition span of the anchor. A syntax anchor carries it. A
+/// semantic anchor's `span_bytes` is the SCIP occurrence, not a definition, so
+/// its position is mapped to the narrowest enclosing definition instead.
+fn syntax_span(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    anchor: &EdgeAnchor,
+) -> Result<SpanOutcome, String> {
+    if anchor.kind == AnchorKind::SyntaxFallback {
+        return Ok(match anchor.span_bytes {
+            Some((bs, be)) => SpanOutcome::Span(bs, be),
+            None => SpanOutcome::Missing,
+        });
+    }
+    let Some(source) = verified_source(tx, snapshot_id, canon, &anchor.path)? else {
+        return Ok(SpanOutcome::Missing);
+    };
+    let Some(off) = byte_offset_of(
+        &source,
+        anchor.line1.saturating_sub(1),
+        anchor.col1.saturating_sub(1),
+    ) else {
+        return Ok(SpanOutcome::Missing);
+    };
+    let mut width = usize::MAX;
+    let mut spans = BTreeSet::new();
+    for def in store::symbols_at(tx, snapshot_id, &anchor.path)? {
+        if def.byte_start <= off && off < def.byte_end {
+            let w = def.byte_end - def.byte_start;
+            if w < width {
+                width = w;
+                spans.clear();
+            }
+            if w == width {
+                spans.insert((def.byte_start, def.byte_end));
+            }
+        }
+    }
+    let n = spans.len();
+    if n == 1 {
+        if let Some(&(bs, be)) = spans.iter().next() {
+            return Ok(SpanOutcome::Span(bs, be));
+        }
+    }
+    Ok(if n == 0 {
+        SpanOutcome::Missing
+    } else {
+        SpanOutcome::Ambiguous(n)
+    })
+}
+
+/// Name and type-ness of the definition stored at a byte range.
+fn definition_at(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    file_id: i64,
+    byte_start: usize,
+    byte_end: usize,
+) -> Result<(Option<String>, bool), String> {
+    let mut stmt = tx
+        .prepare("SELECT kind, name FROM symbols WHERE snapshot_id = ?1 AND file_id = ?2 AND byte_start = ?3 AND byte_end = ?4 ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map(
+            params![snapshot_id, file_id, byte_start as i64, byte_end as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    let is_type = !rows.is_empty() && rows.iter().all(|(k, _)| TYPE_KINDS.contains(&k.as_str()));
+    let names: BTreeSet<&str> = rows.iter().filter_map(|(_, n)| n.as_deref()).collect();
+    let name = (names.len() == 1)
+        .then(|| names.iter().next().map(|n| n.to_string()))
+        .flatten();
+    Ok((name, is_type))
+}
+
+/// The anchor's fact identity. Zero or several candidate definitions give an
+/// unavailable identity, never a pick.
+pub(crate) fn fact_identity(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    anchor: &EdgeAnchor,
+) -> Result<FactIdentity, String> {
+    let (byte_start, byte_end) = match syntax_span(tx, snapshot_id, canon, anchor)? {
+        SpanOutcome::Span(bs, be) => (bs, be),
+        SpanOutcome::Missing => {
+            return Ok(FactIdentity::Unavailable {
+                reason: "no-syntax-identity",
+                candidates: None,
+            })
+        }
+        SpanOutcome::Ambiguous(n) => {
+            return Ok(FactIdentity::Unavailable {
+                reason: "ambiguous-syntax-identity",
+                candidates: Some(n),
+            })
+        }
+    };
+    let (file_id, _) =
+        store::file_identity(tx, snapshot_id, &anchor.path)?.ok_or("anchor file is not indexed")?;
+    let (name, is_type) = definition_at(tx, snapshot_id, file_id, byte_start, byte_end)?;
+    Ok(FactIdentity::Span {
+        file_id,
+        byte_start,
+        byte_end,
+        name,
+        is_type,
+    })
+}
+
+struct Container {
+    kind: String,
+    name: Option<String>,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+/// The one recorded container of a child range; several distinct containers
+/// for one child is refused, never chosen between.
+fn nearest_container(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    file_id: i64,
+    child: (usize, usize),
+) -> Result<Option<Container>, String> {
+    let mut stmt = tx
+        .prepare("SELECT DISTINCT parent_kind, parent_name, parent_byte_start, parent_byte_end FROM containment WHERE snapshot_id = ?1 AND file_id = ?2 AND child_byte_start = ?3 AND child_byte_end = ?4")
+        .map_err(|e| e.to_string())?;
+    let found: Vec<Container> = stmt
+        .query_map(
+            params![snapshot_id, file_id, child.0 as i64, child.1 as i64],
+            |r| {
+                Ok(Container {
+                    kind: r.get(0)?,
+                    name: r.get(1)?,
+                    byte_start: r.get::<_, i64>(2)? as usize,
+                    byte_end: r.get::<_, i64>(3)? as usize,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.into_iter().next()),
+        n => Err(format!(
+            "ambiguous nearest container: {n} recorded containers"
+        )),
+    }
+}
+
+fn has_symbol_at(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    file_id: i64,
+    span: (usize, usize),
+) -> Result<bool, String> {
+    let n: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE snapshot_id = ?1 AND file_id = ?2 AND byte_start = ?3 AND byte_end = ?4",
+            params![snapshot_id, file_id, span.0 as i64, span.1 as i64],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
+/// Containment ancestors (nearest first, at most `MAX_ANCESTORS` read) and the
+/// direct members of the anchor range, in one file.
+pub(crate) fn containment_facts(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    path: &str,
+    file_id: i64,
+    span: (usize, usize),
+    limit: usize,
+) -> Result<ContainmentFacts, String> {
+    let source = verified_source(tx, snapshot_id, canon, path)?;
+    let mut chain = Vec::new();
+    let mut current = span;
+    let mut truncated_depth = false;
+    while let Some(parent) = nearest_container(tx, snapshot_id, file_id, current)? {
+        if chain.len() == MAX_ANCESTORS {
+            truncated_depth = true;
+            break;
+        }
+        current = (parent.byte_start, parent.byte_end);
+        chain.push(parent);
+    }
+    let known = chain.len();
+    let mut ancestors = Vec::new();
+    for parent in chain.into_iter().take(limit) {
+        ancestors.push(ContainerRow {
+            symbol: has_symbol_at(
+                tx,
+                snapshot_id,
+                file_id,
+                (parent.byte_start, parent.byte_end),
+            )?,
+            line: line_at(source.as_deref(), parent.byte_start),
+            kind: parent.kind,
+            name: parent.name,
+            path: path.to_string(),
+            byte_start: parent.byte_start,
+            byte_end: parent.byte_end,
+        });
+    }
+    let ancestors = counted(ancestors, known, (!truncated_depth).then_some(known), limit);
+
+    let total: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM containment WHERE snapshot_id = ?1 AND file_id = ?2 AND parent_byte_start = ?3 AND parent_byte_end = ?4",
+            params![snapshot_id, file_id, span.0 as i64, span.1 as i64],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stmt = tx
+        .prepare("SELECT child_kind, child_name, child_byte_start, child_byte_end FROM containment WHERE snapshot_id = ?1 AND file_id = ?2 AND parent_byte_start = ?3 AND parent_byte_end = ?4 ORDER BY child_byte_start, child_byte_end, id LIMIT ?5")
+        .map_err(|e| e.to_string())?;
+    let members: Vec<MemberRow> = stmt
+        .query_map(
+            params![
+                snapshot_id,
+                file_id,
+                span.0 as i64,
+                span.1 as i64,
+                limit as i64
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)? as usize,
+                    r.get::<_, i64>(3)? as usize,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?
+        .map(|row| {
+            row.map(|(kind, name, byte_start, byte_end)| MemberRow {
+                kind,
+                name,
+                path: path.to_string(),
+                byte_start,
+                byte_end,
+                line: line_at(source.as_deref(), byte_start),
+            })
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    let members = counted(members, total as usize, Some(total as usize), limit);
+    Ok(ContainmentFacts {
+        ancestors,
+        truncated_depth,
+        members,
+    })
+}
+
+/// Supertypes declared at the anchor range; implementations and subtypes by
+/// name. The name lookups run only when the anchor names a type.
+pub(crate) fn heritage_facts(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    file_id: i64,
+    span: (usize, usize),
+    name: Option<&str>,
+    is_type: bool,
+    limit: usize,
+) -> Result<HeritageFacts, String> {
+    let (bs, be) = (span.0 as i64, span.1 as i64);
+    let total: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM heritage WHERE snapshot_id = ?1 AND file_id = ?2 AND decl_byte_start = ?3 AND decl_byte_end = ?4",
+            params![snapshot_id, file_id, bs, be],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stmt = tx
+        .prepare("SELECT relation, supertype_text, supertype_name, start_line FROM heritage WHERE snapshot_id = ?1 AND file_id = ?2 AND decl_byte_start = ?3 AND decl_byte_end = ?4 ORDER BY byte_start, byte_end, id LIMIT ?5")
+        .map_err(|e| e.to_string())?;
+    let mut supertypes = Vec::new();
+    let rows = stmt
+        .query_map(params![snapshot_id, file_id, bs, be, limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, u32>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (relation, text, supertype_name, line) = row.map_err(|e| e.to_string())?;
+        let (supertype_text, text_truncated) = cap_text(&text);
+        supertypes.push(SupertypeRow {
+            relation,
+            supertype_text,
+            text_truncated,
+            supertype_name,
+            line,
+        });
+    }
+    let supertypes = counted(supertypes, total as usize, Some(total as usize), limit);
+
+    let mut implementations = empty_counted();
+    let mut subtypes = empty_counted();
+    if let (true, Some(name)) = (is_type, name) {
+        let same_name: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE snapshot_id = ?1 AND name = ?2",
+                params![snapshot_id, name],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let same_name = same_name as usize;
+        implementations = name_matched(
+            tx,
+            "SELECT COUNT(*) FROM heritage h WHERE h.snapshot_id = ?1 AND h.subtype = ?2 AND NOT (h.file_id = ?3 AND h.decl_byte_start = ?4 AND h.decl_byte_end = ?5)",
+            "SELECT h.subtype, h.relation, h.supertype_text, h.supertype_name, f.path, h.start_line FROM heritage h JOIN files f ON f.id = h.file_id WHERE h.snapshot_id = ?1 AND h.subtype = ?2 AND NOT (h.file_id = ?3 AND h.decl_byte_start = ?4 AND h.decl_byte_end = ?5) ORDER BY f.path, h.byte_start, h.id LIMIT ?6",
+            &[
+                rusqlite::types::Value::Integer(snapshot_id),
+                rusqlite::types::Value::Text(name.to_string()),
+                rusqlite::types::Value::Integer(file_id),
+                rusqlite::types::Value::Integer(bs),
+                rusqlite::types::Value::Integer(be),
+            ],
+            limit,
+            same_name,
+        )?;
+        subtypes = name_matched(
+            tx,
+            "SELECT COUNT(*) FROM heritage h WHERE h.snapshot_id = ?1 AND h.supertype_name = ?2",
+            "SELECT h.subtype, h.relation, h.supertype_text, h.supertype_name, f.path, h.start_line FROM heritage h JOIN files f ON f.id = h.file_id WHERE h.snapshot_id = ?1 AND h.supertype_name = ?2 ORDER BY f.path, h.byte_start, h.id LIMIT ?3",
+            &[
+                rusqlite::types::Value::Integer(snapshot_id),
+                rusqlite::types::Value::Text(name.to_string()),
+            ],
+            limit,
+            same_name,
+        )?;
+    }
+    Ok(HeritageFacts {
+        supertypes,
+        implementations,
+        subtypes,
+        anchor_is_type: is_type,
+    })
+}
+
+/// One name-matched heritage list: the full count, then at most `limit` rows.
+/// `args` bind the count query; the row query takes them plus the limit.
+fn name_matched(
+    tx: &rusqlite::Connection,
+    count_sql: &str,
+    rows_sql: &str,
+    args: &[rusqlite::types::Value],
+    limit: usize,
+    same_name: usize,
+) -> Result<Counted<HeritageRow>, String> {
+    let total: i64 = tx
+        .query_row(
+            count_sql,
+            rusqlite::params_from_iter(args.iter().cloned()),
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut row_args = args.to_vec();
+    row_args.push(rusqlite::types::Value::Integer(limit as i64));
+    let mut stmt = tx.prepare(rows_sql).map_err(|e| e.to_string())?;
+    let mapped = stmt
+        .query_map(rusqlite::params_from_iter(row_args), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, u32>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for row in mapped {
+        let (subtype, relation, text, supertype_name, path, line) =
+            row.map_err(|e| e.to_string())?;
+        let (supertype_text, text_truncated) = cap_text(&text);
+        rows.push(HeritageRow {
+            subtype,
+            relation,
+            supertype_text,
+            text_truncated,
+            supertype_name,
+            path,
+            line,
+            same_name_definitions: same_name,
+        });
+    }
+    let total = total as usize;
+    Ok(counted(rows, total, Some(total), limit))
+}
+
+/// Files the anchor's file imports (an import statement resolves when a
+/// recorded file matches it) and files that import it.
+pub(crate) fn import_facts(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    path: &str,
+    limit: usize,
+) -> Result<ImportFacts, String> {
+    let file_id = store::file_identity(tx, snapshot_id, path)?.map(|(id, _)| id);
+    let targets: Vec<String> = store::file_id_map(tx, snapshot_id)?.into_keys().collect();
+    let mut imports = BTreeSet::new();
+    let mut unresolved = 0usize;
+    if let Some(file_id) = file_id {
+        let mut stmt = tx
+            .prepare("SELECT text, start_line, language FROM imports WHERE snapshot_id = ?1 AND file_id = ?2 ORDER BY byte_start, id")
+            .map_err(|e| e.to_string())?;
+        let statements: Vec<(Option<String>, u32, String)> = stmt
+            .query_map(params![snapshot_id, file_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        for (text, line, language) in statements {
+            let text = text.unwrap_or_default();
+            let hits: Vec<&String> = targets
+                .iter()
+                .filter(|t| import_mentions_path(path, &language, &text, t.as_str()))
+                .collect();
+            if hits.is_empty() {
+                unresolved += 1;
+            }
+            for target in hits {
+                imports.insert((target.clone(), line));
+            }
+        }
+    }
+    let mut imported_by = BTreeSet::new();
+    let mut stmt = tx
+        .prepare("SELECT f.path, i.text, i.start_line, i.language FROM imports i JOIN files f ON f.id = i.file_id WHERE i.snapshot_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, u32, String)> = stmt
+        .query_map(params![snapshot_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for (importer, text, line, language) in rows {
+        if import_mentions_path(&importer, &language, text.as_deref().unwrap_or(""), path) {
+            imported_by.insert((importer, line));
+        }
+    }
+    let to_refs = |set: BTreeSet<(String, u32)>| -> Counted<FileRef> {
+        let known = set.len();
+        let rows = set
+            .into_iter()
+            .map(|(path, line)| FileRef { path, line })
+            .collect();
+        counted(rows, known, Some(known), limit)
+    };
+    Ok(ImportFacts {
+        imports: to_refs(imports),
+        imported_by: to_refs(imported_by),
+        unresolved,
+    })
+}
+
+fn empty_counted<T>() -> Counted<T> {
+    Counted {
+        total: Some(0),
+        rows: Vec::new(),
+        omitted_by_limit: 0,
+    }
+}
+
 pub fn semantic_query_lsp(
     root: &Path,
     query: &SpanQuery<'_>,
@@ -5451,6 +6137,34 @@ mod tests {
     }
 
     #[test]
+    fn a_c_include_never_takes_the_javascript_suffixes() {
+        let include = "#include \"helper\"";
+        for language in ["c", "cpp"] {
+            // The literal names no extension, so no sibling file of another
+            // language is a candidate, in either direction.
+            for target in ["helper.ts", "helper.js", "helper/index.js"] {
+                assert!(
+                    !import_mentions_path("main.c", language, include, target),
+                    "{language} {target}"
+                );
+            }
+            assert!(import_mentions_path(
+                "main.c",
+                language,
+                "#include \"helper.h\"",
+                "helper.h"
+            ));
+        }
+        // The relative JavaScript form keeps its suffix list.
+        assert!(import_mentions_path(
+            "src/a.js",
+            "javascript",
+            "import x from './helper'",
+            "src/helper.js"
+        ));
+    }
+
+    #[test]
     fn rust_crate_src_root_is_the_last_src_component() {
         assert_eq!(
             rust_crate_src_root("crates/cli/src/knowledge_store.rs"),
@@ -6288,5 +7002,67 @@ mod name_matching {
             definition_paths(&conn, 1, "running").unwrap(),
             vec!["v.cpp"]
         );
+    }
+
+    fn semantic_anchor(path: &str, line1: u32, col1: u32) -> EdgeAnchor {
+        EdgeAnchor {
+            kind: AnchorKind::Semantic,
+            path: path.to_string(),
+            line1,
+            col1,
+            symbol_uri: Some("scip-test pkg 1 a.py/f().".to_string()),
+            import_id: Some(1),
+            doc: None,
+            display: None,
+            candidate_display: None,
+            // The SCIP occurrence span, which is not a definition span.
+            span_bytes: Some((0, 1)),
+            precision: "Exact".to_string(),
+            uncertainty: None,
+            data_member: false,
+        }
+    }
+
+    #[test]
+    fn a_semantic_anchor_takes_its_fact_identity_from_the_enclosing_definition() {
+        use crate::testutil::tmpdir;
+        let home = tmpdir("fact-identity-home");
+        let root = tmpdir("fact-identity-repo").canonicalize().unwrap();
+        // Line 1 is blank: no definition encloses it.
+        std::fs::write(
+            root.join("a.py"),
+            b"
+class Box :
+    def inner(self):
+        return 1
+",
+        )
+        .unwrap();
+        build_full(&home, "r", &root).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        // Inside `inner`: the narrowest enclosing definition is the method.
+        let id = fact_identity(&conn, snap.id, &root, &semantic_anchor("a.py", 4, 9)).unwrap();
+        let FactIdentity::Span { name, is_type, .. } = id else {
+            panic!("expected a span identity");
+        };
+        assert_eq!(name.as_deref(), Some("inner"));
+        assert!(!is_type);
+        // On the class line, outside the method: the class.
+        let id = fact_identity(&conn, snap.id, &root, &semantic_anchor("a.py", 2, 8)).unwrap();
+        let FactIdentity::Span { name, is_type, .. } = id else {
+            panic!("expected a span identity");
+        };
+        assert_eq!(name.as_deref(), Some("Box"));
+        assert!(is_type);
+        // The blank first line is inside no definition: no identity, no pick.
+        let id = fact_identity(&conn, snap.id, &root, &semantic_anchor("a.py", 1, 1)).unwrap();
+        assert!(matches!(
+            id,
+            FactIdentity::Unavailable {
+                reason: "no-syntax-identity",
+                candidates: None
+            }
+        ));
     }
 }

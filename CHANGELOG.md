@@ -6,6 +6,13 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Added
 
+- `context` (CLI and MCP `riltra_context`) appends four read-only sections: `containment`
+  (enclosing scopes and direct members), `heritage` (declared supertypes, name-matched
+  implementations and subtypes), `imports` (file imports and importers, with an unresolved
+  count) and `callees` (the `callees` edges). They are always present, read on the same pinned
+  snapshot as the graph, and limited per list by `--limit` and by `--max-bytes`. Limits are in
+  [capabilities](docs/guide/capabilities.md#context-fact-sections).
+
 - `riltra changes` and the MCP tool `riltra_code_changes`: the definitions a git change
   touches (scopes unstaged, staged, all, compare), from a live parse of Python,
   JavaScript, TypeScript, Rust, C, C++, Go and Java files, with caller counts as
@@ -47,6 +54,11 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 - `callers`, `callees`, `trace`, `impact` and `context` add `candidates` and `candidate_scope` to each `POTENTIAL_CALL` edge: the count of name-matched function and method definitions (declarations included) and their place relative to the caller (`same-file`, `imported-file`, `other-file`, `none`). `imported-file` is a file-level link, not a resolution. In the CLI output of `callers`, `callees`, `trace` and `impact` they are the last two keys of the edge object; `context` and the MCP tools sort their keys, so the two keys sit in sorted order there. Derived at read time; no schema or parser change, and the edge is not promoted to `CALLS`.
 
 ### Fixed
+
+- A C or C++ `#include "name"` no longer matches a JavaScript or TypeScript file
+  (`name.ts`, `name.js`, `name/index.js`) as an imported file. The include
+  matches only a file of exactly the name it writes. This also removes such a
+  file from the `imported-file` candidate scope of a call edge.
 
 - Syntax calibration against hand-written fixtures: Rust enums, traits, trait
   method signatures and type aliases; C and C++ enums and typedefs; C++ `using`

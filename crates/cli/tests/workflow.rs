@@ -807,9 +807,12 @@ fn context_keeps_its_shape_and_shows_no_candidates() {
     assert!(!out.contains("candidate-name"), "{out}");
     assert!(!out.contains("\"basis\""), "{out}");
     assert!(!out.contains("\"candidates\""), "{out}");
+    // `imports.imported_by` lists b.py as an importer of a.py (a file fact,
+    // not a candidate); the candidate caller must still not be a graph node.
+    let nodes = json_of(&out)["graph"]["nodes"].to_string();
     assert!(
-        !out.contains("b.py"),
-        "the candidate caller must not be a node: {out}"
+        !nodes.contains("b.py"),
+        "the candidate caller must not be a node: {nodes}"
     );
 }
 

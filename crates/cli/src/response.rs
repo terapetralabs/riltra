@@ -520,6 +520,7 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             serde_json::json!(omitted_bindings_by_limit),
         );
     }
+    let mut fact_doc = build_fact_doc(&result.facts)?;
     let mut omitted_query_hits = 0usize;
     let mut omitted_semantic_hits = 0usize;
     let mut omitted_bindings_by_budget = 0usize;
@@ -544,6 +545,8 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             + count_truncated_snippets_in(&query_hits)
             + count_truncated_snippets_in(&semantic_hits);
         let query_limited = result.knowledge.query.truncated == Some(true);
+        let (fact_values, fact_truncated, fact_reasons) =
+            fact_sections_json(&result.facts, &fact_doc);
         let truncated = trace.truncated
             || omitted_edges > 0
             || omitted_nodes > 0
@@ -552,7 +555,8 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             || omitted_bindings_by_budget > 0
             || omitted_bindings_by_limit.is_some_and(|count| count > 0)
             || snippet_truncated > 0
-            || query_limited;
+            || query_limited
+            || fact_truncated;
         let mut graph_reasons = trace.unresolved.clone();
         if context_limit_omitted_edges > 0 || context_limit_omitted_nodes > 0 {
             graph_reasons.push("context-limit".to_string());
@@ -578,9 +582,10 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
         if query_limited {
             truncation_reasons.push("query-limit".to_string());
         }
+        truncation_reasons.extend(fact_reasons.iter().map(|r| r.to_string()));
         truncation_reasons.sort();
         truncation_reasons.dedup();
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "schema_version": 1,
             "operation": "context",
             "repo": &trace.repo,
@@ -673,6 +678,9 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
                 "reasons": truncation_reasons,
             },
         });
+        if let Some(fields) = value.as_object_mut() {
+            fields.extend(fact_values);
+        }
         #[cfg(feature = "semantic-knowledge")]
         let value = {
             let mut value = value;
@@ -689,6 +697,7 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             || shrink_first_snippet(&mut bindings)
         {
             continue;
+        } else if fact_doc.drop_one_row() {
         } else if !semantic_hits.is_empty() {
             semantic_hits.pop();
             omitted_semantic_hits += 1;
@@ -713,6 +722,335 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             return Err("context response metadata exceeds max_bytes".to_string());
         }
     }
+}
+
+/// One list of a context fact section, held as row values so the byte budget
+/// can drop its last row. `omitted_by_limit` is set by the read; the budget
+/// count is set here.
+struct FactList {
+    total: Option<usize>,
+    rows: Vec<serde_json::Value>,
+    omitted_by_limit: usize,
+    omitted_by_budget: usize,
+}
+
+impl FactList {
+    fn from<T>(
+        list: &index::Counted<T>,
+        row: impl Fn(&T) -> Result<serde_json::Value, String>,
+    ) -> Result<Self, String> {
+        Ok(FactList {
+            total: list.total,
+            rows: list.rows.iter().map(row).collect::<Result<_, _>>()?,
+            omitted_by_limit: list.omitted_by_limit,
+            omitted_by_budget: 0,
+        })
+    }
+
+    fn empty() -> Self {
+        FactList {
+            total: Some(0),
+            rows: Vec::new(),
+            omitted_by_limit: 0,
+            omitted_by_budget: 0,
+        }
+    }
+
+    fn omitted(&self) -> bool {
+        self.omitted_by_limit > 0 || self.omitted_by_budget > 0
+    }
+
+    fn value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "total": self.total,
+            "returned": self.rows.len(),
+            "omitted_by_limit": self.omitted_by_limit,
+            "omitted_by_budget": self.omitted_by_budget,
+            "rows": self.rows,
+        })
+    }
+}
+
+/// Every list of the four fact sections, in the order the byte budget spends them.
+struct FactDoc {
+    imported_by: FactList,
+    imports: FactList,
+    subtypes: FactList,
+    implementations: FactList,
+    supertypes: FactList,
+    members: FactList,
+    edges: FactList,
+    ancestors: FactList,
+    depth_cut: bool,
+}
+
+impl FactDoc {
+    fn lists(&self) -> [&FactList; 8] {
+        [
+            &self.imported_by,
+            &self.imports,
+            &self.subtypes,
+            &self.implementations,
+            &self.supertypes,
+            &self.members,
+            &self.edges,
+            &self.ancestors,
+        ]
+    }
+
+    /// Drops the last row of the first list that still has one. Order:
+    /// imported_by, imports, subtypes, implementations, supertypes, members,
+    /// callees, then ancestors (outermost first, since the chain is innermost first).
+    fn drop_one_row(&mut self) -> bool {
+        for list in [
+            &mut self.imported_by,
+            &mut self.imports,
+            &mut self.subtypes,
+            &mut self.implementations,
+            &mut self.supertypes,
+            &mut self.members,
+            &mut self.edges,
+            &mut self.ancestors,
+        ] {
+            if list.rows.pop().is_some() {
+                list.omitted_by_budget += 1;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn build_fact_doc(facts: &index::FactSections) -> Result<FactDoc, String> {
+    let total = facts.callees.completeness.total;
+    let callee_rows = facts
+        .callees
+        .edges
+        .iter()
+        .map(|hit| {
+            serde_json::from_str(&edge_hit_json(hit))
+                .map_err(|e| format!("context callee assembly failed: {e}"))
+        })
+        .collect::<Result<Vec<serde_json::Value>, String>>()?;
+    let edges = FactList {
+        total: Some(total),
+        omitted_by_limit: total.saturating_sub(callee_rows.len()),
+        rows: callee_rows,
+        omitted_by_budget: 0,
+    };
+    let (ancestors, members, supertypes, implementations, subtypes, depth_cut) =
+        match (&facts.containment, &facts.heritage) {
+            (Some(c), Some(h)) => (
+                FactList::from(&c.ancestors, |r| {
+                    Ok(serde_json::json!({
+                        "kind": r.kind,
+                        "name": r.name,
+                        "path": r.path,
+                        "byte_start": r.byte_start,
+                        "byte_end": r.byte_end,
+                        "line": r.line,
+                        "symbol": r.symbol,
+                    }))
+                })?,
+                FactList::from(&c.members, |r| {
+                    Ok(serde_json::json!({
+                        "kind": r.kind,
+                        "name": r.name,
+                        "path": r.path,
+                        "byte_start": r.byte_start,
+                        "byte_end": r.byte_end,
+                        "line": r.line,
+                    }))
+                })?,
+                FactList::from(&h.supertypes, |r| {
+                    Ok(serde_json::json!({
+                        "basis": "declared-at-anchor",
+                        "relation": r.relation,
+                        "supertype_text": r.supertype_text,
+                        "supertype_name": r.supertype_name,
+                        "text_truncated": r.text_truncated,
+                        "line": r.line,
+                    }))
+                })?,
+                FactList::from(&h.implementations, |r| {
+                    Ok(serde_json::json!({
+                        "basis": "name-match",
+                        "relation": r.relation,
+                        "supertype_text": r.supertype_text,
+                        "supertype_name": r.supertype_name,
+                        "text_truncated": r.text_truncated,
+                        "path": r.path,
+                        "line": r.line,
+                        "same_name_definitions": r.same_name_definitions,
+                    }))
+                })?,
+                FactList::from(&h.subtypes, |r| {
+                    Ok(serde_json::json!({
+                        "basis": "name-match",
+                        "subtype": r.subtype,
+                        "relation": r.relation,
+                        "path": r.path,
+                        "line": r.line,
+                        "same_name_definitions": r.same_name_definitions,
+                    }))
+                })?,
+                c.truncated_depth,
+            ),
+            _ => (
+                FactList::empty(),
+                FactList::empty(),
+                FactList::empty(),
+                FactList::empty(),
+                FactList::empty(),
+                false,
+            ),
+        };
+    let file_row = |r: &index::FileRef| Ok(serde_json::json!({"path": r.path, "line": r.line}));
+    Ok(FactDoc {
+        imported_by: FactList::from(&facts.imports.imported_by, file_row)?,
+        imports: FactList::from(&facts.imports.imports, file_row)?,
+        subtypes,
+        implementations,
+        supertypes,
+        members,
+        edges,
+        ancestors,
+        depth_cut,
+    })
+}
+
+/// A section status from its lists: `none-recorded` when every list is
+/// empty, `truncated` when any list omitted a row, else `ok`.
+fn section_status(
+    lists: &[&FactList],
+    depth_cut: bool,
+    none_reason: &'static str,
+    ok_reason: Option<&'static str>,
+) -> (&'static str, Option<&'static str>) {
+    if lists.iter().all(|l| l.total == Some(0)) {
+        return ("none-recorded", Some(none_reason));
+    }
+    if depth_cut || lists.iter().any(|l| l.omitted()) {
+        ("truncated", ok_reason)
+    } else {
+        ("ok", ok_reason)
+    }
+}
+
+/// The four fact sections as document keys, whether the document is truncated
+/// by them, and the reasons they add to `truncation.reasons`.
+fn fact_sections_json(
+    facts: &index::FactSections,
+    doc: &FactDoc,
+) -> (
+    serde_json::Map<String, serde_json::Value>,
+    bool,
+    Vec<&'static str>,
+) {
+    let lists = doc.lists();
+    let any_limit = lists.iter().any(|l| l.omitted_by_limit > 0);
+    let any_budget = lists.iter().any(|l| l.omitted_by_budget > 0);
+    let truncated = doc.depth_cut || any_limit || any_budget;
+    let mut reasons = Vec::new();
+    if any_limit {
+        reasons.push("section-limit");
+    }
+    if doc.depth_cut {
+        reasons.push("section-depth");
+    }
+    if any_budget {
+        reasons.push("output-byte-budget");
+    }
+    let unavailable = match &facts.identity {
+        index::FactIdentity::Unavailable { reason, candidates } => Some((*reason, *candidates)),
+        index::FactIdentity::Span { .. } => None,
+    };
+    let status_of =
+        |lists: &[&FactList], depth: bool, none: &'static str, ok: Option<&'static str>| {
+            match unavailable {
+                Some((reason, _)) => ("unavailable", Some(reason)),
+                None => section_status(lists, depth, none, ok),
+            }
+        };
+    let mut sections = serde_json::Map::new();
+
+    let (status, reason) = status_of(
+        &[&doc.ancestors, &doc.members],
+        doc.depth_cut,
+        "syntax-facts-none-recorded",
+        None,
+    );
+    let mut containment = serde_json::json!({
+        "label": "Syntax",
+        "status": status,
+        "reason": reason,
+        "ancestors": doc.ancestors.value(),
+        "members": doc.members.value(),
+    });
+    containment["ancestors"]["truncated_depth"] = serde_json::json!(doc.depth_cut);
+    if let Some((_, Some(count))) = unavailable {
+        containment["candidates"] = serde_json::json!(count);
+    }
+    sections.insert("containment".to_string(), containment);
+
+    let is_type = facts.heritage.as_ref().is_some_and(|h| h.anchor_is_type);
+    let (status, reason) = status_of(
+        &[&doc.supertypes, &doc.implementations, &doc.subtypes],
+        false,
+        if is_type {
+            "syntax-facts-none-recorded"
+        } else {
+            "anchor-not-a-type"
+        },
+        (!is_type).then_some("anchor-not-a-type"),
+    );
+    let mut heritage = serde_json::json!({
+        "label": "Heuristic",
+        "status": status,
+        "reason": reason,
+        "supertypes": doc.supertypes.value(),
+        "implementations": doc.implementations.value(),
+        "subtypes": doc.subtypes.value(),
+    });
+    if let Some((_, Some(count))) = unavailable {
+        heritage["candidates"] = serde_json::json!(count);
+    }
+    sections.insert("heritage".to_string(), heritage);
+
+    let (status, reason) = section_status(
+        &[&doc.imports, &doc.imported_by],
+        false,
+        "empty-result-not-coverage-proof",
+        None,
+    );
+    sections.insert(
+        "imports".to_string(),
+        serde_json::json!({
+            "label": "Syntax",
+            "status": status,
+            "reason": reason,
+            "imports": doc.imports.value(),
+            "imported_by": doc.imported_by.value(),
+            "unresolved": facts.imports.unresolved,
+        }),
+    );
+
+    let (status, reason) = section_status(
+        &[&doc.edges],
+        false,
+        "empty-result-not-coverage-proof",
+        None,
+    );
+    sections.insert(
+        "callees".to_string(),
+        serde_json::json!({
+            "label": facts.callees.anchor.precision,
+            "status": status,
+            "reason": reason,
+            "edges": doc.edges.value(),
+        }),
+    );
+    (sections, truncated, reasons)
 }
 
 fn context_hits_json(

@@ -447,7 +447,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_context",
-        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to inspect code impact and its recorded rationale together.",
+        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. The result also carries four read-only sections: `containment` (enclosing scopes and direct members), `heritage` (declared supertypes, name-matched implementations and subtypes), `imports` (file imports and importers) and `callees` (the callees edges), each with per-list counts. When to call: to inspect code impact and its recorded rationale together.",
         annotations(
             title = "Read graph context",
             read_only_hint = true,

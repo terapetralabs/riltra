@@ -1005,7 +1005,7 @@ fn query_doc(input: &QueryInput) -> CallToolResult {
         store::IndexRead::Ready(mut conn) => {
             match lexical::ready_document(&mut conn, &input.repo, &recorded, &input.text, limit) {
                 Ok(text) => exact_doc(&text),
-                Err(message) => tool_error("store_error", &message),
+                Err(refusal) => tool_error(refusal.kind, &refusal.message),
             }
         }
     }

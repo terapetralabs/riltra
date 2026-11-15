@@ -1561,6 +1561,30 @@ fn a_text_with_newlines_backticks_and_accents_and_a_dash_led_text_are_read_as_te
 }
 
 #[test]
+fn a_migrated_index_with_no_concept_rows_is_refused_not_answered_no_match() {
+    // `search` migrates a v5 index to v6 and leaves `concept_fts` empty; the schema
+    // version alone then looks current. Simulate that state: schema 6, no concept rows.
+    let h = home("q-unbuilt");
+    indexed(&h, "r");
+    let db = db_file(&h, "r");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let symbols: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+        .unwrap();
+    assert!(symbols > 0, "the fixture has symbols");
+    conn.execute("DELETE FROM concept_fts", []).unwrap();
+    drop(conn);
+    let (code, out, err) = query_raw(&h, "save", &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("concept") && err.contains("riltra index --repo r"),
+        "{err}"
+    );
+    assert!(!err.contains("no-match"), "{err}");
+}
+
+#[test]
 fn an_outdated_database_is_refused_and_not_migrated() {
     let h = home("q-outdated");
     indexed(&h, "r");

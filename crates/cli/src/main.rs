@@ -374,8 +374,8 @@ fn cmd_query(
                     *out = document + "\n";
                     0
                 }
-                Err(e) => {
-                    err.push_str(&format!("error: {e}\n"));
+                Err(refusal) => {
+                    err.push_str(&format!("error: {}\n", refusal.message));
                     3
                 }
             }

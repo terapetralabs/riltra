@@ -59,6 +59,22 @@ pub fn validate(text: &str, limit: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// A refusal of a readable index: the MCP error kind and the message both
+/// surfaces print.
+pub struct Refusal {
+    pub kind: &'static str,
+    pub message: String,
+}
+
+impl Refusal {
+    fn store(message: impl ToString) -> Self {
+        Refusal {
+            kind: "store_error",
+            message: message.to_string(),
+        }
+    }
+}
+
 /// The refusal for a database whose schema this binary does not read.
 pub fn ahead_message(version: u32) -> String {
     format!(
@@ -258,13 +274,34 @@ pub fn ready_document(
     recorded: &str,
     text: &str,
     limit: usize,
-) -> Result<String, String> {
+) -> Result<String, Refusal> {
     let terms = extract_terms(text);
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(Refusal::store)?;
     let snapshot = match store::latest_snapshot(&tx) {
         Ok(Some(snapshot)) => snapshot,
-        _ => return Err(UNREADABLE.to_string()),
+        _ => return Err(Refusal::store(UNREADABLE)),
     };
+    // `concept_fts` has one row per symbol. A schema-5 index migrated by another
+    // command (`search` opens it live) is schema 6 with no concept rows, and would
+    // answer `no-match` to everything.
+    let symbols: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE snapshot_id = ?1",
+            [snapshot.id],
+            |r| r.get(0),
+        )
+        .map_err(Refusal::store)?;
+    let concept_rows: i64 = tx
+        .query_row("SELECT COUNT(*) FROM concept_fts", [], |r| r.get(0))
+        .map_err(Refusal::store)?;
+    if symbols != concept_rows {
+        return Err(Refusal {
+            kind: "concept_not_built",
+            message: format!(
+                "the concept search table of '{repo}' was never built for this snapshot (migrated, not rebuilt); run `riltra index --repo {repo}` to build it, then retry"
+            ),
+        });
+    }
     let (freshness, reasons, root) = match Path::new(recorded).canonicalize() {
         Ok(canon) => {
             let (status, reasons) = index::evaluate_snapshot(&tx, repo, &canon, &snapshot);
@@ -276,8 +313,9 @@ pub fn ready_document(
             recorded.to_string(),
         ),
     };
-    let answer = query_tx(&tx, snapshot.id, &terms, limit, CANDIDATE_CAP)?;
-    tx.commit().map_err(|e| e.to_string())?;
+    let answer =
+        query_tx(&tx, snapshot.id, &terms, limit, CANDIDATE_CAP).map_err(Refusal::store)?;
+    tx.commit().map_err(Refusal::store)?;
     let reason = if terms.is_empty() {
         Some("no-extractable-term")
     } else if answer.hits.is_empty() {

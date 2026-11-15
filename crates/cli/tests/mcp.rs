@@ -6634,6 +6634,37 @@ fn code_query_is_read_only_and_its_schema_takes_repo_text_and_limit() {
 }
 
 #[test]
+fn code_query_refuses_an_index_whose_concept_rows_were_never_built() {
+    let h = home("q-unbuilt");
+    let r = home("q-unbuilt-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let db = h.join("index").join("r.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM concept_fts", []).unwrap();
+    drop(conn);
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_query",
+        &json!({"repo": "r", "text": "alpha one"}),
+    );
+    assert!(is_error(&res), "{res}");
+    let d = doc(&res);
+    assert_eq!(d["kind"], "concept_not_built", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("riltra index --repo r"),
+        "{d}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn code_query_matches_the_cli_document_byte_for_byte_and_refuses_bad_input() {
     let h = home("q-parity");
     let r = home("q-parity-repo");

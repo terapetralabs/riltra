@@ -114,9 +114,7 @@ taken on the tool's raw result (supported-language files, tests included), befor
 occurs as a substring of the lowercase query text. It uses git and the manifest only, never Riltra
 output. It is **not a ceiling and not a lower or upper bound**, and it errs in both directions: a
 gold `storage.rs` with the query `evict_entry` is false, although the symbol name is a direct hint;
-the stem `main` matches inside `maintain`, although no file `main` is named. The plan's ceiling
-("tasks whose gold file is named nowhere in the text") is deferred: a sound version needs symbol
-names, which come from a parser, not from git.
+the stem `main` matches inside `maintain`, although no file `main` is named. The plan's ceiling ("tasks whose gold file is named nowhere in the text") is not measured; the measurement is not finished. `name_hint` is only a descriptive heuristic; the definition and measurement of how a text mentions its gold files will be handled separately.
 
 **Output change (PR 9)**: `run` output gains the `R` block per task, the `R` summary (with
 `abstained`), three pairs (`R-B1`, `R-B2`, `R-B3`), and the `name_hint` true/false counts. PR 8

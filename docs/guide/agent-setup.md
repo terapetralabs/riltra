@@ -65,6 +65,34 @@ The MCP tools cannot write. Decisions and their bindings to code are recorded wi
 
 Confirmation (`confirm_state`) on a knowledge record is stored provenance, not verification: a confirmed note is still a claim by whoever recorded it.
 
+## Opt-in expansion
+
+`query` (CLI) and `riltra_code_query` (MCP) answer with the lexical `results` alone. Pass `expand: true` (CLI `--expand`, a bare flag) when you also want the definitions that the top results call or are called by, one hop along proven edges. Without it the answer is unchanged. It needs a SCIP import for the repository (`riltra semantic import`); without one the status is `none-imported`.
+
+The `expansion` object comes after `basis`. Its `status` is one of five values. The first rule that applies wins, in this order:
+
+- `none-imported`: no valid SCIP import backs the snapshot, or there is no index. Nothing was mapped.
+- `no-seed`: no usable seed. Either the query returned nothing, or every considered seed was skipped; `seeds.items[].skipped` says why (`not-callable`, `unknown-symbol`).
+- `stale`: `reasons` names why. `source-not-fresh` means the snapshot is not `fresh` (including `unknown`); `graph-proof-incompatible` means the stored graph proof does not match the snapshot; `import-stale` means a SCIP import that a seed or an edge depends on no longer matches its source. No row is added.
+- `no-eligible-edge`: the seeds were mapped, but no proven relation added a row. The reason is `empty-result-not-coverage-proof`.
+- `available`: at least one row was added.
+
+A status other than `available` never means that no relations exist. A zero is not coverage: check `seeds` and `unmapped` before you say that a definition has no callers or callees.
+
+What the rules mean in practice:
+
+- Seeds are the first five returned results. Expansion is one hop. It never follows name-matched candidates (`POTENTIAL_CALL`) or imports.
+- Only `function` and `method` definitions can be seeds or added rows.
+- A seed without a SCIP identity gets outgoing relations only, and its item says `"scip": false`. Its callers were not looked for, so that flag never means "no callers".
+- Today only `CALLS` edges add rows. `REFERENCES` edges are stored without a caller identity, so each one is counted in `unmapped` and none becomes a row.
+- Every added row has `"precision": "Exact"` and `"evidence_label": "Unverified"`. Expanded rows are never labelled `Current`.
+- Expansion runs only when the source matches the index. Uncommitted Git changes, or any source change since indexing, make the snapshot stale, so the answer is `stale` with `source-not-fresh`. This is an accepted limit.
+- A failed database read is an error, not a status: the CLI exits 3 with `error:` and the MCP tool answers `store_error`. No partial answer is printed.
+
+The caps are 5 seeds, 5 added rows per seed, 25 in total, and 200 edges read per seed and direction, shared by all of that seed's identities. `omitted` counts eligible rows left out by a cap. `read_bounded` is true when a read stopped at the edge budget, and `truncated` is true when either a row was omitted or a read was bounded. When `read_bounded` is true, `unmapped` is a lower bound.
+
+The `expansion` keys appear in this order: `status`, `reasons`, `limits` (`seeds`, `per_seed`, `total`, `edge_read`), `seeds` (`considered`, `mapped`, `skipped`, `items`), `added`, `omitted`, `truncated`, `rows`. Each row has `path`, `line`, `name`, `kind` and `via`. `via` has `seed` (`path`, `line`, `name`), `edge`, `direction`, `precision` and `evidence_label`. `direction` says what the added row is to the seed: `callee` means the seed calls it, and `caller` means it calls the seed.
+
 ## Positions
 
 `line` and `col` are 1-based. For the graph tools (`callers`, `callees`, `trace`, `impact`) the column counts bytes, so on a line with non-ASCII text it differs from an editor's column. Take `line` and `col` from the span of a search result instead of computing them. `riltra_code_semantic` takes its column in the language server's position unit (UTF-16 by default), which is not the byte column.

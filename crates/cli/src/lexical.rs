@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Lexical concept search (PR 9, `query`): a deterministic BM25 ranker over the
-//! `concept_fts` table, shared by the CLI and the MCP tool. Lexical only: no
-//! edge expansion, no stemming, no stoplist, no score in the output.
+//! `concept_fts` table, shared by the CLI and the MCP tool. Lexical by default:
+//! `results` is the ranked list alone. With `expand` (PR 9c), one hop along
+//! proven edges from those results is added under `expansion` (see `expand`).
+//! No stemming, no stoplist, no score in the output.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -9,7 +11,7 @@ use std::path::Path;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, Transaction};
 
-use crate::{concept, index, response, store};
+use crate::{concept, expand, index, response, store};
 
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_TEXT_BYTES: usize = 16384;
@@ -142,6 +144,8 @@ pub struct Hit {
     pub name: Option<String>,
     pub kind: String,
     pub why: Vec<String>,
+    /// Internal, never serialised: the stored span start (expansion identity).
+    pub byte_start: usize,
 }
 
 /// The ranked answer of one query on one snapshot.
@@ -205,6 +209,7 @@ pub fn query_tx(
             name: c.name,
             kind: c.kind,
             why,
+            byte_start: c.byte_start,
         })
         .collect();
     Ok(Answer {
@@ -246,13 +251,16 @@ fn why_for(
     Ok(why)
 }
 
-/// The document of a missing index: `no-index`, created nothing.
-pub fn no_index_document(repo: &str, recorded: &str, text: &str) -> String {
+/// The document of a missing index: `no-index`, created nothing. With `expand`
+/// the document carries an expansion with status `none-imported`: there is no
+/// index, so no import and no seed.
+pub fn no_index_document(repo: &str, recorded: &str, text: &str, expand: bool) -> String {
     let answer = Answer {
         total: 0,
         truncated: false,
         hits: Vec::new(),
     };
+    let expansion = expand.then(expand::none_imported);
     response::query_response_json(&response::QueryResponse {
         repo,
         root: recorded,
@@ -262,6 +270,7 @@ pub fn no_index_document(repo: &str, recorded: &str, text: &str) -> String {
         terms: &extract_terms(text),
         answer: &answer,
         reason: Some("no-index"),
+        expansion: expansion.as_ref(),
     })
 }
 
@@ -274,6 +283,7 @@ pub fn ready_document(
     recorded: &str,
     text: &str,
     limit: usize,
+    expand: bool,
 ) -> Result<String, Refusal> {
     let terms = extract_terms(text);
     let tx = conn.transaction().map_err(Refusal::store)?;
@@ -302,9 +312,10 @@ pub fn ready_document(
             ),
         });
     }
-    let (freshness, reasons, root) = match Path::new(recorded).canonicalize() {
+    let canonical = Path::new(recorded).canonicalize();
+    let (freshness, reasons, root) = match &canonical {
         Ok(canon) => {
-            let (status, reasons) = index::evaluate_snapshot(&tx, repo, &canon, &snapshot);
+            let (status, reasons) = index::evaluate_snapshot(&tx, repo, canon, &snapshot);
             (status, reasons, snapshot.root.clone())
         }
         Err(_) => (
@@ -315,6 +326,31 @@ pub fn ready_document(
     };
     let answer =
         query_tx(&tx, snapshot.id, &terms, limit, CANDIDATE_CAP).map_err(Refusal::store)?;
+    // Expansion reads the same transaction, so its verdicts and rows come from
+    // the pinned state. Its read errors refuse the whole document (R5).
+    let source_fresh = freshness == "fresh";
+    let expansion = if expand {
+        let mut verdict = |id: i64| -> Result<bool, String> {
+            match &canonical {
+                Ok(canon) => index::import_is_stale(&tx, &snapshot, canon, source_fresh, id),
+                Err(e) => Err(format!(
+                    "import verdict requested without a readable root: {e}"
+                )),
+            }
+        };
+        let found = expand::expand(
+            &tx,
+            &snapshot,
+            source_fresh,
+            &answer.hits,
+            &expand::Limits::DEFAULT,
+            &mut verdict,
+        )
+        .map_err(Refusal::store)?;
+        Some(found)
+    } else {
+        None
+    };
     tx.commit().map_err(Refusal::store)?;
     let reason = if terms.is_empty() {
         Some("no-extractable-term")
@@ -332,6 +368,7 @@ pub fn ready_document(
         terms: &terms,
         answer: &answer,
         reason,
+        expansion: expansion.as_ref(),
     }))
 }
 
@@ -450,5 +487,93 @@ mod tests {
     fn the_cap_keeps_the_first_rows_of_one_list() {
         let rows: Vec<Candidate> = (1..=5).map(|i| row(i, "src/prod.rs", i as u32)).collect();
         assert_eq!(ids(&select(rows, true, 3)), [1, 2, 3]);
+    }
+
+    #[test]
+    fn hit_carries_the_stored_byte_start_and_never_serialises_it() {
+        use crate::{concept, response, store};
+        let mut conn = store::open_memory().unwrap();
+        let snap = store::insert_snapshot(
+            &conn,
+            &store::Snapshot {
+                id: 0,
+                repo: "r".to_string(),
+                root: "repo-root".to_string(),
+                created_unix: 1,
+                head: None,
+                branch: None,
+                dirty: false,
+                untracked: 0,
+                parser_version: store::PARSER_VERSION,
+                grammar_versions: store::grammar_versions(),
+                config_fingerprint: "c".to_string(),
+                pre_fingerprint: "p".to_string(),
+                post_fingerprint: "p".to_string(),
+                status_at_write: "fresh".to_string(),
+                nonce: store::new_nonce(),
+            },
+        )
+        .unwrap();
+        let fid = store::insert_file(
+            &conn,
+            snap,
+            &store::FileRow {
+                path: "lib.py".to_string(),
+                language: "python".to_string(),
+                bytes: 40,
+                digest: "d".to_string(),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        store::insert_symbol(
+            &conn,
+            snap,
+            &store::SymbolRow {
+                file_id: fid,
+                kind: "function".to_string(),
+                name: Some("widget_run".to_string()),
+                start_line: 1,
+                start_col: 1,
+                end_line: 2,
+                end_col: 9,
+                byte_start: 24,
+                byte_end: 40,
+                provider: "syntax".to_string(),
+                grammar: "python:0.25.0".to_string(),
+                language: "python".to_string(),
+            },
+        )
+        .unwrap();
+        concept::build_concept_index(&conn, snap).unwrap();
+        let terms = vec!["widget".to_string()];
+        let answer = {
+            let tx = conn.transaction().unwrap();
+            super::query_tx(&tx, snap, &terms, 20, 100).unwrap()
+        };
+        assert_eq!(answer.hits.len(), 1);
+        assert_eq!(answer.hits[0].byte_start, 24, "the stored span start");
+        let render = |answer: &super::Answer| {
+            response::query_response_json(&response::QueryResponse {
+                repo: "demo",
+                root: "repo-root",
+                snapshot: None,
+                freshness: "fresh",
+                reasons: &[],
+                terms: &terms,
+                answer,
+                reason: None,
+                expansion: None,
+            })
+        };
+        let mut moved = answer.clone();
+        moved.hits[0].byte_start = 999;
+        let json = render(&answer);
+        assert_eq!(
+            json,
+            render(&moved),
+            "byte_start is internal, never serialised"
+        );
+        assert!(!json.contains("byte_start"), "{json}");
     }
 }

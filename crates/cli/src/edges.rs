@@ -929,6 +929,33 @@ fn potential_row(
 /// Local symbols additionally require the fact document. `None` keeps the
 /// snapshot-local syntax identity. This is the single validated
 /// SyntaxDef↔Scip mapping point.
+pub(crate) fn owner_scip_checked(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    import_id: i64,
+    owner: &store::SymbolRow,
+    path: &str,
+    file_digest: &str,
+) -> Result<Option<EdgeEndpoint>, String> {
+    let mut uris =
+        store::semantic_owner_uris(conn, snapshot_id, import_id, owner, path, file_digest)?;
+    if uris.len() != 1 {
+        return Ok(None);
+    }
+    let uri = uris.remove(0);
+    Ok(Some(EdgeEndpoint::Scip {
+        import_id,
+        doc: if crate::scip::is_local_symbol(&uri) {
+            Some(path.to_string())
+        } else {
+            None
+        },
+        symbol_uri: uri,
+    }))
+}
+
+/// Derivation keeps its contract: a failed read reads as "no SCIP identity".
+/// Callers that must report a failed read use `owner_scip_checked`.
 fn owner_scip(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
@@ -937,21 +964,9 @@ fn owner_scip(
     path: &str,
     file_digest: &str,
 ) -> Option<EdgeEndpoint> {
-    let mut uris =
-        store::semantic_owner_uris(conn, snapshot_id, import_id, owner, path, file_digest).ok()?;
-    if uris.len() != 1 {
-        return None;
-    }
-    let uri = uris.remove(0);
-    Some(EdgeEndpoint::Scip {
-        import_id,
-        doc: if crate::scip::is_local_symbol(&uri) {
-            Some(path.to_string())
-        } else {
-            None
-        },
-        symbol_uri: uri,
-    })
+    owner_scip_checked(conn, snapshot_id, import_id, owner, path, file_digest)
+        .ok()
+        .flatten()
 }
 
 #[derive(Debug, Clone)]
@@ -969,15 +984,27 @@ pub(crate) fn owner_bridges(
     snapshot_id: i64,
     endpoint: &EdgeEndpoint,
 ) -> Result<Vec<OwnerBridge>, String> {
-    owner_bridges_checked(conn, snapshot_id, endpoint, None, || false)
+    owner_bridges_checked(conn, snapshot_id, endpoint, None, || false, false)
 }
 
+/// Expansion's destination mapping: a failed read is an error, never "not mapped".
+pub(crate) fn owner_bridges_strict(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    endpoint: &EdgeEndpoint,
+) -> Result<Vec<OwnerBridge>, String> {
+    owner_bridges_checked(conn, snapshot_id, endpoint, None, || false, true)
+}
+
+/// `strict` selects the mapping read: `false` keeps `owner_scip`'s behaviour
+/// (a failed read is "not mapped"), `true` propagates the read error.
 fn owner_bridges_checked(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
     endpoint: &EdgeEndpoint,
     limit: Option<usize>,
     expired: impl Fn() -> bool,
+    strict: bool,
 ) -> Result<Vec<OwnerBridge>, String> {
     let EdgeEndpoint::Scip {
         import_id,
@@ -1024,16 +1051,26 @@ fn owner_bridges_checked(
         let Some(owner) = owner_of(&symbols, fid, fact.byte_start) else {
             continue;
         };
-        if owner_scip(
-            conn,
-            snapshot_id,
-            *import_id,
-            owner,
-            &fact.rel_path,
-            &digest,
-        )
-        .is_some_and(|mapped| unify(endpoint, &mapped))
-        {
+        let mapped = if strict {
+            owner_scip_checked(
+                conn,
+                snapshot_id,
+                *import_id,
+                owner,
+                &fact.rel_path,
+                &digest,
+            )?
+        } else {
+            owner_scip(
+                conn,
+                snapshot_id,
+                *import_id,
+                owner,
+                &fact.rel_path,
+                &digest,
+            )
+        };
+        if mapped.is_some_and(|mapped| unify(endpoint, &mapped)) {
             let alias = EdgeEndpoint::SyntaxDef {
                 path: fact.rel_path,
                 byte_start: owner.byte_start,
@@ -1184,9 +1221,14 @@ fn trace_bridges(
     if budget.expired() {
         return Err("time-budget".to_string());
     }
-    owner_bridges_checked(conn, snapshot_id, endpoint, Some(TRACE_MAX_NODES), || {
-        budget.expired()
-    })
+    owner_bridges_checked(
+        conn,
+        snapshot_id,
+        endpoint,
+        Some(TRACE_MAX_NODES),
+        || budget.expired(),
+        false,
+    )
 }
 
 fn endpoint_import(endpoint: &EdgeEndpoint) -> Option<i64> {
@@ -4308,5 +4350,65 @@ mod tests {
 
     fn mk_snap_on(conn: &rusqlite::Connection) -> i64 {
         mk_snap(conn)
+    }
+
+    #[test]
+    fn owner_bridges_strict_returns_the_error_the_old_path_swallows() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let lib = b"def target():\n    return 1\n";
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let uri = "scip-test test test-pkg 1.0.0 lib.py/target().";
+        store::insert_semantic_facts(
+            &conn,
+            &[mk_fact(
+                snap,
+                imp,
+                "lib.py",
+                &store::content_digest(lib),
+                Some(uri),
+                "target",
+                0x1,
+                (1, 5, 1, 11),
+                (4, 10),
+                false,
+            )],
+        )
+        .unwrap();
+        let endpoint = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: uri.to_string(),
+            doc: None,
+        };
+        let (fid, digest) = store::file_identity(&conn, snap, "lib.py")
+            .unwrap()
+            .unwrap();
+        let symbols = store::symbols_at(&conn, snap, "lib.py").unwrap();
+        let owner = owner_of(&symbols, fid, 4).unwrap();
+
+        // Control: the intact database maps the endpoint, and both variants agree.
+        let strict = owner_bridges_strict(&conn, snap, &endpoint).unwrap();
+        let lenient = owner_bridges(&conn, snap, &endpoint).unwrap();
+        assert_eq!(strict.len(), 1);
+        let syntax = |bridges: &[OwnerBridge]| {
+            bridges
+                .iter()
+                .map(|bridge| bridge.syntax.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(syntax(&strict), syntax(&lenient));
+        assert!(
+            owner_scip_checked(&conn, snap, imp, owner, "lib.py", &digest)
+                .unwrap()
+                .is_some()
+        );
+
+        // Fault: only `semantic_owner_uris` names this index (INDEXED BY).
+        conn.execute_batch("DROP INDEX idx_semfacts_span").unwrap();
+        assert!(owner_scip_checked(&conn, snap, imp, owner, "lib.py", &digest).is_err());
+        assert_eq!(owner_scip(&conn, snap, imp, owner, "lib.py", &digest), None);
+        assert!(owner_bridges(&conn, snap, &endpoint).unwrap().is_empty());
+        assert!(owner_bridges_strict(&conn, snap, &endpoint).is_err());
     }
 }

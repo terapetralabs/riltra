@@ -29,6 +29,8 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | Is Riltra working, and which repositories are registered? | `riltra_health`, `riltra_repo_list` | Read-only; they create and open no storage. |
 | Is this repository indexed, and is the index current? | `riltra_repo_status` | Includes `index_status`. A missing index answers `no-index`; nothing is created. |
 | Where is a symbol defined? | `riltra_code_search` | `query` is the symbol text. `limit` (default 50, maximum 1000) and `offset` page the results. `occurrences: true` adds a name census for C++ only. |
+| Which definitions match a description in words? | `riltra_code_query` | Lexical ranking over names, paths and doc comments. Results carry `path` and `line` but no column; pass `name` as `target` and `path` as `in`. |
+| Which definitions does my git change touch? | `riltra_code_changes` | Live parse of the changed files: definitions added, removed or modified. A map of structure, not an impact verdict. |
 | What calls this? | `riltra_code_callers` | Anchor with `path`, `line` and `col`. Heuristic edges stay `POTENTIAL_CALL`. |
 | What does this call? | `riltra_code_callees` | Same anchor. |
 | How might A reach B? | `riltra_code_trace` | Optional `to` (`PATH:LINE:COL`) and `depth` (default 3, 1 to 6). Paths are plausible traversal, not execution. |
@@ -88,7 +90,7 @@ vendor/
 
 ## A snippet for your agent's instructions
 
-Paste this into your agent's instruction file (for example `AGENTS.md` or `CLAUDE.md`) and replace `<name>` with the name you gave `riltra init`.
+Paste this into your agent's instruction file (for example `AGENTS.md` or `CLAUDE.md`) and replace `<name>` with the name you gave `riltra init`. `riltra agent-block` prints the same text.
 
 ```markdown
 ## Code intelligence (Riltra)
@@ -96,8 +98,14 @@ Paste this into your agent's instruction file (for example `AGENTS.md` or `CLAUD
 This repository is indexed by Riltra, a local code map reached through MCP tools named `riltra_*`. It is a map, not a source of truth: confirm anything you rely on by reading the cited source.
 
 - Start with `riltra_repo_status` for `<name>`. If the index is missing or stale, say so and ask the user to run `riltra index --repo <name>`; then continue from the source itself.
-- Find a definition with `riltra_code_search`, and pass the `path`, `line` and `col` it returns to `riltra_code_callers`, `riltra_code_callees`, `riltra_code_trace` and `riltra_code_impact`.
-- `POTENTIAL_CALL` is a lead to open and read, never proof of a call. An impact answer of `UNKNOWN` or `partial` means "not established", never "safe". An empty result is not proof that nothing exists.
+- Find a definition by name with `riltra_code_search`, and use its `path`, `span.start_line` and `span.start_col` as the anchor (`path`, `line`, `col`) for `riltra_context`, `riltra_code_callers`, `riltra_code_callees`, `riltra_code_trace` and `riltra_code_impact`.
+- Find code by concept with `riltra_code_query` (free text). A query result has no column: pass its `name` as `target` and its `path` as `in` to those tools instead.
+- If a name does not resolve to exactly one definition (status `ambiguous` or `not-found`), do not pick a candidate for the user: read the candidates and the source, then anchor on the right definition with `path`, `line` and `col`.
+- Before editing a symbol, run `riltra_code_impact` on it.
+- After editing and before committing, run `riltra_code_changes` and read which definitions your change touched.
+- `UNKNOWN` or `partial` is not a clean check, and an empty result means "not established", never "nothing exists".
+- Use the graph tools first; use text search when they answer empty and for literal strings.
+- Never rename by find-and-replace. A `POTENTIAL_CALL` is a lead to open and read, not proof of a call; check each use against the cited source.
 - Before changing code, call `riltra_knowledge_at_anchor` on it. Report what it returns as a stored, `Unverified` note with its revision, not as established fact.
 - Say which Riltra answers you used and which labels they carried.
 ```

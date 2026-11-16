@@ -6,6 +6,12 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Added
 
+- `agent-block` (CLI): prints the Markdown instruction block for an agent's instruction file
+  (`AGENTS.md` or `CLAUDE.md`), naming the graph tools and when to call them. It is plain
+  Markdown text, not JSON, like `--help` and `--version`. It takes no arguments, reads no
+  registry or index, writes no file and makes no network call. See the
+  [agent setup guide](docs/guide/agent-setup.md).
+
 - `query` (CLI) and MCP tool `riltra_code_query`: lexical concept search. It ranks
   indexed definitions for a free text by BM25 over the concept index (names, paths and doc
   comments), read-only and with no schema change. It is lexical only: no call-edge expansion,

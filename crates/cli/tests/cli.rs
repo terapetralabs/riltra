@@ -65,6 +65,184 @@ fn git_fixture(dir: &Path) {
     g(&["commit", "-m", "init"]);
 }
 
+// ---------------------------------------------------------------------------
+// `riltra agent-block`. The expected block is typed here from the PR 10 brief;
+// it is never read back from the binary or from the docs file.
+// ---------------------------------------------------------------------------
+
+const AGENT_BLOCK: &str = r#"## Code intelligence (Riltra)
+
+This repository is indexed by Riltra, a local code map reached through MCP tools named `riltra_*`. It is a map, not a source of truth: confirm anything you rely on by reading the cited source.
+
+- Start with `riltra_repo_status` for `<name>`. If the index is missing or stale, say so and ask the user to run `riltra index --repo <name>`; then continue from the source itself.
+- Find a definition by name with `riltra_code_search`, and use its `path`, `span.start_line` and `span.start_col` as the anchor (`path`, `line`, `col`) for `riltra_context`, `riltra_code_callers`, `riltra_code_callees`, `riltra_code_trace` and `riltra_code_impact`.
+- Find code by concept with `riltra_code_query` (free text). A query result has no column: pass its `name` as `target` and its `path` as `in` to those tools instead.
+- If a name does not resolve to exactly one definition (status `ambiguous` or `not-found`), do not pick a candidate for the user: read the candidates and the source, then anchor on the right definition with `path`, `line` and `col`.
+- Before editing a symbol, run `riltra_code_impact` on it.
+- After editing and before committing, run `riltra_code_changes` and read which definitions your change touched.
+- `UNKNOWN` or `partial` is not a clean check, and an empty result means "not established", never "nothing exists".
+- Use the graph tools first; use text search when they answer empty and for literal strings.
+- Never rename by find-and-replace. A `POTENTIAL_CALL` is a lead to open and read, not proof of a call; check each use against the cited source.
+- Before changing code, call `riltra_knowledge_at_anchor` on it. Report what it returns as a stored, `Unverified` note with its revision, not as established fact.
+- Say which Riltra answers you used and which labels they carried.
+"#;
+
+const AGENT_BLOCK_MARKERS: [&str; 5] = [
+    "run `riltra_code_impact`",
+    "run `riltra_code_changes`",
+    "`UNKNOWN` or `partial`",
+    "use text search",
+    "Never rename by find-and-replace",
+];
+
+/// The fenced block under the snippet heading of the agent setup guide.
+fn agent_setup_snippet() -> &'static str {
+    const DOC: &str = include_str!("../../../docs/guide/agent-setup.md");
+    let heading = DOC
+        .find("## A snippet for your agent's instructions")
+        .expect("snippet heading");
+    let after = &DOC[heading..];
+    let open = "```markdown\n";
+    let start = after.find(open).expect("snippet fence") + open.len();
+    let body = &after[start..];
+    let end = body.find("\n```\n").expect("closing fence");
+    &body[..=end]
+}
+
+/// Drive-letter paths, UNC shares, /home/ and /Users/ roots, and GitNexus.
+fn leaks_local_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let drive_letter = bytes
+        .windows(3)
+        .any(|w| w[0].is_ascii_alphabetic() && w[1] == b':' && (w[2] == b'\\' || w[2] == b'/'));
+    let lower = text.to_ascii_lowercase();
+    drive_letter
+        || text.contains("\\\\")
+        || lower.contains("/home/")
+        || lower.contains("/users/")
+        || lower.contains("gitnexus")
+}
+
+/// Every file under `root` with its bytes, sorted by path.
+fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                files.push((path, bytes));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+#[test]
+fn agent_block_prints_the_frozen_block() {
+    let h = home("agent-block");
+    let (code, out, err) = run(&h, &["agent-block"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out, AGENT_BLOCK);
+    assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    assert!(err.is_empty(), "stderr must stay empty: {err}");
+}
+
+#[test]
+fn agent_block_markers_occur_exactly_once() {
+    let h = home("agent-block-markers");
+    let (_, out, _) = run(&h, &["agent-block"]);
+    for marker in AGENT_BLOCK_MARKERS {
+        assert_eq!(out.matches(marker).count(), 1, "marker: {marker}");
+    }
+}
+
+#[test]
+fn agent_block_has_no_local_path_or_private_name() {
+    let h = home("agent-block-leaks");
+    let (_, out, _) = run(&h, &["agent-block"]);
+    assert!(!leaks_local_path(&out), "leak in output: {out}");
+}
+
+#[test]
+fn agent_block_leak_check_catches_planted_leaks_only() {
+    // Built from pieces: a tracked file must not contain a local-path literal, even a planted one.
+    let planted_leaks = [
+        ["C", ":\\", "Users", "\\dev", "\\repo"].concat(),
+        ["D", ":/", "work/repo"].concat(),
+        ["\\\\", "server", "\\share"].concat(),
+        ["/ho", "me/dev/repo"].concat(),
+        ["/Us", "ers/dev/repo"].concat(),
+        "uses GitNexus".to_string(),
+    ];
+    for planted in &planted_leaks {
+        assert!(leaks_local_path(planted), "missed: {planted}");
+    }
+    assert!(!leaks_local_path("Riltra: cited/source, ratio 1/2"));
+}
+
+#[test]
+fn agent_block_refuses_any_argument() {
+    let h = home("agent-block-args");
+    for args in [
+        vec!["agent-block", "extra"],
+        vec!["agent-block", "--repo", "x"],
+    ] {
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 2, "args: {args:?}");
+        assert!(out.is_empty(), "stdout must be empty: {out}");
+        assert!(!err.is_empty(), "usage error expected on stderr");
+    }
+}
+
+#[test]
+fn agent_block_is_print_only() {
+    if !git_available() {
+        return;
+    }
+    let h = home("agent-block-print-only");
+    let repo = mkrepo(&h, "work");
+    git_fixture(&repo);
+    assert_eq!(run(&h, &["init", "--repo", repo.to_str().unwrap()]).0, 0);
+    let home_before = snapshot(&h);
+    let (code, _, _) = run(&h, &["agent-block"]);
+    assert_eq!(code, 0);
+    assert_eq!(snapshot(&h), home_before, "RILTRA_HOME or repo changed");
+
+    let missing = std::env::temp_dir().join(format!(
+        "riltra-cli-agent-block-missing-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&missing);
+    let (code, _, _) = run(&missing, &["agent-block"]);
+    assert_eq!(code, 0);
+    assert!(!missing.exists(), "agent-block created RILTRA_HOME");
+}
+
+#[test]
+fn agent_block_matches_the_agent_setup_snippet() {
+    let h = home("agent-block-sync");
+    let (code, out, _) = run(&h, &["agent-block"]);
+    assert_eq!(code, 0);
+    assert_eq!(agent_setup_snippet(), out);
+}
+
+#[test]
+fn the_usage_lists_agent_block() {
+    let h = home("agent-block-usage");
+    let (code, out, _) = run(&h, &["--help"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("  riltra agent-block\n"), "got: {out}");
+}
+
 #[test]
 fn init_and_list_round_trip() {
     let h = home("roundtrip");

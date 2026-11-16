@@ -4,10 +4,9 @@ This folder holds a frozen set of concept-search tasks built from git history al
 Python 3 standard-library harness that builds and measures it, and the frozen baselines measured
 on its tuning split: B1, B2, B3 (PR 8), R (the lexical ranker, PR 9) and S (a text-free size
 control, PR 9b). Nothing here changes Riltra's Rust code, schema, parser, commands or MCP
-tools. PR 9 (the ranker) was the first consumer. The held-out split is used only by one final
-run, which needs an explicit owner instruction given after PR 9b is merged with green CI (see Split).
-PR 9b closes the lexical evaluation's measurement; edge expansion (`via`) is a separate later PR,
-so Task 8 is not complete.
+tools. PR 9 (the ranker) was the first consumer. The held-out split was used by one final run on
+2026-11-16 (see Split and `ranker-2026-11-heldout.md`). PR 9b closed the lexical evaluation's
+measurement; edge expansion (`via`) is a separate later PR, so Task 8 is not complete.
 
 Files:
 
@@ -62,14 +61,17 @@ move the boundary. A manifest is written once; a different tip needs a new file 
 header records the label, tip, `rules_version`, the non-merge count, the exclusion counts, and the
 split sizes.
 
-**Held-out is not run in PR 8 or PR 9b.** `run --split heldout` is refused unless `--final` is passed,
-and neither PR passes it. A held-out run needs an explicit owner instruction given after PR 9b is merged
-with green CI; this README does not authorize it. Only the held-out task count is reported. Reason: with only 36
-held-out Riltra tasks (the plan estimated about a dozen), per-task results would steer the ranker, and the baselines have no
-tunable parameter, so PR 9 loses nothing by running them once with the ranker.
+**Held-out was run once.** `run --split heldout` is refused unless `--final` is passed. PR 8, PR 9 and
+PR 9b did not pass it. After PR 9b was merged with green CI, the owner gave an explicit instruction, and the split
+(36 Riltra tasks) was run once on 2026-11-16 on the frozen commit `77efc9e`, with ranker R0 unchanged. The result is in
+`ranker-2026-11-heldout.md`. The run is not repeated for this manifest: a second run would no longer be a held-out
+measurement, and this README does not authorize one. A new task set needs a new manifest. The baselines have no
+tunable parameter, so running them once together with the ranker loses nothing.
 
-**Expected distribution shift.** The newest tasks are mostly this plan's own PRs, so the held-out
-split is not representative of the older history. The tuning split is the older part.
+**Distribution shift.** The split is by time, so the two splits cover different parts of the history. By
+author date, the 36 held-out commits run from 2026-10-25 to 2026-11-14 (33 dated before 2026-11-13, the date of
+the replacement plan, and 3 on 2026-11-13 or 2026-11-14), and the 81 tuning commits run from 2026-10-14 to
+2026-10-25. The held-out split is not representative of the older history.
 
 ## Baselines
 

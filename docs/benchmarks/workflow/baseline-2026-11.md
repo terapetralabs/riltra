@@ -146,8 +146,9 @@ over tasks where both baselines are `ok` (sample size 81 for every pair). `found
 ## Limits
 
 - Sample sizes are small (81 tuning tasks; 36 held-out, not run). No threshold or significance claim is made.
-- The newest tasks are mostly this plan's own PRs, so the held-out split is not representative of
-  the older history. The tuning split is the older part of the history.
+- The held-out split is not representative of the older history; the tuning split is the older part.
+  (Corrected 2026-11-16: this note first said the newest tasks were mostly this plan's own PRs. By author
+  date the 36 held-out commits run from 2026-10-25 to 2026-11-14, 33 of them before 2026-11-13.)
 - A history rewrite (owner-gated) invalidates the manifest; regenerate it with the same rules
   and `rules_version` before reusing these numbers.
 - The first tune attempts failed on Windows path length while extracting parent trees (a long

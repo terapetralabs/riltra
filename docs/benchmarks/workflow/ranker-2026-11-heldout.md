@@ -2,7 +2,9 @@
 
 Status: the held-out split of the Riltra task set was run **once**, with ranker R0 unchanged, on the frozen
 commit `77efc9e` (the merge of PR 71). The owner authorized the run on 2026-11-16, after PR 71 was merged with
-green CI. It is not rerun and nothing was tuned afterwards. The result applies to the **lexical ranker only**:
+green CI. It is not rerun and nothing was tuned afterwards. That the authorization was given, and that the run was
+done once, are statements of the operator recorded here; the output file alone does not prove either. The result
+applies to the **lexical ranker only**:
 edge expansion along proven edges (`via`) is a separate later PR, so plan Task 8 is not complete. Numbers are
 counts on a small sample; no comparison, significance or savings claim is made.
 
@@ -20,7 +22,8 @@ counts on a small sample; no comparison, significance or savings claim is made.
 ### Tune check before the run
 
 The tune split was run again with the same binary. The task lines and the summary line are byte-identical
-to the PR 9b tune output, so the measured ranking is unchanged. The run header differs in one field,
+to the PR 9b tune output: the per-task metrics and summary are unchanged. Full result ordering was not recorded
+or compared. The run header differs in one field,
 `riltra_sha256`: `7edf42b3e6d530175b9fa57e11a79f2b262fbcf8fca87c6f2f792243fb5e8677` in the PR 9b output and
 `7973f262618245812036ea4f2ad0b3217bbc1e0368e6135e52161f478b31f898` here. The sources (`crates`, `Cargo.toml`, `Cargo.lock`) do not differ between the PR 9b head
 and `77efc9e`. The cause of the hash difference was not established (a different checkout path and build time
@@ -133,9 +136,10 @@ Each cell is `f@5/f@10/first`: gold files in the top 5 and in the top 10, then t
 ## Limits
 
 - 36 tasks. Counts are not rates, and no threshold, significance, comparison or savings claim is made.
-- The held-out tasks are the newest ones, mostly this plan's own PRs (README, "Expected distribution shift"),
-  so the two splits cover different parts of the history. The tune and held-out counts above are shown side by
-  side without an explanation of any difference between them; none was examined.
+- The two splits cover different parts of the history. By author date, the 36 held-out commits run from
+  2026-10-25 to 2026-11-14: 33 are dated before 2026-11-13 (the date of the replacement plan) and 3 on 2026-11-13
+  or 2026-11-14. The 81 tune commits run from 2026-10-14 to 2026-10-25. The tune and held-out counts above are
+  shown side by side without an explanation of any difference between them; none was examined.
 - R returns a median of 32 files per task and B1, B2, B3 return 0, 6, 0, so the pair verdicts compare a ranked
   list with much shorter lists. S ranks the whole candidate set (median 101 files).
 - S is a control. A high S value does not say that a ranker is poor, and a low one does not say that it is good.

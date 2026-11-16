@@ -68,8 +68,10 @@ PR 9b did not pass it. After PR 9b was merged with green CI, the owner gave an e
 measurement, and this README does not authorize one. A new task set needs a new manifest. The baselines have no
 tunable parameter, so running them once together with the ranker loses nothing.
 
-**Expected distribution shift.** The newest tasks are mostly this plan's own PRs, so the held-out
-split is not representative of the older history. The tuning split is the older part.
+**Distribution shift.** The split is by time, so the two splits cover different parts of the history. By
+author date, the 36 held-out commits run from 2026-10-25 to 2026-11-14 (33 dated before 2026-11-13, the date of
+the replacement plan, and 3 on 2026-11-13 or 2026-11-14), and the 81 tuning commits run from 2026-10-14 to
+2026-10-25. The held-out split is not representative of the older history.
 
 ## Baselines
 

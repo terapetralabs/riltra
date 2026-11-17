@@ -7,6 +7,9 @@ control, PR 9b). Nothing here changes Riltra's Rust code, schema, parser, comman
 tools. PR 9 (the ranker) was the first consumer. The held-out split was used by one final run on
 2026-11-16 (see Split and `ranker-2026-11-heldout.md`). PR 9b closed the lexical evaluation's
 measurement; edge expansion (`via`) is a separate later PR, so Task 8 is not complete.
+Update 2026-11-17: edge expansion (`--expand`, `via`) was implemented and merged in PR 74, so the
+sentence above no longer holds as written. The benefit of `via` on real repositories is not measured, and the
+plan's original ceiling is not measured by M1; see `../workflow-report-2026-11.md`. No number in this file changed.
 
 Files:
 

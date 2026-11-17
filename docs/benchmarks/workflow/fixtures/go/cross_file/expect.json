@@ -1,0 +1,1 @@
+{"anchor":{"path":"lib.go","line":3,"col":6},"callers":[{"path":"user.go","line":3}],"not_callers":[],"note":"the only caller is in another file of the same package; the truth is one caller"}

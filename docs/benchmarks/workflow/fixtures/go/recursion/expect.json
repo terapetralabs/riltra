@@ -1,0 +1,1 @@
+{"anchor":{"path":"recursion.go","line":3,"col":6},"callers":[{"path":"recursion.go","line":3},{"path":"recursion.go","line":10}],"not_callers":[],"note":"fact calls itself and wrapper calls it"}

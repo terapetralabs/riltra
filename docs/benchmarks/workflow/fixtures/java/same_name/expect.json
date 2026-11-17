@@ -1,0 +1,1 @@
+{"anchor":{"path":"SameName.java","line":2,"col":9},"callers":[{"path":"SameName.java","line":14}],"not_callers":[{"path":"SameName.java","line":18}],"note":"A.run is called by useA only; useB calls B.run, a same-name decoy"}

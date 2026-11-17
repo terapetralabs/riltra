@@ -547,6 +547,436 @@ def test_r_doc_comment(riltra, root):
           "R finds a gold file reachable only through a doc comment at rank 1")
 
 
+def load_verify():
+    """verify.py beside this file; a missing module is a failed check, never a skip."""
+    import verify  # noqa: E402 (resolved through sys.path HERE)
+    return verify
+
+
+def test_line_of_byte():
+    V = load_verify()
+    data = b"ab\ncd\nef"
+    check(V.line_of_byte(data, 0) == 1, "line_of_byte: offset 0 is line 1")
+    check(V.line_of_byte(data, 3) == 2, "line_of_byte: offset just after the first newline is line 2")
+    check(V.line_of_byte(data, 2) == 1, "line_of_byte: a newline byte belongs to the line it ends")
+    check(V.line_of_byte(data, 6) == 3, "line_of_byte: offset after the second newline is line 3")
+
+
+AST_SOURCE = "\n".join([
+    "import functools", "", "",
+    "def top():", "    pass", "", "",
+    "@functools.cache", "def decorated():", "    pass", "", "",
+    "class Outer:", "    def method(self):", "        pass", "",
+    "    class Inner:", "        async def coro(self):", "            pass",
+]) + "\n"
+
+
+def test_ast_definitions():
+    V = load_verify()
+    expected = [("top", "function", 4, 4), ("decorated", "function", 9, 8), ("Outer", "class", 13, 13),
+                ("method", "function", 14, 14), ("Inner", "class", 17, 17), ("coro", "function", 18, 18)]
+    got = V.ast_definitions(AST_SOURCE)
+    check(got == expected, "ast_definitions on the hand-written source: %r" % (got,))
+    raised = False
+    try:
+        V.ast_definitions("def broken(:\n    pass\n")
+    except SyntaxError:
+        raised = True
+    check(raised, "ast_definitions lets a SyntaxError propagate")
+
+
+def test_score_defs():
+    V = load_verify()
+    one = [("a", "function", 1, 1), ("b", "function", 3, 3)]
+    got = V.score_defs(one, [("a", 1), ("b", 3)])
+    check(got == {"oracle": 2, "exact": 2, "decorator_line": 0, "missing": [], "extra": []},
+          "score_defs: all exact: %r" % (got,))
+    dec = [("decorated", "function", 9, 8)]
+    got = V.score_defs(dec, [("decorated", 8)])
+    check(got == {"oracle": 1, "exact": 0, "decorator_line": 1, "missing": [], "extra": []},
+          "score_defs: one decorator-line match: %r" % (got,))
+    got = V.score_defs(one, [("a", 1)])
+    check(got == {"oracle": 2, "exact": 1, "decorator_line": 0, "missing": [("b", 3)], "extra": []},
+          "score_defs: one missing: %r" % (got,))
+    got = V.score_defs(one, [("a", 1), ("b", 3), ("zz", 7)])
+    check(got == {"oracle": 2, "exact": 2, "decorator_line": 0, "missing": [], "extra": [("zz", 7)]},
+          "score_defs: one extra: %r" % (got,))
+    dup = [("f", "function", 1, 1), ("f", "function", 5, 5)]
+    got = V.score_defs(dup, [("f", 1)])
+    check(got == {"oracle": 2, "exact": 1, "decorator_line": 0, "missing": [("f", 5)], "extra": []},
+          "score_defs: same name at two lines matches only the line it names: %r" % (got,))
+    twice = [("f", "function", 1, 1), ("f", "function", 1, 1)]
+    got = V.score_defs(twice, [("f", 1)])
+    check(got == {"oracle": 2, "exact": 1, "decorator_line": 0, "missing": [("f", 1)], "extra": []},
+          "score_defs: one scanned item is never used for two oracle items: %r" % (got,))
+
+
+def test_score_callers():
+    V = load_verify()
+    truth = [("a.py", 3), ("b.py", 5)]
+    decoys = [("c.py", 9)]
+    got = V.score_callers(truth, decoys, [("a.py", 3), ("b.py", 5)])
+    check(got == {"truth": 2, "returned": 2, "found": [("a.py", 3), ("b.py", 5)], "missed": [],
+                  "extra_decoy": [], "extra_other": []}, "score_callers: found all: %r" % (got,))
+    got = V.score_callers(truth, decoys, [("a.py", 3)])
+    check(got["missed"] == [("b.py", 5)] and got["found"] == [("a.py", 3)] and got["returned"] == 1,
+          "score_callers: one missed: %r" % (got,))
+    got = V.score_callers(truth, decoys, [("a.py", 3), ("b.py", 5), ("c.py", 9)])
+    check(got["extra_decoy"] == [("c.py", 9)] and got["extra_other"] == [],
+          "score_callers: one decoy extra: %r" % (got,))
+    got = V.score_callers(truth, decoys, [("a.py", 3), ("b.py", 5), ("d.py", 2)])
+    check(got["extra_other"] == [("d.py", 2)] and got["extra_decoy"] == [],
+          "score_callers: one other extra: %r" % (got,))
+    got = V.score_callers(truth, decoys, [])
+    check(got == {"truth": 2, "returned": 0, "found": [], "missed": [("a.py", 3), ("b.py", 5)],
+                  "extra_decoy": [], "extra_other": []}, "score_callers: empty actual: %r" % (got,))
+    got = V.score_callers([], [], [("x.py", 1)])
+    check(got == {"truth": 0, "returned": 1, "found": [], "missed": [], "extra_decoy": [],
+                  "extra_other": [("x.py", 1)]}, "score_callers: empty expected, one actual: %r" % (got,))
+
+
+def test_caller_sites():
+    V = load_verify()
+    with tempfile.TemporaryDirectory() as root:
+        write_files(root, {"a.py": "x\ny\nzzz\n", "c.py": "p\n"})   # bytes: a.py line 3 starts at byte 4
+        doc = {"paths": [
+            {"distance": 1, "edges": [{"caller": {"path": "a.py", "byte_start": 4}}]},
+            {"distance": 2, "edges": [{"caller": {"path": "b.py", "byte_start": 0}}]},   # ignored; b.py does not exist
+            {"distance": 1, "edges": [{"caller": {"path": "a.py", "byte_start": 4}}]},   # duplicate
+            {"distance": 1, "edges": [{"caller": {"path": "a.py", "byte_start": 2}}]},
+            {"distance": 1, "edges": [{"caller": {"path": "c.py", "byte_start": 2}}]},
+        ]}
+        got = V.caller_sites(doc, root)
+    check(got == [("a.py", 2), ("a.py", 3), ("c.py", 2)],
+          "caller_sites: distance-1 callers, de-duplicated, sorted, distance 2 ignored: %r" % (got,))
+
+
+def test_same_binary_two_runs_identical(riltra, root):
+    """C1 repeatability control: the same binary gives byte-identical output on repeated runs."""
+    if riltra is None:
+        print("C1 same-binary control: SKIPPED, no --riltra given (repeatability not exercised by this run)")
+        return
+    repo = os.path.join(root, "c1-repo")
+    os.makedirs(repo)
+    fixture = os.path.join(HERE, "fixtures", "go", "direct")
+    for name in os.listdir(fixture):
+        if os.path.isfile(os.path.join(fixture, name)):
+            shutil.copyfile(os.path.join(fixture, name), os.path.join(repo, name))
+    home = os.path.join(root, "c1-home")
+    os.makedirs(home)
+    env = dict(os.environ, RILTRA_HOME=home)
+    code, _ = H.run_riltra(riltra, ["init", "--repo", repo, "--name", "t"], env)
+    check(code == 0, "C1: init exits 0")
+    code, _ = H.run_riltra(riltra, ["index", "--repo", "t"], env)
+    check(code == 0, "C1: index exits 0")
+    commands = [
+        ["scan", "--repo", "t"],
+        ["impact", "--repo", "t", "--path", "direct.go", "--line", "3", "--col", "6", "--depth", "1"],
+    ]
+    for args in commands:
+        first_code, first_out = H.run_riltra(riltra, args, env)
+        second_code, second_out = H.run_riltra(riltra, args, env)
+        check(first_code == 0 and second_code == 0, "C1: %s exits 0 both times" % args[0])
+        check(first_out == second_out, "C1: two runs of %s are byte-identical" % args[0])
+
+
+def test_site_records():
+    V = load_verify()
+    with tempfile.TemporaryDirectory() as root:
+        write_files(root, {"a.py": "x\ny\nzzz\n"})   # a.py line 3 starts at byte 4
+        impact_doc = {"paths": [
+            {"distance": 1, "basis": "candidate-name",
+             "edges": [{"caller": {"path": "a.py", "byte_start": 4}, "candidate_scope": "same-file", "candidates": 2}]},
+            {"distance": 1, "basis": "other",   # same site again: the first record wins
+             "edges": [{"caller": {"path": "a.py", "byte_start": 4}, "candidates": 1}]},
+            {"distance": 2, "basis": "ignored",
+             "edges": [{"caller": {"path": "a.py", "byte_start": 2}}]},
+        ]}
+        got = V.site_records(impact_doc, root, "impact")
+        check(got == [{"path": "a.py", "line": 3, "basis": "candidate-name",
+                       "candidate_scope": "same-file", "candidates": 2}],
+              "site_records impact: first record per site, distance 1 only: %r" % (got,))
+        callers_doc = {"edges": [{"caller": {"path": "a.py", "byte_start": 2},
+                                  "candidate_scope": "same-file", "candidates": 2}]}
+        got = V.site_records(callers_doc, root, "callers")
+        check(got == [{"path": "a.py", "line": 2, "candidate_scope": "same-file", "candidates": 2}],
+              "site_records callers: fields come from the edge: %r" % (got,))
+
+
+def test_unit_b_pure():
+    """Unit B pure functions: hunk contexts, file classes, commit selection, summaries, anchors, stderr."""
+    V = load_verify()
+    diff = "\n".join([
+        "diff --git a/src/a.py b/src/a.py",
+        "index 1111111..2222222 100644",
+        "--- a/src/a.py",
+        "+++ b/src/a.py",
+        "@@ -3 +3 @@ def foo(self):",
+        "-    x = 1",
+        "+    x = 2",
+        "@@ -10,2 +10,3 @@",
+        "--- old comment",
+        "-    y",
+        "+    z",
+        "+    w",
+        "+    v",
+        "diff --git a/src/new.py b/src/new.py",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/src/new.py",
+        "@@ -0,0 +1,2 @@",
+        "+A = 1",
+        "+B = 2",
+        "diff --git a/src/gone.py b/src/gone.py",
+        "deleted file mode 100644",
+        "--- a/src/gone.py",
+        "+++ /dev/null",
+        "@@ -1,2 +0,0 @@ class Gone:",
+        "-C = 1",
+        "-D = 2",
+        "",
+    ])
+    got = V.parse_hunk_contexts(diff)
+    check(got == {"src/a.py": ["def foo(self):", ""], "src/new.py": [""], "src/gone.py": ["class Gone:"]},
+          "parse_hunk_contexts: modified, added and deleted files, hunk bodies skipped by count: %r" % (got,))
+
+    classify_cases = [
+        (("binary", ["foo"], ["def foo():"]), {"class": "status:binary", "unmatched_contexts": 0, "unmatched_names": 0}),
+        (("parse-error", [], []), {"class": "status:parse-error", "unmatched_contexts": 0, "unmatched_names": 0}),
+        (("unsupported", [], []), {"class": "status:unsupported", "unmatched_contexts": 0, "unmatched_names": 0}),
+        (("added", ["foo"], [""]), {"class": "whole-file:added", "unmatched_contexts": 0, "unmatched_names": 1}),
+        (("deleted", ["foo"], ["def foo():"]), {"class": "whole-file:deleted", "unmatched_contexts": 0, "unmatched_names": 0}),
+        (("modified", ["foo"], ["def foo(self):"]), {"class": "agree", "unmatched_contexts": 0, "unmatched_names": 0}),
+        (("modified", ["foo"], ["", "def bar():"]), {"class": "disagree", "unmatched_contexts": 1, "unmatched_names": 1}),
+        (("modified", ["foo"], ["def foobar():"]), {"class": "disagree", "unmatched_contexts": 1, "unmatched_names": 1}),
+        (("modified", ["foo"], ["", ""]), {"class": "no-git-context", "unmatched_contexts": 0, "unmatched_names": 1}),
+        (("renamed", [], ["def bar():"]), {"class": "no-riltra-definitions", "unmatched_contexts": 1, "unmatched_names": 0}),
+        (("modified", [], ["", ""]), {"class": "both-empty", "unmatched_contexts": 0, "unmatched_names": 0}),
+    ]
+    for args, expected in classify_cases:
+        got = V.classify_file(*args)
+        check(got == expected, "classify_file %r -> %r" % (args, got))
+
+    records = [
+        ("bbbb", True, ["x/a.py"]),
+        ("aaaa", False, ["x/a.py"]),
+        ("cccc", True, ["docs/x.md"]),
+        ("dddd", True, ["x/B.PY"]),
+        ("eeee", True, ["x/c.md", "y/d.rs"]),
+    ]
+    supported = lambda path: os.path.splitext(path)[1][1:].lower() in ("py", "rs")
+    check(V.select_commits(records, supported) == ["bbbb", "dddd", "eeee"],
+          "select_commits: root and non-supported commits dropped, sorted by sha")
+    check(V.select_commits(records, supported, limit=2) == ["bbbb", "dddd"],
+          "select_commits: first N after sorting")
+
+    check(V.summarize_callers({"edges": [{"kind": "CALLS", "candidates": 2}, {"kind": "POTENTIAL_CALL"},
+                                         {"kind": "CALLS"}]})
+          == {"edges": 3, "by_kind": {"CALLS": 2, "POTENTIAL_CALL": 1}, "candidates_field": True},
+          "summarize_callers: kinds counted, candidates field present")
+    check(V.summarize_callers({"edges": [{"kind": "CALLS"}]})
+          == {"edges": 1, "by_kind": {"CALLS": 1}, "candidates_field": False},
+          "summarize_callers: no candidates field")
+    check(V.summarize_callers({"edges": [{"candidates": 1}]})
+          == {"edges": 1, "by_kind": {"none": 1}, "candidates_field": True},
+          "summarize_callers: a missing kind is counted as none")
+    check(V.summarize_callers({"edges": []}) == {"edges": 0, "by_kind": {}, "candidates_field": False},
+          "summarize_callers: no edges")
+
+    check(V.summarize_impact({"paths": [{"basis": "candidate-name"}, {"basis": "candidate-name"}, {}],
+                              "verdict": "UNKNOWN", "completeness": "partial"})
+          == {"paths": 3, "verdict": "UNKNOWN", "completeness": "partial",
+              "by_basis": {"candidate-name": 2, "none": 1}},
+          "summarize_impact: basis counted, missing basis is none")
+    check(V.summarize_impact({"paths": []})
+          == {"paths": 0, "verdict": None, "completeness": None, "by_basis": {}},
+          "summarize_impact: missing verdict and completeness are None, not guessed")
+
+    a_rs = "\n".join([
+        "fn foo() {}",
+        "    pub(crate) fn foo_bar() {}",
+        "pub fn foo(x: u8) {}",
+        "// fn foo mention",
+        "    const fn foo() {}",
+    ])
+    got = V.anchor_matches("foo", {"b.rs": "fn foo() {}\n", "a.rs": a_rs})
+    check(got == [("a.rs", 1, 4, 1), ("a.rs", 3, 8, 5), ("a.rs", 5, 14, 11), ("b.rs", 1, 4, 1)],
+          "anchor_matches: identifier and keyword columns, near misses ignored: %r" % (got,))
+
+    check(V.stderr_class("") == "none", "stderr_class: empty text is none")
+    check(V.stderr_class("   \n") == "none", "stderr_class: blank text is none")
+    check(V.stderr_class("error: no index found\n") == "error: no index found", "stderr_class: first words of the first line")
+    check(V.stderr_class("\n\nunknown flag --depth\nmore") == "unknown flag --depth", "stderr_class: first non-empty line")
+    check(V.stderr_class("C" + ":/x/y.db") == "unnamed", "stderr_class: a path-only line is unnamed")
+    check(V.stderr_class("cannot open C:" + chr(92) + "x" + chr(92) + "y.db now") == "cannot open now",
+          "stderr_class: path tokens with a separator are dropped")
+
+    search_doc = {"results": [{"path": "a.rs", "span": {"start_line": 3}}, {"path": "b.rs"}]}
+    check(V.definition_found(search_doc, "a.rs", 3) is True, "definition_found: path and start line both match")
+    check(V.definition_found(search_doc, "a.rs", 4) is False, "definition_found: a different start line does not match")
+    check(V.definition_found(search_doc, "b.rs", 1) is False, "definition_found: a result without a span does not match")
+    check(V.definition_found({"results": []}, "a.rs", 3) is False, "definition_found: no results")
+    raised = False
+    try:
+        V.definition_found({"total": 0}, "a.rs", 3)
+    except V.VerifyError:
+        raised = True
+    check(raised, "definition_found: a document without a results list is a VerifyError")
+
+
+def test_unit_c_pure():
+    """Unit C pure functions: hunk line ranges from git's headers, and the range consistency check."""
+    V = load_verify()
+    diff = "\n".join([
+        "diff --git a/src/a.py b/src/a.py",
+        "--- a/src/a.py",
+        "+++ b/src/a.py",
+        "@@ -3,2 +3,4 @@ def f():",
+        "-x",
+        "-y",
+        "+a",
+        "+b",
+        "+c",
+        "+d",
+        "@@ -5,0 +6,3 @@",
+        "+p",
+        "+q",
+        "+r",
+        "@@ -10,2 +9,0 @@",
+        "--- old comment",
+        "-q",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+        "diff --git a/src/new.py b/src/new.py",
+        "--- /dev/null",
+        "+++ b/src/new.py",
+        "@@ -0,0 +1,5 @@",
+        "+A = 1",
+        "+B = 2",
+        "+C = 3",
+        "+D = 4",
+        "+E = 5",
+        "diff --git a/src/gone.py b/src/gone.py",
+        "--- a/src/gone.py",
+        "+++ /dev/null",
+        "@@ -1,5 +0,0 @@ class Gone:",
+        "-C = 1",
+        "-D = 2",
+        "-E = 3",
+        "-F = 4",
+        "-G = 5",
+        "",
+    ])
+    got = V.parse_hunk_ranges(diff)
+    want = {
+        "src/a.py": [{"old": (3, 4), "new": (3, 6)}, {"old": None, "new": (6, 8)},
+                     {"old": (10, 11), "new": None}, {"old": (1, 1), "new": (1, 1)}],
+        "src/new.py": [{"old": None, "new": (1, 5)}],
+        "src/gone.py": [{"old": (1, 5), "new": None}],
+    }
+    check(got == want, "parse_hunk_ranges: every hunk shape, added and deleted files: %r" % (got,))
+
+    def span(start, end):
+        return {"start_line": start, "end_line": end}
+
+    def make_entry(definitions, hunks, outside):
+        return {"status": "modified", "symbols": "established", "hunks": hunks,
+                "hunks_outside_definitions": outside, "definitions": definitions}
+
+    cases = [
+        ("all consistent",
+         make_entry([{"change": "modified", "old_span": span(3, 5), "new_span": span(3, 7)}], 1, []),
+         [{"old": (4, 4), "new": (4, 4)}],
+         {"definitions": 1, "definitions_intersecting": 1, "hunks_equal": True, "outside_equal": True}),
+        ("listed definition intersects nothing",
+         make_entry([{"change": "added", "old_span": None, "new_span": span(20, 25)}], 1, [{"hunk": 1}]),
+         [{"old": None, "new": (4, 4)}],
+         {"definitions": 1, "definitions_intersecting": 0, "hunks_equal": True, "outside_equal": True}),
+        ("hunk count mismatch",
+         make_entry([{"change": "modified", "old_span": span(3, 5), "new_span": span(3, 7)}], 2, []),
+         [{"old": (4, 4), "new": (4, 4)}],
+         {"definitions": 1, "definitions_intersecting": 1, "hunks_equal": False, "outside_equal": True}),
+        ("outside count mismatch",
+         make_entry([{"change": "added", "old_span": None, "new_span": span(20, 25)}], 1, []),
+         [{"old": None, "new": (4, 4)}],
+         {"definitions": 1, "definitions_intersecting": 0, "hunks_equal": True, "outside_equal": False}),
+        ("removed definition intersects on the old side",
+         make_entry([{"change": "removed", "old_span": span(10, 12), "new_span": None}], 1, []),
+         [{"old": (11, 11), "new": None}],
+         {"definitions": 1, "definitions_intersecting": 1, "hunks_equal": True, "outside_equal": True}),
+        ("removed definition ignores the new side",
+         make_entry([{"change": "removed", "old_span": span(10, 12), "new_span": span(11, 11)}], 1, []),
+         [{"old": None, "new": (11, 11)}],
+         {"definitions": 1, "definitions_intersecting": 0, "hunks_equal": True, "outside_equal": True}),
+        ("modified definition intersects on the old side only",
+         make_entry([{"change": "modified", "old_span": span(10, 12), "new_span": span(30, 35)}], 1, []),
+         [{"old": (11, 11), "new": (4, 4)}],
+         {"definitions": 1, "definitions_intersecting": 1, "hunks_equal": True, "outside_equal": True}),
+    ]
+    for name, doc_entry, hunks, want_check in cases:
+        got_check = V.check_file_ranges(doc_entry, hunks)
+        check(got_check == want_check, "check_file_ranges, %s: %r" % (name, got_check))
+
+
+def test_unit_c_replay(root):
+    """replay-check on a three-commit repository: C2 agrees with its changes document, C3 disagrees on hunk count."""
+    import contextlib
+    import io
+    V = load_verify()
+    repo = os.path.join(root, "replay-repo")
+    os.makedirs(repo)
+    git_run(repo, ["init", "-q", "-b", "main"])
+    write_files(repo, {"src/a.py": "one\ntwo\nthree\nfour\nfive\n"})
+    commit(repo, "Base", 1)
+    write_files(repo, {"src/a.py": "one\nTWO\nthree\nfour\nfive\n"})
+    c2 = commit(repo, "Change line two", 2)
+    write_files(repo, {"src/a.py": "one\nTWO\nthree\nFOUR\nfive\n"})
+    c3 = commit(repo, "Change line four", 3)
+
+    definition = [{"change": "modified", "old_span": {"start_line": 1, "end_line": 5},
+                   "new_span": {"start_line": 1, "end_line": 5}}]
+    checked = {"path": "src/a.py", "status": "modified", "symbols": "established", "hunks": 1,
+               "hunks_outside_definitions": [], "definitions": definition}
+    unchecked = {"path": "src/b.py", "status": "added", "symbols": "established", "hunks": 1,
+                 "hunks_outside_definitions": [], "definitions": []}
+    replay = os.path.join(root, "replay-dir")
+    os.makedirs(replay)
+    write_files(replay, {
+        c2[:12] + "-changes.json": json.dumps({"files": [checked, unchecked]}),
+        c2[:12] + "-changes.stderr.txt": "",
+        c3[:12] + "-changes.json": json.dumps({"files": [dict(checked, hunks=2)]}),
+    })
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        code = V.main(["replay-check", "--tree", repo, "--replay-dir", replay])
+    check(code == 0, "replay-check exits 0 when every commit has a readable changes document")
+    lines = [json.loads(line) for line in out.getvalue().splitlines()]
+    check(len(lines) == 2 and lines[0] == {"header": {"tree_commit": c3, "commits": 2}},
+          "replay-check header: tree commit and commit count: %r" % (lines[:1],))
+    want = {"files": 2, "definitions": 2, "definitions_intersecting": 2, "files_hunks_equal": 1,
+            "files_outside_equal": 2, "inconsistent": [c3[:12] + ":0"]}
+    check(lines[1] == {"summary": want}, "replay-check summary: %r" % (lines[1],))
+
+    bad_sha = os.path.join(root, "replay-bad-sha")
+    os.makedirs(bad_sha)
+    write_files(bad_sha, {"000000000000-changes.json": json.dumps({"files": []})})
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        code = V.main(["replay-check", "--tree", repo, "--replay-dir", bad_sha])
+    check(code == 3 and "000000000000" in err.getvalue(),
+          "replay-check exits 3 and names the commit when git cannot resolve it")
+
+    bad_json = os.path.join(root, "replay-bad-json")
+    os.makedirs(bad_json)
+    write_files(bad_json, {c2[:12] + "-changes.json": "not json"})
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        code = V.main(["replay-check", "--tree", repo, "--replay-dir", bad_json])
+    check(code == 3 and c2[:12] in err.getvalue(),
+          "replay-check exits 3 and names the commit when its changes document is not JSON")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--riltra", default=None)
@@ -561,6 +991,14 @@ def main():
     test_mention()
     test_summary_arithmetic()
     test_r_win_loss()
+    test_line_of_byte()
+    test_ast_definitions()
+    test_score_defs()
+    test_score_callers()
+    test_caller_sites()
+    test_site_records()
+    test_unit_b_pure()
+    test_unit_c_pure()
     if shutil.which("git") is None:
         print("GIT-BASED CHECKS: SKIPPED, git is not on PATH (freeze, measurements, S, B3 and R not exercised)")
         print("SELFTEST PASSED: %d checks" % PASSED)
@@ -573,8 +1011,10 @@ def main():
         test_b3_extract_failure(root)
         test_b3_control(riltra_path, root)
         test_r_doc_comment(riltra_path, root)
+        test_same_binary_two_runs_identical(riltra_path, os.path.join(root, "c1"))
         test_size_order(root)
         test_run_header(root)
+        test_unit_c_replay(root)
     print("SELFTEST PASSED: %d checks" % PASSED)
 
 

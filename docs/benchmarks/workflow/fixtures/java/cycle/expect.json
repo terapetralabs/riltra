@@ -1,0 +1,1 @@
+{"anchor":{"path":"Cycle.java","line":2,"col":9},"callers":[{"path":"Cycle.java","line":9}],"not_callers":[],"note":"ping is called only by pong; the cycle must not add a path"}

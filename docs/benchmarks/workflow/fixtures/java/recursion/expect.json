@@ -1,0 +1,1 @@
+{"anchor":{"path":"Recursion.java","line":2,"col":9},"callers":[{"path":"Recursion.java","line":2},{"path":"Recursion.java","line":9}],"not_callers":[],"note":"fact calls itself and wrapper calls it"}

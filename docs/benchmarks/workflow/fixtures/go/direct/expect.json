@@ -1,0 +1,1 @@
+{"anchor":{"path":"direct.go","line":3,"col":6},"callers":[{"path":"direct.go","line":7}],"not_callers":[],"note":"one caller; unrelated() calls nothing"}

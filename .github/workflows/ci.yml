@@ -142,13 +142,18 @@ jobs:
           unzip -q "$archive" -d "$root"
           echo "$root/bin" >> "$GITHUB_PATH"
           [[ "$("$root/bin/protoc" --version)" == 'libprotoc 33.5' ]]
+      # Step limits sit well above the slowest observed green run (19 min) so a
+      # hang is cut in 30 min instead of waiting for the 60 min job limit.
       - name: Check all optional-feature targets
+        timeout-minutes: 30
         run: cargo check --locked --no-default-features --features semantic-knowledge --all-targets
       - name: Lint all optional-feature targets
+        timeout-minutes: 30
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo clippy --locked --no-default-features --features semantic-knowledge --all-targets -- -D warnings
       - name: Test local asset validation and embedding contract
+        timeout-minutes: 30
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra inference::tests
       - name: Test knowledge vector lifecycle
         shell: bash

@@ -69,6 +69,8 @@ struct QueryInput {
     text: String,
     /// Maximum results (default 20, range 1 to 1000).
     limit: Option<usize>,
+    /// Opt-in: add one hop along proven edges (in practice CALLS; stored REFERENCES carry no caller and add no row) from the top results, under `expansion` (needs a SCIP import). Absent or false returns the lexical results alone.
+    expand: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -378,7 +380,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_query",
-        description = "Rank indexed symbols by the words of a free text (same document as CLI `query`). Lexical only: BM25 over symbol names, paths and doc comments, with no call-graph expansion and no semantic matching; test paths rank last unless a term names tests. When to call: to find a definition from a description in words, before the graph tools that take a `path`, `line` and `col`.",
+        description = "Rank indexed symbols by the words of a free text (same document as CLI `query`). Lexical only: BM25 over symbol names, paths and doc comments, with no semantic matching; test paths rank last unless a term names tests. Expansion along proven call edges is opt-in with `expand: true`; it adds an `expansion` object and never changes `results`. When to call: to find a definition from a description in words, before the graph tools that take a `path`, `line` and `col`.",
         annotations(
             title = "Search indexed symbols by free text",
             read_only_hint = true,
@@ -988,11 +990,13 @@ fn query_doc(input: &QueryInput) -> CallToolResult {
         }
     };
     let recorded = entry.root.clone();
+    let expand = input.expand.unwrap_or(false);
     match store::open_read(&store::db_path(&home, &input.repo)) {
         store::IndexRead::Missing => exact_doc(&lexical::no_index_document(
             &input.repo,
             &recorded,
             &input.text,
+            expand,
         )),
         store::IndexRead::Outdated(version) => tool_error(
             "schema_outdated",
@@ -1003,7 +1007,14 @@ fn query_doc(input: &QueryInput) -> CallToolResult {
         }
         store::IndexRead::Error(message) => tool_error("store_error", &message),
         store::IndexRead::Ready(mut conn) => {
-            match lexical::ready_document(&mut conn, &input.repo, &recorded, &input.text, limit) {
+            match lexical::ready_document(
+                &mut conn,
+                &input.repo,
+                &recorded,
+                &input.text,
+                limit,
+                expand,
+            ) {
                 Ok(text) => exact_doc(&text),
                 Err(refusal) => tool_error(refusal.kind, &refusal.message),
             }

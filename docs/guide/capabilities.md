@@ -48,6 +48,7 @@ symbol with `path`, `line`, `name`, `kind` and the terms that matched it. The
 default limit is 20 and the maximum is 1000; the text is at most 16384 bytes.
 A text with no term answers `no-extractable-term`, and a text that matches no
 indexed definition answers `no-match`; neither proves that a concept is absent.
+With `--expand` (MCP `expand: true`) the answer adds an `expansion` object: one hop along proven `CALLS` edges from the first five results, at most five added rows per seed and 25 in total, each labelled `Unverified`. It needs a SCIP import and is unavailable while the source is not fresh; see the [agent setup guide](agent-setup.md#opt-in-expansion).
 
 Syntax-only call sites are `POTENTIAL_CALL` candidates matched by name. They
 are not resolved to targets. A `CALLS` edge requires semantic evidence that

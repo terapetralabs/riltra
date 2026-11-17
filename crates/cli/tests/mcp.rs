@@ -6620,7 +6620,7 @@ fn code_query_is_read_only_and_its_schema_takes_repo_text_and_limit() {
         .map(String::as_str)
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["limit", "repo", "text"], "{schema}");
+    assert_eq!(names, ["expand", "limit", "repo", "text"], "{schema}");
     assert_eq!(schema["required"], json!(["repo", "text"]), "{schema}");
     assert_eq!(schema["additionalProperties"], false, "{schema}");
     let description = tool["description"].as_str().unwrap();
@@ -6629,6 +6629,46 @@ fn code_query_is_read_only_and_its_schema_takes_repo_text_and_limit() {
         description.to_lowercase().contains("lexical only"),
         "{description}"
     );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn code_query_refuses_a_non_bool_expand_and_an_unknown_field() {
+    let h = home("q-expand-refuse");
+    let r = home("q-expand-refuse-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    let inputs = [
+        json!({"repo": "r", "text": "alpha one", "expand": "yes"}),
+        json!({"repo": "r", "text": "alpha one", "bogus": 1}),
+    ];
+    for (offset, arguments) in inputs.iter().enumerate() {
+        let id = 2 + offset as i64;
+        s.send(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": "riltra_code_query", "arguments": arguments}
+            })
+            .to_string(),
+        );
+        let v = s.recv();
+        assert!(
+            v.get("error").is_some() || is_error(&v["result"]),
+            "input must be refused at the schema layer: {v}"
+        );
+        if offset == 0 {
+            // The non-bool `expand` is refused as a type error, not as an unknown field.
+            let text = v.to_string();
+            assert!(
+                text.contains("expand") || text.contains("bool"),
+                "the refusal names the field or its type: {v}"
+            );
+        }
+    }
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 }

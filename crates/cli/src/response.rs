@@ -9,7 +9,8 @@
 use std::path::Path;
 
 use crate::{
-    edges, git, ignore, index, json, knowledge, knowledge_store, lexical, semantic, store, syntax,
+    edges, expand, git, ignore, index, json, knowledge, knowledge_store, lexical, semantic, store,
+    syntax,
 };
 
 /// One snapshot identity block, shared by search and index-status output.
@@ -145,7 +146,7 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
 
 /// Parameters for one `query` document (PR 9). `reason` is `None` when rows
 /// exist; the other values are the fixed words `no-index`, `no-match` and
-/// `no-extractable-term`.
+/// `no-extractable-term`. `expansion` is `Some` only when `--expand` was asked.
 pub(crate) struct QueryResponse<'a> {
     pub repo: &'a str,
     pub root: &'a str,
@@ -155,6 +156,88 @@ pub(crate) struct QueryResponse<'a> {
     pub terms: &'a [String],
     pub answer: &'a lexical::Answer,
     pub reason: Option<&'a str>,
+    pub expansion: Option<&'a expand::Expansion>,
+}
+
+/// A nullable JSON string: the escaped value, or `null`.
+fn nullable_json(value: Option<&str>) -> String {
+    match value {
+        Some(v) => format!("\"{}\"", json::escape(v)),
+        None => "null".to_string(),
+    }
+}
+
+fn expansion_seed_item_json(item: &expand::SeedItem) -> String {
+    format!(
+        "{{\"path\":\"{}\",\"line\":{},\"name\":{},\"kind\":\"{}\",\"skipped\":{},\"scip\":{},\"eligible\":{},\"added\":{},\"omitted\":{},\"unmapped\":{},\"read_bounded\":{}}}",
+        json::escape(&item.path),
+        item.line,
+        nullable_json(item.name.as_deref()),
+        json::escape(&item.kind),
+        match item.skipped {
+            Some(skip) => format!("\"{}\"", skip.as_str()),
+            None => "null".to_string(),
+        },
+        item.scip,
+        item.eligible,
+        item.added,
+        item.omitted,
+        item.unmapped,
+        item.read_bounded
+    )
+}
+
+fn expansion_row_json(row: &expand::Row) -> String {
+    let seed = &row.via.seed;
+    format!(
+        "{{\"path\":\"{}\",\"line\":{},\"name\":{},\"kind\":\"{}\",\"via\":{{\"seed\":{{\"path\":\"{}\",\"line\":{},\"name\":{}}},\"edge\":\"{}\",\"direction\":\"{}\",\"precision\":\"{}\",\"evidence_label\":\"{}\"}}}}",
+        json::escape(&row.path),
+        row.line,
+        nullable_json(row.name.as_deref()),
+        json::escape(&row.kind),
+        json::escape(&seed.path),
+        seed.line,
+        nullable_json(seed.name.as_deref()),
+        row.via.edge,
+        row.via.direction.as_str(),
+        row.via.precision,
+        row.via.evidence_label
+    )
+}
+
+/// The `expansion` object of a `query` document (`--expand`, PR 9c).
+fn expansion_json(expansion: &expand::Expansion) -> String {
+    let reasons: Vec<String> = expansion
+        .reasons
+        .iter()
+        .map(|r| format!("\"{r}\""))
+        .collect();
+    let items: Vec<String> = expansion
+        .seeds
+        .items
+        .iter()
+        .map(expansion_seed_item_json)
+        .collect();
+    let rows: Vec<String> = expansion.rows.iter().map(expansion_row_json).collect();
+    let limits = &expansion.limits;
+    let seeds = &expansion.seeds;
+    format!(
+        "{{\"status\":\"{}\",\"reasons\":[{}],\"limits\":{{\"seeds\":{},\"per_seed\":{},\"total\":{},\"edge_read\":{}}},\"seeds\":{{\"considered\":{},\"mapped\":{},\"skipped\":{},\"items\":[{}]}},\"added\":{},\"omitted\":{},\"truncated\":{},\"rows\":[{}]}}",
+        expansion.status.as_str(),
+        reasons.join(","),
+        limits.seeds,
+        limits.per_seed,
+        limits.total,
+        limits.edge_read,
+        seeds.considered,
+        seeds.mapped,
+        seeds.skipped,
+        items.join(","),
+        expansion.added,
+        expansion.omitted,
+        expansion.truncated,
+        rows.join(",")
+    )
 }
 
 fn query_hit_json(hit: &lexical::Hit) -> String {
@@ -190,8 +273,8 @@ pub(crate) fn query_response_json(response: &QueryResponse<'_>) -> String {
         .iter()
         .map(|r| format!("\"{r}\""))
         .collect();
-    format!(
-        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"terms\":[{}],\"results\":[{}],\"total\":{},\"truncated\":{},\"reason\":{},\"basis\":\"{}\"}}",
+    let mut document = format!(
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"terms\":[{}],\"results\":[{}],\"total\":{},\"truncated\":{},\"reason\":{},\"basis\":\"{}\"",
         json::escape(response.repo),
         json::escape(response.root),
         match response.snapshot {
@@ -209,7 +292,12 @@ pub(crate) fn query_response_json(response: &QueryResponse<'_>) -> String {
             None => "null".to_string(),
         },
         lexical::BASIS
-    )
+    );
+    if let Some(expansion) = response.expansion {
+        document.push_str(&format!(",\"expansion\":{}", expansion_json(expansion)));
+    }
+    document.push('}');
+    document
 }
 
 // --- repository status and index status ------------------------------------

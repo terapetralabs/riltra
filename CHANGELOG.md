@@ -14,9 +14,16 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 - `query` (CLI) and MCP tool `riltra_code_query`: lexical concept search. It ranks
   indexed definitions for a free text by BM25 over the concept index (names, paths and doc
-  comments), read-only and with no schema change. It is lexical only: no call-edge expansion,
-  no semantic matching, no printed score. Limits and rules are in
+  comments), read-only and with no schema change. It is lexical only by default (opt-in
+  expansion is the next entry): no semantic matching, no printed score. Limits and rules are in
   [capabilities](docs/guide/capabilities.md#search-relationships-and-freshness).
+
+- `query --expand` (CLI) and `expand: true` (MCP `riltra_code_query`): opt-in expansion of
+  the lexical results by one hop along proven `CALLS` edges, under an `expansion` object with
+  five statuses and named reasons. Without the flag the output is unchanged. It needs a SCIP
+  import, adds rows labelled `Unverified` only, and is capped at five added rows per seed and
+  25 in total. Expansion is implemented and tested on fixtures; its effect on ranking is not
+  measured. See the [agent setup guide](docs/guide/agent-setup.md#opt-in-expansion).
 
 - `context` (CLI and MCP `riltra_context`) appends four read-only sections: `containment`
   (enclosing scopes and direct members), `heritage` (declared supertypes, name-matched

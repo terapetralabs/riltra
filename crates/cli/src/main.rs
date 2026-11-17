@@ -15,6 +15,7 @@ mod concept;
 mod context;
 mod doctor;
 mod edges;
+mod expand;
 mod git;
 mod ignore;
 mod index;
@@ -58,7 +59,7 @@ pub(crate) const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]\n  {NAME} query --repo <name> --text <text> [--limit <n>]
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]\n  {NAME} query --repo <name> --text <text> [--limit <n>] [--expand]
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
@@ -319,6 +320,7 @@ fn cmd_query(
     name: &str,
     text: &str,
     limit: Option<&str>,
+    expand: bool,
     out: &mut String,
     err: &mut String,
 ) -> i32 {
@@ -351,7 +353,7 @@ fn cmd_query(
     let recorded = entry.root.clone();
     match store::open_read(&store::db_path(&home, name)) {
         store::IndexRead::Missing => {
-            *out = lexical::no_index_document(name, &recorded, text) + "\n";
+            *out = lexical::no_index_document(name, &recorded, text, expand) + "\n";
             0
         }
         store::IndexRead::Outdated(version) => {
@@ -370,7 +372,7 @@ fn cmd_query(
             3
         }
         store::IndexRead::Ready(mut conn) => {
-            match lexical::ready_document(&mut conn, name, &recorded, text, limit) {
+            match lexical::ready_document(&mut conn, name, &recorded, text, limit, expand) {
                 Ok(document) => {
                     *out = document + "\n";
                     0
@@ -705,7 +707,12 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             out,
             err,
         ),
-        Command::Query { repo, text, limit } => cmd_query(&repo, &text, limit.as_deref(), out, err),
+        Command::Query {
+            repo,
+            text,
+            limit,
+            expand,
+        } => cmd_query(&repo, &text, limit.as_deref(), expand, out, err),
         Command::Semantic { op } => cmd_semantic(op, out, err),
         Command::Edge { op } => cmd_edge(op, out, err),
         Command::Trace(args) => cmd_trace(args, out, err),

@@ -1177,6 +1177,32 @@ fn import_verdict(
     Ok(verdict)
 }
 
+/// Staleness of one import for expansion: the verdict `import_verdict` gives,
+/// with a fresh memo per call. Every database read error propagates, and an
+/// unknown import is an error, never a verdict. A source document of the import
+/// that cannot be read from disk counts as drift (`import_source_changed`, the
+/// existing conservative rule), so it reads as stale, not as an error.
+pub(crate) fn import_is_stale(
+    tx: &rusqlite::Connection,
+    snapshot: &store::Snapshot,
+    canon: &Path,
+    source_fresh: bool,
+    import_id: i64,
+) -> Result<bool, String> {
+    let live = live_state_for(tx, snapshot)?;
+    let mut memo = BTreeMap::new();
+    let (verification, _, _) = import_verdict(
+        tx,
+        snapshot,
+        &live,
+        source_fresh,
+        canon,
+        import_id,
+        &mut memo,
+    )?;
+    Ok(verification == "Stale")
+}
+
 /// Single-hop semantic query over stored SCIP facts. Go to Definition
 /// resolves the enclosing occurrence to its symbol identity and returns the
 /// Definition-role rows; `--refs` returns the reference-role rows sharing
@@ -6045,6 +6071,52 @@ mod tests {
             super::import_verdict(&conn, &snapshot, &live, true, &dir, imp2, &mut memo).unwrap();
         assert_eq!(third.0, "Unverified");
         assert_eq!(memo.len(), 2, "distinct imports resolve distinctly");
+    }
+
+    #[test]
+    fn import_is_stale_follows_source_freshness_and_fails_closed() {
+        let dir = tmpdir("idx-import-stale");
+        std::fs::write(dir.join("a.py"), b"x\n").unwrap();
+        let conn = store::open_memory().unwrap();
+        let snap = store::insert_snapshot(&conn, &fabricated_snapshot("r", &dir)).unwrap();
+        store::insert_file(
+            &conn,
+            snap,
+            &store::FileRow {
+                path: "a.py".to_string(),
+                language: "python".to_string(),
+                bytes: 2,
+                digest: store::content_digest(b"x\n"),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        let snapshot = store::latest_snapshot(&conn).unwrap().unwrap();
+        let live = super::live_state_for(&conn, &snapshot).unwrap();
+        let imp = store::insert_semantic_import(
+            &conn,
+            &store::SemanticImport {
+                snapshot_id: snap,
+                provider_name: "scip-import".to_string(),
+                provider_version: "v".to_string(),
+                capability: "definitions,references".to_string(),
+                project_root: dir.to_string_lossy().to_string(),
+                text_encoding: "UTF8".to_string(),
+                artifact_id: "a".to_string(),
+                source_revision: crate::semantic::revision_string(&live),
+                claimed_source_digest: String::new(),
+                content_identity: live.content_identity.clone(),
+                external_symbols: "[]".to_string(),
+                verification: "Unverified".to_string(),
+            },
+        )
+        .unwrap();
+        // An intact import over a fresh source is not stale.
+        assert!(!super::import_is_stale(&conn, &snapshot, &dir, true, imp).unwrap());
+        // A source that is not fresh makes the import stale.
+        assert!(super::import_is_stale(&conn, &snapshot, &dir, false, imp).unwrap());
+        // A missing import is an error, never a verdict.
+        assert!(super::import_is_stale(&conn, &snapshot, &dir, true, imp + 100).is_err());
     }
 
     fn anchor_harness() -> (rusqlite::Connection, i64, std::path::PathBuf) {

@@ -2269,6 +2269,80 @@ fn query_edges(
     )
 }
 
+/// Proven one-hop edges of one exact endpoint, for query expansion: `CALLS` or
+/// `REFERENCES` rows at `Exact` precision with no unresolved marker whose other
+/// endpoint is known. Matched by the endpoint itself only: no name candidates,
+/// no alias union. Returns at most `limit` rows in `EDGE_ORDER`, and the count
+/// of the matching rows whose other endpoint is unknown.
+pub fn proven_edge_page(
+    conn: &Connection,
+    snapshot_id: i64,
+    endpoint: &EdgeEndpoint,
+    inbound: bool,
+    limit: i64,
+) -> Result<(Vec<EdgeRow>, usize), String> {
+    if limit < 1 {
+        return Err(format!(
+            "proven edge page limit must be at least 1, got {limit}"
+        ));
+    }
+    let (own, other) = if inbound {
+        ("callee", "caller")
+    } else {
+        ("caller", "callee")
+    };
+    let owned = Some(endpoint.clone());
+    let part = endpoint_parts(&owned);
+    let matches_endpoint = format!(
+        "snapshot_id = ?1 AND {own}_kind = ?2 AND {own}_import_id IS ?3 AND {own}_uri IS ?4 AND {own}_doc IS ?5 AND {own}_path IS ?6 AND {own}_bs IS ?7 AND {own}_be IS ?8"
+    );
+    let proven =
+        "edge_kind IN ('CALLS', 'REFERENCES') AND precision = 'Exact' AND unresolved IS NULL";
+    let page_sql = format!(
+        "SELECT {EDGE_COLS} FROM code_edges WHERE {matches_endpoint} AND {proven} AND {other}_kind != 'unknown' ORDER BY {EDGE_ORDER} LIMIT ?9"
+    );
+    let mut statement = conn.prepare(&page_sql).map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(
+            params![
+                snapshot_id,
+                part.kind,
+                part.import_id,
+                part.uri,
+                part.doc,
+                part.path,
+                part.bs,
+                part.be,
+                limit
+            ],
+            read_edge,
+        )
+        .map_err(|e| e.to_string())?;
+    let edges = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let unknown_sql = format!(
+        "SELECT COUNT(*) FROM code_edges WHERE {matches_endpoint} AND {proven} AND {other}_kind = 'unknown'"
+    );
+    let unknown: i64 = conn
+        .query_row(
+            &unknown_sql,
+            params![
+                snapshot_id,
+                part.kind,
+                part.import_id,
+                part.uri,
+                part.doc,
+                part.path,
+                part.bs,
+                part.be
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((edges, unknown as usize))
+}
+
 fn snapshot_from_row(row: &rusqlite::Row) -> rusqlite::Result<Snapshot> {
     Ok(Snapshot {
         id: row.get(0)?,
@@ -2610,12 +2684,13 @@ pub fn occurrences_for(
 mod tests {
     use super::{
         attach_src, carry_semantic_facts, content_digest, content_identity, db_path, detach_src,
-        files_of, finish_snapshot, fts_available, grammar_versions, insert_call, insert_file,
-        insert_import, insert_semantic_facts, insert_semantic_import, insert_snapshot,
+        files_of, finish_snapshot, fts_available, grammar_versions, insert_call, insert_edge,
+        insert_file, insert_import, insert_semantic_facts, insert_semantic_import, insert_snapshot,
         insert_symbol, is_readable_db, latest_snapshot, live_base, meta_get, meta_set, migrate,
-        open_live, open_memory, open_read, promote_staging, search_symbols, semantic_facts_for,
-        semantic_generation, semantic_imports_for, staging_path, FileRow, IndexRead, SemanticFact,
-        SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
+        open_live, open_memory, open_read, promote_staging, proven_edge_page, search_symbols,
+        semantic_facts_for, semantic_generation, semantic_imports_for, staging_path, EdgeEndpoint,
+        EdgeRow, FileRow, IndexRead, SemanticFact, SemanticImport, Snapshot, SymbolRow,
+        SCHEMA_VERSION,
     };
     use crate::testutil::tmpdir;
     use std::path::Path;
@@ -4458,5 +4533,232 @@ mod tests {
             0,
             "concept search rows are rebuilt from the staging symbols, never copied"
         );
+    }
+
+    fn scip_endpoint(uri: &str) -> EdgeEndpoint {
+        EdgeEndpoint::Scip {
+            import_id: 1,
+            symbol_uri: uri.to_string(),
+            doc: None,
+        }
+    }
+
+    fn syntax_endpoint(path: &str, byte_start: usize) -> EdgeEndpoint {
+        EdgeEndpoint::SyntaxDef {
+            path: path.to_string(),
+            byte_start,
+            byte_end: byte_start + 5,
+        }
+    }
+
+    fn stored_edge(
+        caller: Option<EdgeEndpoint>,
+        callee: Option<EdgeEndpoint>,
+        edge_kind: &str,
+        precision: &str,
+        unresolved: Option<&str>,
+    ) -> EdgeRow {
+        EdgeRow {
+            snapshot_id: 1,
+            file_id: 1,
+            caller,
+            caller_path: "caller.py".to_string(),
+            caller_span_bytes: (10, 20),
+            callee,
+            callee_name: "target".to_string(),
+            edge_kind: edge_kind.to_string(),
+            precision: precision.to_string(),
+            provider: "scip".to_string(),
+            evidence: "{}".to_string(),
+            unresolved: unresolved.map(str::to_string),
+        }
+    }
+
+    fn callee_endpoints(rows: &[EdgeRow]) -> Vec<Option<EdgeEndpoint>> {
+        rows.iter().map(|row| row.callee.clone()).collect()
+    }
+
+    #[test]
+    fn proven_edge_page_keeps_only_proven_calls_and_references() {
+        let conn = open_memory().unwrap();
+        let seed = scip_endpoint("seed");
+        let proven_call = scip_endpoint("proven-call");
+        let proven_reference = syntax_endpoint("ref.py", 40);
+        let rows = [
+            stored_edge(
+                Some(seed.clone()),
+                Some(proven_call.clone()),
+                "CALLS",
+                "Exact",
+                None,
+            ),
+            stored_edge(
+                Some(seed.clone()),
+                Some(proven_reference.clone()),
+                "REFERENCES",
+                "Exact",
+                None,
+            ),
+            // Excluded: other kind, heuristic precision, unresolved, unknown other endpoint.
+            stored_edge(
+                Some(seed.clone()),
+                Some(scip_endpoint("potential")),
+                "POTENTIAL_CALL",
+                "Exact",
+                None,
+            ),
+            stored_edge(
+                Some(seed.clone()),
+                Some(scip_endpoint("imports")),
+                "IMPORTS",
+                "Exact",
+                None,
+            ),
+            stored_edge(
+                Some(seed.clone()),
+                Some(scip_endpoint("heuristic")),
+                "CALLS",
+                "Heuristic",
+                None,
+            ),
+            stored_edge(
+                Some(seed.clone()),
+                Some(scip_endpoint("ambiguous")),
+                "CALLS",
+                "Exact",
+                Some("ambiguous:2"),
+            ),
+            stored_edge(Some(seed.clone()), None, "CALLS", "Heuristic", None),
+            stored_edge(Some(seed.clone()), None, "CALLS", "Exact", Some("dynamic")),
+            // Counted: proven kinds whose other endpoint is unknown.
+            stored_edge(Some(seed.clone()), None, "CALLS", "Exact", None),
+            stored_edge(Some(seed.clone()), None, "REFERENCES", "Exact", None),
+        ];
+        for row in &rows {
+            insert_edge(&conn, row).unwrap();
+        }
+        let (page, unmapped) = proven_edge_page(&conn, 1, &seed, false, 10).unwrap();
+        assert_eq!(
+            callee_endpoints(&page),
+            vec![Some(proven_call), Some(proven_reference)]
+        );
+        let kinds: Vec<&str> = page.iter().map(|row| row.edge_kind.as_str()).collect();
+        assert_eq!(kinds, ["CALLS", "REFERENCES"]);
+        assert_eq!(unmapped, 2);
+    }
+
+    #[test]
+    fn proven_edge_page_follows_one_direction_and_one_exact_endpoint() {
+        let conn = open_memory().unwrap();
+        let seed = scip_endpoint("seed");
+        let callee = scip_endpoint("callee");
+        let caller = scip_endpoint("caller");
+        let syntax_seed = syntax_endpoint("seed.py", 0);
+        insert_edge(
+            &conn,
+            &stored_edge(
+                Some(seed.clone()),
+                Some(callee.clone()),
+                "CALLS",
+                "Exact",
+                None,
+            ),
+        )
+        .unwrap();
+        insert_edge(
+            &conn,
+            &stored_edge(
+                Some(caller.clone()),
+                Some(seed.clone()),
+                "CALLS",
+                "Exact",
+                None,
+            ),
+        )
+        .unwrap();
+        insert_edge(
+            &conn,
+            &stored_edge(
+                Some(syntax_seed.clone()),
+                Some(callee.clone()),
+                "CALLS",
+                "Exact",
+                None,
+            ),
+        )
+        .unwrap();
+
+        let (outbound, _) = proven_edge_page(&conn, 1, &seed, false, 10).unwrap();
+        assert_eq!(callee_endpoints(&outbound), vec![Some(callee.clone())]);
+        let (inbound, _) = proven_edge_page(&conn, 1, &seed, true, 10).unwrap();
+        let callers: Vec<Option<EdgeEndpoint>> =
+            inbound.iter().map(|row| row.caller.clone()).collect();
+        assert_eq!(callers, vec![Some(caller)]);
+        let (syntax_out, _) = proven_edge_page(&conn, 1, &syntax_seed, false, 10).unwrap();
+        assert_eq!(callee_endpoints(&syntax_out), vec![Some(callee.clone())]);
+        let (into_callee, _) = proven_edge_page(&conn, 1, &callee, true, 10).unwrap();
+        let callers: Vec<Option<EdgeEndpoint>> =
+            into_callee.iter().map(|row| row.caller.clone()).collect();
+        assert_eq!(callers.len(), 2);
+        assert!(callers.contains(&Some(seed)));
+        assert!(callers.contains(&Some(syntax_seed)));
+    }
+
+    #[test]
+    fn proven_edge_page_orders_stably_and_honours_the_limit() {
+        let conn = open_memory().unwrap();
+        let seed = scip_endpoint("seed");
+        for uri in ["c", "a", "b"] {
+            insert_edge(
+                &conn,
+                &stored_edge(
+                    Some(seed.clone()),
+                    Some(scip_endpoint(uri)),
+                    "CALLS",
+                    "Exact",
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        let (all, unmapped) = proven_edge_page(&conn, 1, &seed, false, 10).unwrap();
+        let sorted = vec![
+            Some(scip_endpoint("a")),
+            Some(scip_endpoint("b")),
+            Some(scip_endpoint("c")),
+        ];
+        assert_eq!(callee_endpoints(&all), sorted);
+        assert_eq!(unmapped, 0);
+        let (again, _) = proven_edge_page(&conn, 1, &seed, false, 10).unwrap();
+        assert_eq!(
+            callee_endpoints(&again),
+            sorted,
+            "repeated read is identical"
+        );
+        let (one, _) = proven_edge_page(&conn, 1, &seed, false, 1).unwrap();
+        assert_eq!(callee_endpoints(&one), vec![Some(scip_endpoint("a"))]);
+        let (two, _) = proven_edge_page(&conn, 1, &seed, false, 2).unwrap();
+        assert_eq!(
+            callee_endpoints(&two),
+            vec![Some(scip_endpoint("a")), Some(scip_endpoint("b"))]
+        );
+    }
+
+    #[test]
+    fn proven_edge_page_rejects_a_limit_below_one() {
+        let conn = open_memory().unwrap();
+        for limit in [0, -1] {
+            assert!(
+                proven_edge_page(&conn, 1, &scip_endpoint("seed"), false, limit).is_err(),
+                "limit {limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn proven_edge_page_reports_a_read_failure() {
+        let conn = open_memory().unwrap();
+        conn.execute_batch("DROP TABLE code_edges").unwrap();
+        assert!(proven_edge_page(&conn, 1, &scip_endpoint("seed"), true, 5).is_err());
     }
 }

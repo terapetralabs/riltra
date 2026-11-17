@@ -52,6 +52,8 @@ pub enum Command {
         repo: String,
         text: String,
         limit: Option<String>,
+        /// Opt-in expansion along proven edges (`--expand`, a bare flag).
+        expand: bool,
     },
     Semantic {
         op: SemanticOp,
@@ -432,9 +434,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut repo = None;
             let mut text = None;
             let mut limit = None;
+            let mut expand = false;
             let mut i = 1;
             while i < args.len() {
-                if let Some(v) = take_value(args, &mut i, "--repo") {
+                if args[i] == "--expand" {
+                    if expand {
+                        return Err(crate::usage());
+                    }
+                    expand = true;
+                    i += 1;
+                } else if let Some(v) = take_value(args, &mut i, "--repo") {
                     repo = Some(v);
                 } else if let Some(v) = take_value(args, &mut i, "--text") {
                     text = Some(v);
@@ -445,7 +454,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
             }
             match (repo, text) {
-                (Some(repo), Some(text)) => Ok(Command::Query { repo, text, limit }),
+                (Some(repo), Some(text)) => Ok(Command::Query {
+                    repo,
+                    text,
+                    limit,
+                    expand,
+                }),
                 _ => Err(crate::usage()),
             }
         }
@@ -1140,7 +1154,7 @@ mod tests {
     fn query_takes_the_text_value_even_when_it_starts_with_a_dash() {
         assert!(matches!(
             p(&["query", "--repo", "r", "--text", "--save", "--limit", "5"]),
-            Ok(Command::Query { ref repo, ref text, limit: Some(ref l) })
+            Ok(Command::Query { ref repo, ref text, limit: Some(ref l), .. })
                 if repo == "r" && text == "--save" && l == "5"
         ));
         assert!(matches!(
@@ -1151,6 +1165,24 @@ mod tests {
         assert!(p(&["query", "--text", "a"]).is_err());
         assert!(p(&["query", "--repo", "r", "--text", "a", "--offset", "1"]).is_err());
         assert!(p(&["query", "--repo", "r", "--text"]).is_err());
+    }
+
+    #[test]
+    fn query_takes_a_bare_expand_flag_at_most_once() {
+        assert!(matches!(
+            p(&["query", "--repo", "r", "--text", "a b", "--expand"]),
+            Ok(Command::Query { expand: true, .. })
+        ));
+        assert!(matches!(
+            p(&["query", "--repo", "r", "--text", "a b"]),
+            Ok(Command::Query { expand: false, .. })
+        ));
+        assert!(matches!(
+            p(&["query", "--repo", "r", "--text", "--expand"]),
+            Ok(Command::Query { ref text, expand: false, .. }) if text == "--expand"
+        ));
+        assert!(p(&["query", "--repo", "r", "--text", "a", "--expand=x"]).is_err());
+        assert!(p(&["query", "--repo", "r", "--text", "a", "--expand", "--expand"]).is_err());
     }
 
     #[test]

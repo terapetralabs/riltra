@@ -46,7 +46,7 @@ jobs:
     # 6 h default: run 41669633876 held a macos-15 job until that limit.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Enforce public documentation boundary
@@ -98,7 +98,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Fetch locked sources for offline optional dependency audit
         run: cargo fetch --locked
@@ -267,7 +267,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Fetch locked sources for complete SBOM and notices
         run: cargo fetch --locked
@@ -298,7 +298,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install pinned cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
@@ -314,7 +314,7 @@ jobs:
     env:
       GITLEAKS_BIN: ${{ github.workspace }}/bin/gitleaks
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Install pinned gitleaks 8.30.1

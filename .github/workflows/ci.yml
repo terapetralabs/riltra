@@ -12,6 +12,42 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides whether a pull request needs the slow, non-required jobs. Only a
+  # pull request whose changed files are all Markdown outside release/ skips
+  # them; every push (so every master commit) runs everything. The required
+  # `check (...)` jobs and the security jobs always run, so the ruleset's
+  # required contexts are always reported. The outcome fails open: anything
+  # other than an explicit `false` runs the jobs.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: diff
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          code=true
+          if [ "$EVENT" = pull_request ]; then
+            changed="$(git diff --name-only "$BASE...$HEAD")"
+            other="$(printf '%s\n' "$changed" | grep -Ev '[.]md$' || true)"
+            release="$(printf '%s\n' "$changed" | grep -E '^release/' || true)"
+            if [ -n "$changed" ] && [ -z "$other" ] && [ -z "$release" ]; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   check:
     strategy:
       fail-fast: false
@@ -93,6 +129,8 @@ jobs:
           - { name: ubuntu-latest, runner: ubuntu-latest }
           - { name: macos-15, runner: macos-15-intel }
     name: semantic-knowledge (${{ matrix.name }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -261,6 +299,8 @@ jobs:
           - { name: ubuntu-24.04, runner: ubuntu-24.04, platform: linux-x64, ext: tar.gz }
           - { name: macos-15-intel, runner: macos-15-intel, platform: macos-x64, ext: tar.gz }
     name: installer (${{ matrix.name }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ matrix.runner }}
     # Same rule as `check`: macos-15-intel took at most 732 s.
     timeout-minutes: 40

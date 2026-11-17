@@ -1,0 +1,1 @@
+{"anchor":{"path":"same_name.go","line":7,"col":12},"callers":[{"path":"same_name.go","line":15}],"not_callers":[{"path":"same_name.go","line":19}],"note":"A.run is called by useA only; useB calls B.run, a same-name decoy"}

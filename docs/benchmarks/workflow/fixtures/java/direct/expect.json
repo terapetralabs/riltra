@@ -1,0 +1,1 @@
+{"anchor":{"path":"Direct.java","line":2,"col":9},"callers":[{"path":"Direct.java","line":6}],"not_callers":[],"note":"one caller; unrelated() calls nothing"}

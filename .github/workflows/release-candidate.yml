@@ -29,7 +29,7 @@ jobs:
     # stalled runner holds a job until GitHub's 6 h default.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Refuse any ref other than master
@@ -58,7 +58,7 @@ jobs:
     # Same rule as `guard`: the longest package job was macos-x64 at 405 s.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Fetch locked sources for complete SBOM and notices
         run: cargo fetch --locked
@@ -72,7 +72,7 @@ jobs:
       - name: Clean-install smoke of the archive
         shell: bash
         run: bash release/smoke.sh dist/riltra-*-${{ matrix.name }}.${{ matrix.ext }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: riltra-${{ matrix.name }}
           path: dist/riltra-*

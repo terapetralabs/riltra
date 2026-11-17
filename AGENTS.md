@@ -48,6 +48,8 @@ Follow Rust 2021 conventions and rustfmt: four-space indentation, `snake_case` f
 
 Preserve deterministic JSON, evidence and freshness labels, path confinement, and read-only MCP behavior. Core paths must not access the network; external providers are opt-in. Do not hand-edit generated `scip_proto.rs`.
 
+Choose the simplest design that meets the current requirement. Give a function or module one responsibility, and do not add traits, generics, options or layers for variation that does not exist yet. Do not refactor unrelated code to satisfy a design principle. Follow the conventions of the surrounding module; if a design preference conflicts with an existing CLI, MCP, JSON or stored-data contract, the contract wins and the conflict is stated in the PR. A `// shortcut:` comment marks a deliberate simplification together with its upgrade trigger; keep it accurate.
+
 ## Commits & Pull Requests
 
 Recent commits use concise conventional-style subjects such as `test: document impact evidence coverage gaps` and `docs(e2): record baseline`. Every commit requires a DCO sign-off: use `git commit -s`. In pull requests, describe the change and its validation, link relevant issues, and include evidence for behavioral changes. Run formatting, Clippy, and tests before pushing. Document each new dependency's package, version, license, and origin in `docs/licensing.md` in the same PR; see `CONTRIBUTING.md` for licensing and benchmark requirements.

@@ -506,7 +506,31 @@ pub(crate) fn trace_query_json(o: &index::TraceQueryOut) -> String {
         edge_string(&o.repo),o.snapshot.id,edge_string(&o.snapshot.nonce),edge_string(&o.revision),trace_anchor_json(&o.anchor),o.destination.as_ref().map(trace_anchor_json).unwrap_or_else(||"null".to_string()),edge_string(&o.freshness),edge_strings(&o.freshness_reasons),edge_string(&o.verification),edge_string(&o.completeness.status),o.completeness.covered,o.completeness.total,o.total_exact,edge_strings(&o.completeness.unresolved),o.nodes,o.edge_visits,o.depth,o.limit,o.offset,edge_number(o.next_offset),o.cycle,o.truncated,edge_strings(&o.unresolved))
 }
 
-pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Result<String, String> {
+pub(crate) struct ContextRenderState<'a> {
+    result: &'a crate::context::ContextResult,
+    edge_values: Vec<serde_json::Value>,
+    omitted_edges: usize,
+    nodes: Vec<serde_json::Value>,
+    bridges: Vec<serde_json::Value>,
+    omitted_nodes: usize,
+    context_limit_omitted_edges: usize,
+    context_limit_omitted_nodes: usize,
+    byte_omitted_edges: usize,
+    byte_omitted_nodes: usize,
+    query_hits: Vec<serde_json::Value>,
+    semantic_hits: Vec<serde_json::Value>,
+    bindings: serde_json::Value,
+    bindings_total_exact: bool,
+    omitted_bindings_by_limit: Option<usize>,
+    fact_doc: FactDoc,
+    omitted_query_hits: usize,
+    omitted_semantic_hits: usize,
+    omitted_bindings_by_budget: usize,
+}
+
+pub(crate) fn context_render_state(
+    result: &crate::context::ContextResult,
+) -> Result<ContextRenderState<'_>, String> {
     let trace = &result.trace;
     let mut selected: std::collections::BTreeSet<_> = result
         .graph
@@ -584,13 +608,13 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
         })
         .collect();
     visible_edges.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
-    let mut edge_values: Vec<_> = visible_edges
+    let edge_values: Vec<_> = visible_edges
         .into_iter()
         .take(result.limit)
         .map(|(_, _, _, value)| value)
         .collect();
-    let mut omitted_edges = all_edges.len().saturating_sub(edge_values.len());
-    let mut nodes: Vec<_> = result
+    let omitted_edges = all_edges.len().saturating_sub(edge_values.len());
+    let nodes: Vec<_> = result
         .graph
         .iter()
         .map(|node| {
@@ -618,14 +642,14 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             })
         })
         .collect();
-    let mut omitted_nodes = result.omitted_nodes;
+    let omitted_nodes = result.omitted_nodes;
     let context_limit_omitted_edges = omitted_edges;
     let context_limit_omitted_nodes = omitted_nodes;
-    let mut byte_omitted_edges = 0usize;
-    let mut byte_omitted_nodes = 0usize;
+    let byte_omitted_edges = 0usize;
+    let byte_omitted_nodes = 0usize;
     let root = Path::new(&trace.snapshot.root);
-    let mut query_hits = context_hits_json(&result.knowledge.query, root)?;
-    let mut semantic_hits = context_hits_json(&result.knowledge.semantic, root)?;
+    let query_hits = context_hits_json(&result.knowledge.query, root)?;
+    let semantic_hits = context_hits_json(&result.knowledge.semantic, root)?;
     let mut bindings: serde_json::Value = serde_json::from_str(
         &crate::knowledge_binding::page_json(&result.knowledge.bindings),
     )
@@ -681,11 +705,55 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             serde_json::json!(omitted_bindings_by_limit),
         );
     }
-    let mut fact_doc = build_fact_doc(&result.facts)?;
-    let mut omitted_query_hits = 0usize;
-    let mut omitted_semantic_hits = 0usize;
-    let mut omitted_bindings_by_budget = 0usize;
-    loop {
+    let fact_doc = build_fact_doc(&result.facts)?;
+    let omitted_query_hits = 0usize;
+    let omitted_semantic_hits = 0usize;
+    let omitted_bindings_by_budget = 0usize;
+    Ok(ContextRenderState {
+        result,
+        edge_values,
+        omitted_edges,
+        nodes,
+        bridges,
+        omitted_nodes,
+        context_limit_omitted_edges,
+        context_limit_omitted_nodes,
+        byte_omitted_edges,
+        byte_omitted_nodes,
+        query_hits,
+        semantic_hits,
+        bindings,
+        bindings_total_exact,
+        omitted_bindings_by_limit,
+        fact_doc,
+        omitted_query_hits,
+        omitted_semantic_hits,
+        omitted_bindings_by_budget,
+    })
+}
+
+impl ContextRenderState<'_> {
+    pub(crate) fn render(&self) -> Result<serde_json::Value, String> {
+        let result = self.result;
+        let trace = &result.trace;
+        let edge_values = &self.edge_values;
+        let omitted_edges = self.omitted_edges;
+        let nodes = &self.nodes;
+        let bridges = &self.bridges;
+        let omitted_nodes = self.omitted_nodes;
+        let context_limit_omitted_edges = self.context_limit_omitted_edges;
+        let context_limit_omitted_nodes = self.context_limit_omitted_nodes;
+        let byte_omitted_edges = self.byte_omitted_edges;
+        let byte_omitted_nodes = self.byte_omitted_nodes;
+        let query_hits = &self.query_hits;
+        let semantic_hits = &self.semantic_hits;
+        let mut bindings = self.bindings.clone();
+        let bindings_total_exact = self.bindings_total_exact;
+        let omitted_bindings_by_limit = self.omitted_bindings_by_limit;
+        let fact_doc = &self.fact_doc;
+        let omitted_query_hits = self.omitted_query_hits;
+        let omitted_semantic_hits = self.omitted_semantic_hits;
+        let omitted_bindings_by_budget = self.omitted_bindings_by_budget;
         if let Some(fields) = bindings.as_object_mut() {
             fields.insert(
                 "truncated".to_string(),
@@ -703,11 +771,11 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             );
         }
         let snippet_truncated = count_truncated_snippets(&bindings)
-            + count_truncated_snippets_in(&query_hits)
-            + count_truncated_snippets_in(&semantic_hits);
+            + count_truncated_snippets_in(query_hits)
+            + count_truncated_snippets_in(semantic_hits);
         let query_limited = result.knowledge.query.truncated == Some(true);
         let (fact_values, fact_truncated, fact_reasons) =
-            fact_sections_json(&result.facts, &fact_doc);
+            fact_sections_json(&result.facts, fact_doc);
         let truncated = trace.truncated
             || omitted_edges > 0
             || omitted_nodes > 0
@@ -848,40 +916,238 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
             crate::json::sort_value_keys(&mut value);
             value
         };
-        let encoded = serde_json::to_string(&value)
+        Ok(value)
+    }
+
+    pub(crate) fn reduce_one(&mut self) -> bool {
+        if shrink_first_snippet_in(&mut self.semantic_hits)
+            || shrink_first_snippet_in(&mut self.query_hits)
+            || shrink_first_snippet(&mut self.bindings)
+            || self.fact_doc.drop_one_row()
+        {
+        } else if !self.semantic_hits.is_empty() {
+            self.semantic_hits.pop();
+            self.omitted_semantic_hits += 1;
+        } else if !self.query_hits.is_empty() {
+            self.query_hits.pop();
+            self.omitted_query_hits += 1;
+        } else if !self.edge_values.is_empty() {
+            self.edge_values.pop();
+            self.omitted_edges += 1;
+            self.byte_omitted_edges += 1;
+        } else if self.nodes.len() > 1 {
+            self.nodes.pop();
+            self.omitted_nodes += 1;
+            self.byte_omitted_nodes += 1;
+        } else if self.bindings["bindings"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+        {
+            self.bindings["bindings"].as_array_mut().unwrap().pop();
+            self.omitted_bindings_by_budget += 1;
+        } else {
+            return false;
+        }
+        true
+    }
+}
+
+pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Result<String, String> {
+    let mut state = context_render_state(result)?;
+    loop {
+        let encoded = serde_json::to_string(&state.render()?)
             .map_err(|e| format!("context response assembly failed: {e}"))?;
         if encoded.len() <= result.max_bytes {
             return Ok(encoded);
         }
-        if shrink_first_snippet_in(&mut semantic_hits)
-            || shrink_first_snippet_in(&mut query_hits)
-            || shrink_first_snippet(&mut bindings)
-        {
-            continue;
-        } else if fact_doc.drop_one_row() {
-        } else if !semantic_hits.is_empty() {
-            semantic_hits.pop();
-            omitted_semantic_hits += 1;
-        } else if !query_hits.is_empty() {
-            query_hits.pop();
-            omitted_query_hits += 1;
-        } else if !edge_values.is_empty() {
-            edge_values.pop();
-            omitted_edges += 1;
-            byte_omitted_edges += 1;
-        } else if nodes.len() > 1 {
-            nodes.pop();
-            omitted_nodes += 1;
-            byte_omitted_nodes += 1;
-        } else if bindings["bindings"]
-            .as_array()
-            .is_some_and(|rows| !rows.is_empty())
-        {
-            bindings["bindings"].as_array_mut().unwrap().pop();
-            omitted_bindings_by_budget += 1;
-        } else {
+        if !state.reduce_one() {
             return Err("context response metadata exceeds max_bytes".to_string());
         }
+    }
+}
+
+pub(crate) fn packet_query_json(result: &crate::packet::PacketResult) -> Result<String, String> {
+    let mut states = result
+        .anchors
+        .iter()
+        .map(|a| a.context.as_ref().map(context_render_state).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut omitted = vec![false; result.anchors.len()];
+    let mut snippets: Vec<_> = result.snippets.iter().cloned().map(Some).collect();
+    let mut shortened = vec![false; snippets.len()];
+    loop {
+        let ids: Vec<_> = snippets
+            .iter()
+            .scan(0usize, |next, s| {
+                Some(if s.is_some() {
+                    let id = *next;
+                    *next += 1;
+                    Some(id)
+                } else {
+                    None
+                })
+            })
+            .collect();
+        let snippet_values: Vec<_> = snippets.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|s| serde_json::json!({
+            "id": ids[i], "path": s.path, "digest": s.digest, "digest_algorithm": "fnv1a-64", "digest_purpose": "non-cryptographic-change-detection",
+            "check": if s.text.is_some() { Some("index-digest-match") } else { None }, "requested_range": s.requested,
+            "returned_range": s.returned, "text": s.text, "status": s.status, "reason": s.reason, "anchor_indices": s.anchor_indices,
+        }))).collect();
+        let mut anchors = Vec::new();
+        let mut context_truncated = false;
+        for (i, a) in result.anchors.iter().enumerate() {
+            let snippet = a.snippet.and_then(|id| snippets[id].as_ref());
+            let source_included = match (snippet, &a.source_range) {
+                (Some(s), Some(r)) => s
+                    .returned
+                    .as_ref()
+                    .is_some_and(|v| v.start <= r.start && v.end >= r.end),
+                _ => false,
+            };
+            let source_reason = a
+                .source_reason
+                .or_else(|| snippet.and_then(|s| s.reason))
+                .or_else(|| {
+                    a.snippet
+                        .and_then(|id| result.snippets.get(id))
+                        .and_then(|s| s.reason)
+                })
+                .or_else(|| {
+                    (a.snippet.is_some() && snippet.is_none()).then_some("packet-byte-budget")
+                });
+            let (context, evidence) = if let Some(reason) = a.context_unavailable {
+                (
+                    serde_json::json!({"status":"unavailable", "reason":reason, "omitted_by_budget":0, "data":null}),
+                    serde_json::json!({"precision":null,"freshness":if reason == "source-changed" {"stale"} else {"unknown"},"freshness_reasons":[reason],"knowledge_status":"unavailable","knowledge_generation":null}),
+                )
+            } else if let Some(c) = &a.context {
+                let data = if omitted[i] {
+                    serde_json::Value::Null
+                } else {
+                    states[i].as_ref().expect("state").render()?
+                };
+                context_truncated |= data["truncation"]["truncated"] == true;
+                (
+                    serde_json::json!({"status":if omitted[i] {"omitted"} else {"included"}, "reason":if omitted[i] {Some("packet-byte-budget")} else {None}, "omitted_by_budget":usize::from(omitted[i]), "data":data}),
+                    serde_json::json!({"precision":c.trace.anchor.precision,"freshness":c.trace.freshness,"freshness_reasons":c.trace.freshness_reasons,"knowledge_status":c.knowledge.status,"knowledge_generation":c.knowledge.generation}),
+                )
+            } else {
+                (
+                    serde_json::json!({"status":"not-applicable","reason":"anchor-unresolved","omitted_by_budget":0,"data":null}),
+                    serde_json::Value::Null,
+                )
+            };
+            let resolved = a.resolved.as_ref().map(
+                |r| serde_json::json!({"path":r.path,"line":r.line,"col":r.col,"symbol":r.symbol}),
+            );
+            let follow_up = if a.status == "resolved" {
+                a.resolved.as_ref().map(|r| {
+                let source = a.source_range.as_ref().and_then(|range| a.snippet.map(|id| {
+                    let original = &result.snippets[id];
+                    serde_json::json!({"path":r.path,"requested_range":range,"returned_range":snippet.and_then(|s| s.returned.as_ref()),"digest":original.digest,"digest_algorithm":"fnv1a-64","digest_purpose":"non-cryptographic-change-detection","reason":source_reason})
+                }));
+                serde_json::json!({"context":{"tool":"riltra_context","arguments":{"repo":result.repo,"path":r.path,"line":r.line,"col":r.col,"symbol":r.symbol,"depth":result.depth,"limit":result.limit,"max_bytes":crate::context::MAX_MAX_BYTES}},"source":source})
+            })
+            } else {
+                None
+            };
+            let candidates: Vec<_> = a.candidates.iter().map(|c| serde_json::json!({"path":c.path,"line":c.line,"col":c.col,"kind":c.kind,"reason":c.reason})).collect();
+            anchors.push(serde_json::json!({"input_index":i,"selector":a.selector,"status":a.status,"resolved":resolved,"candidates":candidates,"total":a.total,"total_exact":a.total_exact,"candidates_truncated":a.candidates_truncated,"context":context,"context_evidence":evidence,"snippet_id":a.snippet.and_then(|id| ids[id]),"source_included":source_included,"source_reason":source_reason,"follow_up":follow_up}));
+        }
+        let contexts_omitted = omitted.iter().filter(|v| **v).count();
+        let snippets_omitted = snippets.iter().filter(|s| s.is_none()).count();
+        let snippets_shortened = shortened
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| **v && snippets[*i].is_some())
+            .count();
+        let mut reasons = Vec::new();
+        if contexts_omitted > 0 {
+            reasons.push("context-omitted-by-budget");
+        }
+        if context_truncated {
+            reasons.push("context-truncated");
+        }
+        if snippets_omitted > 0 {
+            reasons.push("snippet-omitted-by-budget");
+        }
+        if snippets_shortened > 0 {
+            reasons.push("snippet-shortened-by-budget");
+        }
+        if snippets
+            .iter()
+            .enumerate()
+            .any(|(i, s)| s.is_some() && result.snippets[i].reason == Some("snippet-cap"))
+        {
+            reasons.push("snippet-cap");
+        }
+        reasons.sort_unstable();
+        reasons.dedup();
+        let snapshot = result
+            .snapshot
+            .as_ref()
+            .map(|s| serde_json::json!({"id":s.id,"nonce":s.nonce,"revision":result.revision}));
+        #[allow(unused_mut)]
+        let mut value = serde_json::json!({"schema_version":1,"operation":"packet","repo":result.repo,"snapshot":snapshot,"anchors":anchors,"snippets":snippet_values,"truncation":{"truncated":!reasons.is_empty(),"max_bytes":result.max_bytes,"contexts_omitted_by_budget":contexts_omitted,"snippets_omitted_by_budget":snippets_omitted,"snippets_shortened_by_budget":snippets_shortened,"reasons":reasons}});
+        #[cfg(feature = "semantic-knowledge")]
+        crate::json::sort_value_keys(&mut value);
+        let encoded = serde_json::to_string(&value)
+            .map_err(|e| format!("packet response assembly failed: {e}"))?;
+        if encoded.len() <= result.max_bytes {
+            return Ok(encoded);
+        }
+        if states
+            .iter_mut()
+            .rev()
+            .flatten()
+            .any(|state| state.reduce_one())
+        {
+            continue;
+        }
+        let priority = |i: &usize| {
+            let s = result.snippets.get(*i).unwrap();
+            (
+                s.anchor_indices.iter().copied().min().unwrap_or(usize::MAX),
+                &s.path,
+                s.requested.start,
+            )
+        };
+        let mut order: Vec<_> = (0..snippets.len()).collect();
+        order.sort_by(|a, b| priority(b).cmp(&priority(a)));
+        let mut reduced = false;
+        for &i in &order {
+            if let Some(s) = snippets[i].as_mut() {
+                if let (Some(text), Some(range)) = (&mut s.text, &mut s.returned) {
+                    if !text.is_empty() {
+                        let end = text.trim_end_matches('\n').rfind('\n').map_or(0, |v| v + 1);
+                        text.truncate(end);
+                        range.end = range.start + end;
+                        s.status = "truncated";
+                        if s.reason != Some("snippet-cap") {
+                            s.reason = Some("packet-byte-budget");
+                        }
+                        shortened[i] = true;
+                        reduced = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if reduced {
+            continue;
+        }
+        if let Some(i) = order.into_iter().find(|&i| snippets[i].is_some()) {
+            snippets[i] = None;
+            continue;
+        }
+        if let Some(i) = (0..states.len())
+            .rev()
+            .find(|&i| states[i].is_some() && !omitted[i])
+        {
+            omitted[i] = true;
+            continue;
+        }
+        return Err("packet response metadata exceeds max_bytes".to_string());
     }
 }
 
@@ -1711,6 +1977,692 @@ pub(crate) fn semantic_query_json(repo: &str, out: &index::SemanticQueryOut) -> 
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn packet_budget_rejects_oversized_metadata() {
+        let anchors = (0..5)
+            .map(|_| crate::packet::AnchorOutcome {
+                selector: crate::packet::AnchorInput {
+                    path: None,
+                    line: None,
+                    col: None,
+                    symbol: None,
+                    target: Some("x".repeat(1800)),
+                    in_path: None,
+                    kind: None,
+                },
+                status: "not-found",
+                resolved: None,
+                candidates: Vec::new(),
+                total: 0,
+                total_exact: true,
+                candidates_truncated: false,
+                context: None,
+                context_unavailable: None,
+                source_range: None,
+                snippet: None,
+                source_reason: None,
+            })
+            .collect();
+        let result = crate::packet::PacketResult {
+            repo: "r".into(),
+            snapshot: None,
+            revision: None,
+            anchors,
+            snippets: Vec::new(),
+            max_bytes: 8192,
+            depth: 3,
+            limit: 20,
+        };
+        assert_eq!(
+            packet_query_json(&result).unwrap_err(),
+            "packet response metadata exceeds max_bytes"
+        );
+        assert!(result.repo.len() < result.max_bytes);
+        assert!(result.anchors.iter().all(|anchor| anchor.context.is_none()));
+        assert!(result.snippets.is_empty());
+        let normalized_anchors = serde_json::to_vec(
+            &result
+                .anchors
+                .iter()
+                .map(|anchor| &anchor.selector)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(normalized_anchors.len() <= crate::packet::MAX_ANCHOR_BYTES);
+    }
+
+    #[test]
+    fn packet_preserves_snippet_cap_reason_after_budget_shortening() {
+        let anchor = |name: &str| crate::packet::AnchorOutcome {
+            selector: crate::packet::AnchorInput {
+                path: None,
+                line: None,
+                col: None,
+                symbol: None,
+                target: Some(name.into()),
+                in_path: None,
+                kind: None,
+            },
+            status: "resolved",
+            resolved: Some(crate::packet::ResolvedAnchor {
+                path: "a.py".into(),
+                line: 1,
+                col: 1,
+                symbol: None,
+            }),
+            candidates: Vec::new(),
+            total: 1,
+            total_exact: true,
+            candidates_truncated: false,
+            context: None,
+            context_unavailable: None,
+            source_range: Some(crate::packet::ByteRange {
+                start: 0,
+                end: 5000,
+            }),
+            snippet: Some(0),
+            source_reason: None,
+        };
+        let result = crate::packet::PacketResult {
+            repo: "repo".into(),
+            snapshot: None,
+            revision: None,
+            anchors: vec![anchor("alpha"), anchor("alpha")],
+            snippets: vec![crate::packet::SourceSnippet {
+                path: "a.py".into(),
+                digest: "abc".into(),
+                requested: crate::packet::ByteRange {
+                    start: 0,
+                    end: 5000,
+                },
+                returned: Some(crate::packet::ByteRange {
+                    start: 0,
+                    end: 4096,
+                }),
+                text: Some("\"".repeat(4096)),
+                status: "truncated",
+                reason: Some("snippet-cap"),
+                anchor_indices: vec![0, 1],
+            }],
+            max_bytes: 8192,
+            depth: 3,
+            limit: 20,
+        };
+        let output = packet_query_json(&result).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(doc["truncation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("snippet-cap")));
+        assert_eq!(doc["truncation"]["snippets_shortened_by_budget"], 1);
+        assert_eq!(doc["snippets"][0]["reason"], "snippet-cap");
+        assert_eq!(doc["truncation"]["snippets_omitted_by_budget"], 0);
+        assert!(doc["truncation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("snippet-shortened-by-budget")));
+        for anchor in doc["anchors"].as_array().unwrap() {
+            assert_eq!(anchor["source_reason"], "snippet-cap");
+            assert_eq!(anchor["follow_up"]["source"]["reason"], "snippet-cap");
+        }
+        assert_eq!(
+            doc["snippets"][0]["anchor_indices"],
+            serde_json::json!([0, 1])
+        );
+    }
+
+    #[test]
+    fn packet_budget_reason_reaches_duplicate_anchors_when_snippet_is_shortened() {
+        let anchor = |name: &str| crate::packet::AnchorOutcome {
+            selector: crate::packet::AnchorInput {
+                path: None,
+                line: None,
+                col: None,
+                symbol: None,
+                target: Some(name.into()),
+                in_path: None,
+                kind: None,
+            },
+            status: "resolved",
+            resolved: Some(crate::packet::ResolvedAnchor {
+                path: "a.py".into(),
+                line: 1,
+                col: 1,
+                symbol: None,
+            }),
+            candidates: Vec::new(),
+            total: 1,
+            total_exact: true,
+            candidates_truncated: false,
+            context: None,
+            context_unavailable: None,
+            source_range: Some(crate::packet::ByteRange {
+                start: 0,
+                end: 4096,
+            }),
+            snippet: Some(0),
+            source_reason: None,
+        };
+        let result = crate::packet::PacketResult {
+            repo: "repo".into(),
+            snapshot: None,
+            revision: None,
+            anchors: vec![anchor("alpha"), anchor("alpha")],
+            snippets: vec![crate::packet::SourceSnippet {
+                path: "a.py".into(),
+                digest: "abc".into(),
+                requested: crate::packet::ByteRange {
+                    start: 0,
+                    end: 4096,
+                },
+                returned: Some(crate::packet::ByteRange {
+                    start: 0,
+                    end: 4096,
+                }),
+                text: Some("\"".repeat(4096)),
+                status: "available",
+                reason: None,
+                anchor_indices: vec![0, 1],
+            }],
+            max_bytes: 8192,
+            depth: 3,
+            limit: 20,
+        };
+
+        let output = packet_query_json(&result).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(doc["truncation"]["snippets_shortened_by_budget"], 1);
+        assert_eq!(doc["truncation"]["snippets_omitted_by_budget"], 0);
+        assert!(doc["truncation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("snippet-shortened-by-budget")));
+        assert_eq!(doc["snippets"][0]["reason"], "packet-byte-budget");
+        for anchor in doc["anchors"].as_array().unwrap() {
+            assert_eq!(anchor["source_reason"], "packet-byte-budget");
+            assert_eq!(
+                anchor["follow_up"]["source"]["reason"],
+                "packet-byte-budget"
+            );
+        }
+        assert_eq!(
+            doc["snippets"][0]["anchor_indices"],
+            serde_json::json!([0, 1])
+        );
+    }
+
+    #[test]
+    fn packet_budget_preserves_source_reasons_when_snippets_are_omitted() {
+        let anchor =
+            |target: String,
+             path: &'static str,
+             snippet: usize,
+             source_range: Option<crate::packet::ByteRange>,
+             source_reason: Option<&'static str>| crate::packet::AnchorOutcome {
+                selector: crate::packet::AnchorInput {
+                    path: None,
+                    line: None,
+                    col: None,
+                    symbol: None,
+                    target: Some(target),
+                    in_path: None,
+                    kind: None,
+                },
+                status: "resolved",
+                resolved: Some(crate::packet::ResolvedAnchor {
+                    path: path.to_string(),
+                    line: 1,
+                    col: 1,
+                    symbol: None,
+                }),
+                candidates: Vec::new(),
+                total: 1,
+                total_exact: true,
+                candidates_truncated: false,
+                context: None,
+                context_unavailable: None,
+                source_range,
+                snippet: Some(snippet),
+                source_reason,
+            };
+        let unavailable =
+            |path: &str, reason: &'static str, anchor_index: usize, requested_end: usize| {
+                crate::packet::SourceSnippet {
+                    path: path.to_string(),
+                    digest: "abc".into(),
+                    requested: crate::packet::ByteRange {
+                        start: 0,
+                        end: requested_end,
+                    },
+                    returned: None,
+                    text: None,
+                    status: "unavailable",
+                    reason: Some(reason),
+                    anchor_indices: vec![anchor_index],
+                }
+            };
+        let result = crate::packet::PacketResult {
+            repo: "r".into(),
+            snapshot: None,
+            revision: None,
+            anchors: vec![
+                anchor(
+                    "x".repeat(5650),
+                    "a.py",
+                    0,
+                    None,
+                    Some("invalid-source-range"),
+                ),
+                anchor(
+                    "changed".into(),
+                    "b.py",
+                    1,
+                    Some(crate::packet::ByteRange { start: 0, end: 10 }),
+                    Some("source-changed"),
+                ),
+                anchor(
+                    "available".into(),
+                    "c.py",
+                    2,
+                    Some(crate::packet::ByteRange { start: 0, end: 5 }),
+                    None,
+                ),
+            ],
+            snippets: vec![
+                unavailable("a.py", "invalid-source-range", 0, 2),
+                unavailable("b.py", "source-changed", 1, 10),
+                crate::packet::SourceSnippet {
+                    path: "c.py".into(),
+                    digest: "abc".into(),
+                    requested: crate::packet::ByteRange { start: 0, end: 5 },
+                    returned: Some(crate::packet::ByteRange { start: 0, end: 5 }),
+                    text: Some("hello".into()),
+                    status: "available",
+                    reason: None,
+                    anchor_indices: vec![2],
+                },
+            ],
+            max_bytes: 8192,
+            depth: 3,
+            limit: 20,
+        };
+
+        let output = packet_query_json(&result).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(doc["truncation"]["snippets_omitted_by_budget"], 3);
+        assert!(doc["truncation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("snippet-omitted-by-budget")));
+        assert_eq!(doc["anchors"][0]["source_reason"], "invalid-source-range");
+        assert_eq!(doc["anchors"][1]["source_reason"], "source-changed");
+        assert_eq!(doc["anchors"][2]["status"], "resolved");
+        assert_eq!(doc["anchors"][2]["source_reason"], "packet-byte-budget");
+    }
+
+    fn packet_fixture(anchors: &str, max_bytes: usize) -> crate::packet::PacketResult {
+        let home = crate::testutil::tmpdir("packet-render-home");
+        let root = crate::testutil::tmpdir("packet-render-root")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+        let entry = crate::registry::RepoEntry {
+            name: "r".into(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+        let mut conn = crate::store::open_live(&crate::store::db_path(&home, "r")).unwrap();
+        crate::packet::query_conn(
+            &mut conn,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &crate::packet::PacketRequest {
+                anchors: crate::packet::parse_anchors(anchors).unwrap(),
+                depth: 3,
+                limit: 20,
+                max_bytes,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn packet_output_is_deterministic() {
+        let result = packet_fixture(r#"[{"target":"alpha"},{"target":"missing"}]"#, 32768);
+        let one = packet_query_json(&result).unwrap();
+        assert_eq!(one, packet_query_json(&result).unwrap());
+        let value: serde_json::Value = serde_json::from_str(&one).unwrap();
+        assert_eq!(value["anchors"][0]["status"], "resolved");
+        assert_eq!(value["anchors"][1]["status"], "not-found");
+        assert!(value["snapshot"]["revision"].is_string());
+    }
+
+    #[test]
+    fn packet_context_omission_is_explicit() {
+        let result = packet_fixture(
+            r#"[{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"}]"#,
+            8192,
+        );
+        let output = packet_query_json(&result).unwrap();
+        assert!(output.len() <= 8192);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let omitted: Vec<_> = value["anchors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["context"]["status"] == "omitted")
+            .collect();
+        assert!(!omitted.is_empty());
+        assert_eq!(
+            value["truncation"]["contexts_omitted_by_budget"],
+            omitted.len()
+        );
+        for anchor in omitted {
+            assert_eq!(anchor["context"]["data"], serde_json::Value::Null);
+            assert!(anchor["context_evidence"].is_object());
+            assert!(anchor["follow_up"]["context"].is_object());
+        }
+    }
+
+    #[test]
+    fn context_render_state_preserves_legacy_bytes() {
+        let result = packet_fixture(r#"[{"target":"alpha"}]"#, 32768);
+        let context = result.anchors[0].context.as_ref().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&context_query_json(context).unwrap()).unwrap();
+        assert_eq!(value["operation"], "context");
+        assert_eq!(value["repo"], "r");
+        assert_eq!(value["anchor"]["path"], "a.py");
+        assert_eq!(value["anchor"]["line"], 1);
+    }
+
+    #[test]
+    fn packet_budget_keeps_earliest_input_anchor() {
+        let snippet = |path: &str, indices: Vec<usize>| crate::packet::SourceSnippet {
+            path: path.into(),
+            digest: "abc".into(),
+            requested: crate::packet::ByteRange {
+                start: 0,
+                end: 3000,
+            },
+            returned: Some(crate::packet::ByteRange {
+                start: 0,
+                end: 3000,
+            }),
+            text: Some("\"".repeat(3000)),
+            status: "available",
+            reason: None,
+            anchor_indices: indices,
+        };
+        let result = crate::packet::PacketResult {
+            repo: "r".into(),
+            snapshot: None,
+            revision: None,
+            anchors: Vec::new(),
+            snippets: vec![snippet("a.py", vec![4]), snippet("z.py", vec![0, 4])],
+            max_bytes: 8192,
+            depth: 3,
+            limit: 20,
+        };
+        let encoded = packet_query_json(&result).unwrap();
+        assert!(encoded.len() <= 8192);
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let snippets = value["snippets"].as_array().unwrap();
+        let early = snippets.iter().find(|s| s["path"] == "z.py").unwrap();
+        assert!(!early["text"].as_str().unwrap().is_empty());
+        assert_eq!(early["anchor_indices"], serde_json::json!([0, 4]));
+        assert!(snippets
+            .iter()
+            .find(|s| s["path"] == "a.py")
+            .is_none_or(|s| s["text"].as_str().unwrap().is_empty()));
+    }
+
+    #[test]
+    fn packet_follow_up_survives_truncation() {
+        let result = packet_fixture(
+            r#"[{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"}]"#,
+            8192,
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&packet_query_json(&result).unwrap()).unwrap();
+        let anchor = &value["anchors"][4];
+        let args = &anchor["follow_up"]["context"]["arguments"];
+        assert_eq!(args["repo"], "r");
+        assert_eq!(args["path"], "a.py");
+        assert_eq!(args["line"], 1);
+        assert_eq!(args["max_bytes"], crate::context::MAX_MAX_BYTES);
+        let source = &anchor["follow_up"]["source"];
+        assert_eq!(source["digest_algorithm"], "fnv1a-64");
+        assert!(source["requested_range"].is_object());
+    }
+
+    #[test]
+    fn packet_snapshot_revision_survives_unresolved_anchors() {
+        let result = packet_fixture(r#"[{"target":"missing"}]"#, 32768);
+        let value: serde_json::Value =
+            serde_json::from_str(&packet_query_json(&result).unwrap()).unwrap();
+        assert_eq!(value["anchors"][0]["status"], "not-found");
+        assert!(value["snapshot"]["revision"]
+            .as_str()
+            .unwrap()
+            .contains("nonce="));
+    }
+
+    #[test]
+    fn packet_follow_up_preserves_symbol() {
+        let mut result = packet_fixture(r#"[{"target":"alpha"}]"#, 32768);
+        result.anchors[0].resolved.as_mut().unwrap().symbol = Some("scip identity".into());
+        let value: serde_json::Value =
+            serde_json::from_str(&packet_query_json(&result).unwrap()).unwrap();
+        assert_eq!(
+            value["anchors"][0]["follow_up"]["context"]["arguments"]["symbol"],
+            "scip identity"
+        );
+    }
+
+    #[test]
+    fn packet_budget_counts_escaped_json_bytes() {
+        let result = crate::packet::PacketResult {
+            repo: "\"\\\n漢".repeat(1000),
+            snapshot: None,
+            revision: None,
+            anchors: Vec::new(),
+            snippets: Vec::new(),
+            max_bytes: 8192,
+            depth: 3,
+            limit: 20,
+        };
+        assert!(result.repo.len() < result.max_bytes);
+        assert_eq!(
+            packet_query_json(&result).unwrap_err(),
+            "packet response metadata exceeds max_bytes"
+        );
+    }
+
+    #[test]
+    fn packet_budget_preserves_anchor_outcomes() {
+        let result = packet_fixture(
+            r#"[{"target":"alpha"},{"target":"missing"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"}]"#,
+            8192,
+        );
+        let encoded = packet_query_json(&result).unwrap();
+        assert!(encoded.len() <= 8192);
+        let doc: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let anchors = doc["anchors"].as_array().unwrap();
+        assert_eq!(anchors.len(), 5);
+        assert_eq!(anchors[1]["status"], "not-found");
+        for i in [0, 2, 3, 4] {
+            assert_eq!(anchors[i]["status"], "resolved");
+            assert_eq!(anchors[i]["resolved"]["path"], "a.py");
+        }
+    }
+
+    #[test]
+    fn packet_uses_one_shared_context_budget() {
+        let result = packet_fixture(
+            r#"[{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"}]"#,
+            12000,
+        );
+        let encoded = packet_query_json(&result).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let anchors = doc["anchors"].as_array().unwrap();
+        let omitted = anchors
+            .iter()
+            .filter(|a| a["context"]["status"] == "omitted")
+            .count();
+        assert!(encoded.len() <= 12000 && omitted > 0);
+        assert_eq!(doc["truncation"]["contexts_omitted_by_budget"], omitted);
+        assert!(anchors[0]["context"]["status"] == "included");
+        assert!(anchors[4]["context"]["status"] == "omitted");
+    }
+
+    #[test]
+    fn packet_aggregates_context_truncation() {
+        let mut result = packet_fixture(r#"[{"target":"alpha"}]"#, 32768);
+        result.anchors[0].context.as_mut().unwrap().omitted_nodes = 1;
+        let doc: serde_json::Value =
+            serde_json::from_str(&packet_query_json(&result).unwrap()).unwrap();
+        assert_eq!(
+            doc["anchors"][0]["context"]["data"]["truncation"]["truncated"],
+            true
+        );
+        assert_eq!(doc["truncation"]["truncated"], true);
+        assert!(doc["truncation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("context-truncated")));
+    }
+
+    #[test]
+    fn packet_follow_up_detects_changed_source() {
+        let home = crate::testutil::tmpdir("packet-followup-home");
+        let root = crate::testutil::tmpdir("packet-followup-root")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+        let entry = crate::registry::RepoEntry {
+            name: "r".into(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+        let mut conn = crate::store::open_live(&crate::store::db_path(&home, "r")).unwrap();
+        let result = crate::packet::query_conn(
+            &mut conn,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &crate::packet::PacketRequest {
+                anchors: crate::packet::parse_anchors(r#"[{"target":"alpha"}]"#).unwrap(),
+                depth: 3,
+                limit: 20,
+                max_bytes: 32768,
+            },
+        )
+        .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&packet_query_json(&result).unwrap()).unwrap();
+        let args = &doc["anchors"][0]["follow_up"]["context"]["arguments"];
+        let request = crate::context::ContextRequest {
+            path: args["path"].as_str().unwrap(),
+            line: args["line"].as_u64().unwrap() as u32,
+            col: args["col"].as_u64().unwrap() as u32,
+            symbol: None,
+            query: None,
+            semantic: false,
+            depth: 3,
+            limit: 20,
+            max_bytes: crate::context::MAX_MAX_BYTES,
+        };
+        let stable =
+            crate::context::query_conn(&mut conn, &home, &entry, "r", &root, &request).unwrap();
+        assert_eq!(stable.trace.anchor.path, "a.py");
+        std::fs::write(root.join("a.py"), "def alpha():\n    return 2\n").unwrap();
+        match crate::context::query_conn(&mut conn, &home, &entry, "r", &root, &request) {
+            Ok(changed) => assert_ne!(changed.trace.freshness, "fresh"),
+            Err(e) => assert!(e.contains("source-changed"), "{e}"),
+        }
+    }
+
+    #[test]
+    fn context_render_state_rejects_oversized_metadata() {
+        let mut result = packet_fixture(r#"[{"target":"alpha"}]"#, 8192);
+        let context = result.anchors[0].context.as_mut().unwrap();
+        context.trace.repo = "r".repeat(9000);
+        assert_eq!(
+            context_query_json(context).unwrap_err(),
+            "context response metadata exceeds max_bytes"
+        );
+    }
+
+    #[test]
+    fn packet_shared_budget_reduces_last_context_rows_first() {
+        let home = crate::testutil::tmpdir("packet-row-budget-home");
+        let root = crate::testutil::tmpdir("packet-row-budget-root")
+            .canonicalize()
+            .unwrap();
+        let mut source = String::from("def alpha():\n");
+        for i in 0..15 {
+            source.push_str(&format!("    function_{i}()\n"));
+        }
+        for i in 0..15 {
+            source.push_str(&format!("\ndef function_{i}():\n    return {i}\n"));
+        }
+        std::fs::write(root.join("a.py"), source).unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+        let entry = crate::registry::RepoEntry {
+            name: "r".into(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+        let mut conn = crate::store::open_live(&crate::store::db_path(&home, "r")).unwrap();
+        let mut result = crate::packet::query_conn(&mut conn, &home, &entry, "r", &root, &crate::packet::PacketRequest {
+            anchors: crate::packet::parse_anchors(r#"[{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"},{"target":"alpha"}]"#).unwrap(), depth: 3, limit: 100, max_bytes: 131072,
+        }).unwrap();
+        let full = packet_query_json(&result).unwrap();
+        let full_doc: serde_json::Value = serde_json::from_str(&full).unwrap();
+        assert_eq!(
+            full_doc["anchors"][4]["context"]["data"]["callees"]["edges"]["returned"],
+            15
+        );
+        result.max_bytes = full.len() - 100;
+        let limited = packet_query_json(&result).unwrap();
+        assert!(limited.len() <= result.max_bytes);
+        let doc: serde_json::Value = serde_json::from_str(&limited).unwrap();
+        let anchors = doc["anchors"].as_array().unwrap();
+        for anchor in &anchors[..4] {
+            assert_eq!(
+                anchor["context"]["data"]["callees"]["edges"]["returned"],
+                15
+            );
+            assert_eq!(
+                anchor["context"]["data"]["callees"]["edges"]["omitted_by_budget"],
+                0
+            );
+            let rows = anchor["context"]["data"]["callees"]["edges"]["rows"]
+                .as_array()
+                .unwrap();
+            assert_eq!(rows.len(), 15);
+            for (i, row) in rows.iter().enumerate() {
+                assert_eq!(row["callee_name"], format!("function_{i}"));
+            }
+        }
+        let last = &anchors[4]["context"]["data"]["callees"]["edges"];
+        let retained = last["returned"].as_u64().unwrap();
+        assert!(retained < 15);
+        assert_eq!(last["omitted_by_budget"], 15 - retained);
+        assert_eq!(last["rows"].as_array().unwrap().len() as u64, retained);
+        for (i, row) in last["rows"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(row["callee_name"], format!("function_{i}"));
+        }
+        assert_eq!(doc["truncation"]["contexts_omitted_by_budget"], 0);
+        assert_eq!(doc["truncation"]["truncated"], true);
+    }
 
     /// The semantic query document must stay byte-identical to the CLI's
     /// historical inline format, trailing newline included. The expected

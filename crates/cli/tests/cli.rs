@@ -77,6 +77,7 @@ This repository is indexed by Riltra, a local code map reached through MCP tools
 - Start with `riltra_repo_status` for `<name>`. If the index is missing or stale, say so and ask the user to run `riltra index --repo <name>`; then continue from the source itself.
 - Find a definition by name with `riltra_code_search`, and use its `path`, `span.start_line` and `span.start_col` as the anchor (`path`, `line`, `col`) for `riltra_context`, `riltra_code_callers`, `riltra_code_callees`, `riltra_code_trace` and `riltra_code_impact`.
 - Find code by concept with `riltra_code_query` (free text). A query result has no column: pass its `name` as `target` and its `path` as `in` to those tools instead.
+- For several selected locations, call `riltra_code_packet` with one to five explicit anchors and inspect every status; exit 0 does not mean all resolved or that a change is safe. If source is `source-changed`, reindex and select the anchor again. Use `follow_up.context` with `riltra_context`. When `follow_up.source` is present, validate repository containment, read the full file, compare its 16-digit lowercase FNV-1a 64 digest, then extract the half-open `requested_range` from that same buffer. Do not hash only the range; FNV is a change detector, not cryptographic proof.
 - If a name does not resolve to exactly one definition (status `ambiguous` or `not-found`), do not pick a candidate for the user: read the candidates and the source, then anchor on the right definition with `path`, `line` and `col`.
 - Before editing a symbol, run `riltra_code_impact` on it.
 - After editing and before committing, run `riltra_code_changes` and read which definitions your change touched.
@@ -87,12 +88,13 @@ This repository is indexed by Riltra, a local code map reached through MCP tools
 - Say which Riltra answers you used and which labels they carried.
 "#;
 
-const AGENT_BLOCK_MARKERS: [&str; 5] = [
+const AGENT_BLOCK_MARKERS: [&str; 6] = [
     "run `riltra_code_impact`",
     "run `riltra_code_changes`",
     "`UNKNOWN` or `partial`",
     "use text search",
     "Never rename by find-and-replace",
+    "`riltra_code_packet`",
 ];
 
 /// The fenced block under the snippet heading of the agent setup guide.

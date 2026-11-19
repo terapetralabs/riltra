@@ -232,6 +232,28 @@ jobs:
           run_exact response::tests::semantic_search_reports_passage_embedding_truncation_per_hit --bin riltra
           run_exact semantic_search_explicitly_falls_back_to_lexical_without_local_model --test knowledge
           run_exact t2_knowledge_search_matches_cli_missing_empty_populated_paging_and_escaping --test mcp
+      - name: Test packet parity with optional feature graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--locked --no-default-features --features semantic-knowledge)
+          run_exact() {
+            local test_name="$1"
+            shift
+            local listed
+            listed="$(cargo test "${args[@]}" "$@" "$test_name" -- --list | tr -d '\r')"
+            if ! printf '%s\n' "$listed" | grep -Fx "$test_name: test"; then
+              echo "required packet regression test is missing: $test_name" >&2
+              exit 1
+            fi
+            cargo test "${args[@]}" "$@" "$test_name" -- --exact --include-ignored
+          }
+          run_exact packet_mcp_matches_cli_document --test mcp
+          run_exact packet_mcp_enforces_anchor_bytes_and_disables_retrieval --test mcp
+          run_exact packet_duplicate_selectors_keep_outcomes_and_share_source --test packet
+          run_exact response::tests::packet_context_omission_is_explicit --bin riltra
+          run_exact response::tests::packet_follow_up_survives_truncation --bin riltra
+          run_exact response::tests::context_render_state_preserves_legacy_bytes --bin riltra
       - name: Test deterministic MCP JSON with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra mcp_structured_json_is_recursively_sorted_for_core_byte_compatibility
       - name: Test deterministic JSON key ordering with optional feature graph
@@ -258,7 +280,7 @@ jobs:
       - name: Test deterministic MCP tool schemas with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra tool_schemas_keep_core_key_order
       - name: Test advertised MCP schema order with optional feature graph
-        run: cargo test --locked --no-default-features --features semantic-knowledge --test mcp mcp_tools_list_advertises_the_sixteen_tools
+        run: cargo test --locked --no-default-features --features semantic-knowledge --test mcp mcp_tools_list_advertises_the_seventeen_tools
       - name: Verify and test both dependency audits offline
         shell: bash
         env:

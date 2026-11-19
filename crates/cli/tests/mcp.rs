@@ -187,7 +187,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_sixteen_tools() {
+fn mcp_tools_list_advertises_the_seventeen_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -206,6 +206,7 @@ fn mcp_tools_list_advertises_the_sixteen_tools() {
             "riltra_code_callers",
             "riltra_code_changes",
             "riltra_code_impact",
+            "riltra_code_packet",
             "riltra_code_query",
             "riltra_code_search",
             "riltra_code_semantic",
@@ -219,7 +220,7 @@ fn mcp_tools_list_advertises_the_sixteen_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the sixteen tools"
+        "the server advertises exactly the seventeen tools"
     );
     let code_search_tool = tools
         .iter()
@@ -320,6 +321,7 @@ fn mcp_tools_list_advertises_the_sixteen_tools() {
         "riltra_code_callers",
         "riltra_code_changes",
         "riltra_code_impact",
+        "riltra_code_packet",
         "riltra_code_query",
         "riltra_code_search",
         "riltra_code_semantic",
@@ -337,6 +339,35 @@ fn mcp_tools_list_advertises_the_sixteen_tools() {
             "{name} must reject unsupported fields: {schema}"
         );
     }
+    let packet_schema = &find("riltra_code_packet")["inputSchema"];
+    assert_eq!(packet_schema["type"], "object", "{packet_schema}");
+    assert_eq!(
+        packet_schema["additionalProperties"], false,
+        "{packet_schema}"
+    );
+    let mut packet_properties: Vec<&str> = packet_schema["properties"]
+        .as_object()
+        .expect("packet properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    packet_properties.sort_unstable();
+    assert_eq!(
+        packet_properties,
+        ["anchors", "depth", "limit", "max_bytes", "repo"]
+    );
+    let mut packet_required: Vec<&str> = packet_schema["required"]
+        .as_array()
+        .expect("packet required")
+        .iter()
+        .map(|v| v.as_str().expect("required field"))
+        .collect();
+    packet_required.sort_unstable();
+    assert_eq!(packet_required, ["anchors", "repo"]);
+    assert_eq!(
+        packet_schema["properties"]["anchors"]["items"]["additionalProperties"], false,
+        "{packet_schema}"
+    );
     // The semantic tool's operation is an enum, not a free-form string.
     let semantic_schema = &find("riltra_code_semantic")["inputSchema"];
     let operation = &semantic_schema["properties"]["operation"];
@@ -825,6 +856,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_code_callers",
             "riltra_code_changes",
             "riltra_code_impact",
+            "riltra_code_packet",
             "riltra_code_query",
             "riltra_code_search",
             "riltra_code_semantic",
@@ -838,7 +870,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the sixteen tools"
+        "the health document must list the seventeen tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -1446,6 +1478,349 @@ fn write_search_fixture(root: &Path) {
     .unwrap();
     std::fs::write(root.join("b.py"), "def beta():\n    pass\n").unwrap();
     std::fs::write(root.join("sp ace/c.py"), "def alpha_three():\n    pass\n").unwrap();
+}
+
+fn packet_cli_document(cfg: &Path, repo: &str, anchors: &Value, extra: &[&str]) -> String {
+    let anchors = serde_json::to_string(anchors).unwrap();
+    let mut args = vec!["packet", "--repo", repo, "--anchors", &anchors];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run_cli(cfg, &args);
+    assert_eq!(code, 0, "packet CLI failed: {err}");
+    let out = out.strip_suffix('\n').expect("packet CLI line terminator");
+    out.strip_suffix('\r').unwrap_or(out).to_owned()
+}
+
+fn packet_text(result: &Value) -> &str {
+    result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("packet result has no text: {result}"))
+}
+
+fn assert_invalid_packet_input(result: &Value, context: &str) {
+    assert!(is_error(result), "{context} must be a tool error: {result}");
+    let document = doc(result);
+    assert_eq!(
+        document["kind"], "invalid_input",
+        "{context} must use the structured invalid_input error: {document}"
+    );
+}
+
+#[test]
+fn packet_mcp_matches_cli_document() {
+    let no_index_home = home("packet-mcp-no-index");
+    let no_index_repo = home("packet-mcp-no-index-repo");
+    std::fs::write(no_index_repo.join("a.py"), "def alpha(): pass\n").unwrap();
+    init_repo(&no_index_home, &no_index_repo, "r");
+    let no_index_anchors = json!([{"target":"alpha", "kind":"function"}]);
+    let no_index_expected = packet_cli_document(&no_index_home, "r", &no_index_anchors, &[]);
+    let mut session = ready(&no_index_home);
+    let first = call_tool(
+        &mut session,
+        2,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":no_index_anchors}),
+    );
+    assert!(!is_error(&first), "no-index is a normal packet: {first}");
+    assert_eq!(packet_text(&first).as_bytes(), no_index_expected.as_bytes());
+    assert_eq!(doc(&first)["anchors"][0]["status"], "no-index");
+    let second = call_tool(
+        &mut session,
+        3,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":[{"target":"alpha", "kind":"function"}]}),
+    );
+    assert_eq!(
+        packet_text(&first).as_bytes(),
+        packet_text(&second).as_bytes()
+    );
+    assert_eq!(session.finish().0, 0);
+
+    let mixed_home = home("packet-mcp-mixed");
+    let mixed_repo = home("packet-mcp-mixed-repo");
+    write_search_fixture(&mixed_repo);
+    indexed_repo(&mixed_home, &mixed_repo, "r");
+    let mixed_anchors = json!([
+        {"target":"alpha_one", "in":"a.py", "kind":"function"},
+        {"target":"alpha", "kind":"function"},
+        {"target":"not_present"}
+    ]);
+    let mixed_expected = packet_cli_document(&mixed_home, "r", &mixed_anchors, &[]);
+    let mut session = ready(&mixed_home);
+    let first = call_tool(
+        &mut session,
+        2,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":mixed_anchors}),
+    );
+    assert!(!is_error(&first), "mixed outcomes are a document: {first}");
+    assert_eq!(packet_text(&first).as_bytes(), mixed_expected.as_bytes());
+    let document = doc(&first);
+    assert_eq!(document["anchors"][0]["status"], "resolved");
+    assert_eq!(document["anchors"][1]["status"], "ambiguous");
+    assert_eq!(document["anchors"][2]["status"], "not-found");
+    let second = call_tool(
+        &mut session,
+        3,
+        "riltra_code_packet",
+        &json!({
+            "repo":"r",
+            "anchors":[
+                {"target":"alpha_one", "in":"a.py", "kind":"function"},
+                {"target":"alpha", "kind":"function"},
+                {"target":"not_present"}
+            ]
+        }),
+    );
+    assert_eq!(
+        packet_text(&first).as_bytes(),
+        packet_text(&second).as_bytes()
+    );
+    assert_eq!(session.finish().0, 0);
+
+    let trunc_home = home("packet-mcp-truncation");
+    let trunc_repo = home("packet-mcp-truncation-repo");
+    let mut source = String::new();
+    let mut selectors = Vec::new();
+    for i in 0..5 {
+        selectors
+            .push(json!({"target":format!("packet_fn_{i}"), "in":"large.py", "kind":"function"}));
+        source.push_str(&format!("def packet_fn_{i}():\n"));
+        for _ in 0..55 {
+            source.push_str("    value = 'abcdefghijklmnopqrstuvwxyz0123456789'\n");
+        }
+        source.push('\n');
+    }
+    std::fs::write(trunc_repo.join("large.py"), source).unwrap();
+    indexed_repo(&trunc_home, &trunc_repo, "r");
+    let selectors = Value::Array(selectors);
+    let opts = ["--max-bytes", "8192"];
+    let trunc_expected = packet_cli_document(&trunc_home, "r", &selectors, &opts);
+    let mut session = ready(&trunc_home);
+    let args = json!({"repo":"r", "anchors":selectors, "max_bytes":8192});
+    let first = call_tool(&mut session, 2, "riltra_code_packet", &args);
+    assert!(!is_error(&first), "truncated packet is a document: {first}");
+    assert_eq!(packet_text(&first).as_bytes(), trunc_expected.as_bytes());
+    assert_eq!(doc(&first)["truncation"]["truncated"], true);
+    let second = call_tool(&mut session, 3, "riltra_code_packet", &args);
+    assert_eq!(
+        packet_text(&first).as_bytes(),
+        packet_text(&second).as_bytes()
+    );
+    assert_eq!(session.finish().0, 0);
+}
+
+#[test]
+fn packet_mcp_enforces_anchor_bytes_and_disables_retrieval() {
+    let h = home("packet-mcp-anchor-bytes");
+    let root = home("packet-mcp-anchor-bytes-repo");
+    std::fs::write(root.join("a.py"), "def alpha(): pass\n").unwrap();
+    init_repo(&h, &root, "r");
+    let mut session = ready(&h);
+
+    // Measure the compact normalized JSON itself to cover the exact boundary.
+    let exact = json!([{"target":"x".repeat(16_369)}]);
+    let exact_bytes = serde_json::to_vec(&exact).unwrap().len();
+    assert_eq!(exact_bytes, 16_384);
+    let accepted = call_tool(
+        &mut session,
+        2,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":exact}),
+    );
+    assert!(
+        !is_error(&accepted),
+        "16,384 normalized bytes accepted: {accepted}"
+    );
+    assert_eq!(doc(&accepted)["anchors"][0]["status"], "no-index");
+
+    let over = json!([{"target":"x".repeat(16_370)}]);
+    assert_eq!(serde_json::to_vec(&over).unwrap().len(), 16_385);
+    let rejected = call_tool(
+        &mut session,
+        3,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":over}),
+    );
+    assert_invalid_packet_input(&rejected, "16,385 normalized anchor bytes");
+
+    for (id, field) in [(4, "query"), (5, "semantic")] {
+        let mut args = json!({"repo":"r", "anchors":[{"target":"alpha"}]});
+        args[field] = json!(true);
+        let result = call_tool(&mut session, id, "riltra_code_packet", &args);
+        assert_invalid_packet_input(&result, &format!("unknown top-level {field}"));
+    }
+    let selector_extra = call_tool(
+        &mut session,
+        6,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":[{"target":"alpha", "semantic":true}]}),
+    );
+    assert_invalid_packet_input(&selector_extra, "unknown selector field");
+    assert_eq!(session.finish().0, 0);
+
+    // If packet ever routes into the configured semantic provider, the mock
+    // records its launch. A valid packet must remain a local read in either build.
+    let mock_log = h.join("packet-provider.log");
+    let root_env = root.to_string_lossy().into_owned();
+    let log_env = mock_log.to_string_lossy().into_owned();
+    let mut session = ready_with(&h, |command| {
+        command
+            .env("RILTRA_LSP_SERVER", mock_lsp::mock_lsp_bin())
+            .env("RILTRA_MOCK_LSP", "mock")
+            .env("RILTRA_MOCK_ROOT", &root_env)
+            .env("RILTRA_MOCK_LOG", &log_env);
+    });
+    let local = call_tool(
+        &mut session,
+        2,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":[{"target":"alpha"}]}),
+    );
+    assert!(!is_error(&local), "valid local packet: {local}");
+    assert_eq!(session.finish().0, 0);
+    assert!(!mock_log.exists(), "packet started the configured provider");
+}
+
+#[test]
+fn packet_mcp_refuses_invalid_input() {
+    let h = home("packet-mcp-invalid");
+    let root = home("packet-mcp-invalid-repo");
+    std::fs::write(root.join("a.py"), "def alpha(): pass\n").unwrap();
+    init_repo(&h, &root, "r");
+    let mut session = ready(&h);
+    let cases = [
+        (json!({"repo":"r", "anchors":[]}), "empty anchors"),
+        (
+            json!({"repo":"r", "anchors":vec![json!({"target":"x"}); 6]}),
+            "too many anchors",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"target":"x", "path":"a.py", "line":1, "col":1}]}),
+            "mixed selector forms",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"path":"a.py", "line":1, "col":0}]}),
+            "zero column",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"target":"x", "unknown":1}]}),
+            "unknown selector field",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"target":17}]}),
+            "selector field has wrong type",
+        ),
+        (
+            json!({"repo":"r", "anchors":{"target":"x"}}),
+            "anchors has wrong type",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"target":"x"}], "depth":"3"}),
+            "depth has wrong type",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"target":"x"}], "depth":0}),
+            "zero depth",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"target":"x"}], "limit":101}),
+            "limit above maximum",
+        ),
+        (
+            json!({"repo":"r", "anchors":[{"target":"x"}], "max_bytes":8191}),
+            "max_bytes below minimum",
+        ),
+    ];
+    for (id, (args, context)) in cases.iter().enumerate() {
+        let result = call_tool(&mut session, 2 + id as i64, "riltra_code_packet", args);
+        assert_invalid_packet_input(&result, context);
+    }
+    let metadata_overflow = call_tool(
+        &mut session,
+        20,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":[{"target":"x".repeat(12_000)}], "max_bytes":8192}),
+    );
+    assert_invalid_packet_input(&metadata_overflow, "metadata overflow");
+    assert_eq!(session.finish().0, 0);
+}
+
+#[test]
+fn packet_mcp_rejects_unsafe_path_before_no_index_response() {
+    let h = home("packet-mcp-unsafe-path");
+    let root = home("packet-mcp-unsafe-path-repo");
+    std::fs::write(root.join("a.py"), "def alpha(): pass\n").unwrap();
+    init_repo(&h, &root, "r");
+    assert!(!h.join("index").exists(), "fixture must have no index");
+    let mut session = ready(&h);
+    let escaped = call_tool(
+        &mut session,
+        2,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":[{"path":"../outside.py", "line":1, "col":1}]}),
+    );
+    assert_invalid_packet_input(&escaped, "unsafe path with no index");
+    assert!(!h.join("index").exists(), "unsafe path created an index");
+    assert_eq!(session.finish().0, 0);
+}
+
+#[test]
+fn packet_mcp_does_not_write_or_start_provider() {
+    let h = home("packet-mcp-read-only");
+    let root = home("packet-mcp-read-only-repo");
+    write_search_fixture(&root);
+    indexed_repo(&h, &root, "r");
+    // Warm the read path before taking the storage snapshot.
+    let mut warm = ready(&h);
+    let search = call_tool(
+        &mut warm,
+        2,
+        "riltra_code_search",
+        &json!({"repo":"r", "query":"alpha", "limit":10}),
+    );
+    assert!(!is_error(&search), "fixture warm-up: {search}");
+    assert_eq!(warm.finish().0, 0);
+    let before = listing(&h);
+    let db = db_path(&h, "r");
+    let db_before = std::fs::read(&db).unwrap();
+    let source_before = std::fs::read(root.join("a.py")).unwrap();
+    let mock_log = h.join("mock-lsp.log");
+    let root_env = root.to_string_lossy().into_owned();
+    let log_env = mock_log.to_string_lossy().into_owned();
+    let mut session = ready_with(&h, |command| {
+        command
+            .env("RILTRA_LSP_SERVER", mock_lsp::mock_lsp_bin())
+            .env("RILTRA_MOCK_LSP", "mock")
+            .env("RILTRA_MOCK_ROOT", &root_env)
+            .env("RILTRA_MOCK_LOG", &log_env);
+    });
+    let result = call_tool(
+        &mut session,
+        2,
+        "riltra_code_packet",
+        &json!({"repo":"r", "anchors":[{"target":"alpha_one", "in":"a.py", "kind":"function"}]}),
+    );
+    assert!(
+        !is_error(&result),
+        "packet should return a normal document: {result}"
+    );
+    assert_eq!(doc(&result)["anchors"][0]["status"], "resolved");
+    assert_eq!(session.finish().0, 0);
+    assert!(
+        !mock_log.exists(),
+        "packet started the configured language server"
+    );
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        db_before,
+        "packet changed the index DB"
+    );
+    assert_eq!(std::fs::read(root.join("a.py")).unwrap(), source_before);
+    assert_eq!(
+        listing(&h),
+        before,
+        "packet created or changed storage files"
+    );
 }
 
 #[test]

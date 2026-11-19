@@ -32,6 +32,8 @@ mod knowledge_vector;
 mod lexical;
 mod lsp;
 mod mcp;
+mod packet;
+mod packet_source;
 mod paths;
 mod progress;
 mod registry;
@@ -65,7 +67,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n  {NAME} agent-block\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  query        Rank indexed symbols by the words of a text (lexical) as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n  agent-block Print the agent instruction block as Markdown text (not JSON)\n"
+  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} packet --repo <name> --anchors <json> [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n  {NAME} agent-block\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  query        Rank indexed symbols by the words of a text (lexical) as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  packet Bounded context for selected code anchors\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n  agent-block Print the agent instruction block as Markdown text (not JSON)\n"
     )
 }
 
@@ -718,6 +720,7 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
         Command::Trace(args) => cmd_trace(args, out, err),
         Command::Impact(args) => cmd_graph(args, out, err, true),
         Command::Context(args) => cmd_context(args, out, err),
+        Command::Packet(args) => cmd_packet(args, out, err),
         Command::Changes(args) => cmd_changes(args, out, err),
         Command::ChangesRefused(message) => {
             err.push_str(&format!("error: {message}\n"));
@@ -1109,6 +1112,78 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
             3
+        }
+    }
+}
+
+fn cmd_packet(args: args::PacketArgs, out: &mut String, err: &mut String) -> i32 {
+    let request = (|| -> Result<packet::PacketRequest, String> {
+        let request = packet::PacketRequest {
+            anchors: packet::parse_anchors(&args.anchors)?,
+            depth: parse_count(args.depth.as_deref(), context::DEFAULT_DEPTH, "depth")?,
+            limit: parse_count(args.limit.as_deref(), context::DEFAULT_LIMIT, "limit")?,
+            max_bytes: parse_count(
+                args.max_bytes.as_deref(),
+                context::DEFAULT_MAX_BYTES,
+                "max-bytes",
+            )?,
+        };
+        packet::validate_request(&request)?;
+        Ok(request)
+    })();
+    let request = match request {
+        Ok(request) => request,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let (root, entry) = match knowledge_repo(&args.repo, err) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if let Err(e) = packet::validate_paths(Path::new(&root), &request) {
+        err.push_str(&format!("error: {e}\n"));
+        return 3;
+    }
+    let home = paths::config_dir();
+    let result = match store::open_read(&store::db_path(&home, &args.repo)) {
+        store::IndexRead::Missing => Ok(packet::no_index(&args.repo, &request)),
+        store::IndexRead::Outdated(v) => Err(format!("index schema v{v} is outdated")),
+        store::IndexRead::Ahead(v) => Err(format!(
+            "database schema v{v} is newer than supported v{}",
+            store::SCHEMA_VERSION
+        )),
+        store::IndexRead::Error(e) => Err(e),
+        store::IndexRead::Ready(mut conn) => packet::query_conn(
+            &mut conn,
+            &home,
+            &entry,
+            &args.repo,
+            Path::new(&root),
+            &request,
+        ),
+    };
+    let result = match result {
+        Ok(value) => value,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    match response::packet_query_json(&result) {
+        Ok(value) => {
+            *out = value + "\n";
+            0
+        }
+        Err(e) => {
+            let code = if e == "packet response metadata exceeds max_bytes" {
+                2
+            } else {
+                3
+            };
+            err.push_str(&format!("error: {e}\n"));
+            code
         }
     }
 }

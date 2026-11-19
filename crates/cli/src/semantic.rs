@@ -273,37 +273,65 @@ pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
 /// nor sneak past). Used by the SCIP importer, the NULL-fact carry-over,
 /// and the semantic freshness check. Missing/unreadable/oversize/escaping
 /// files are errors with reasons; callers map them to skip or Stale.
-pub fn confined_read(root: &Path, rel: &str, cap_bytes: u64) -> Result<Vec<u8>, String> {
-    let (candidate, was_missing) = confined_path(root, rel)?;
+#[derive(Debug, PartialEq)]
+pub(crate) enum ConfinedReadError {
+    Path(String),
+    Io(String),
+}
+
+impl ConfinedReadError {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Path(message) | Self::Io(message) => message,
+        }
+    }
+}
+
+pub(crate) fn confined_read_classified(
+    root: &Path,
+    rel: &str,
+    cap_bytes: u64,
+) -> Result<Vec<u8>, ConfinedReadError> {
+    let (candidate, was_missing) = confined_path(root, rel).map_err(ConfinedReadError::Path)?;
     let canonical_root = root
         .canonicalize()
-        .map_err(|e| format!("repository root unavailable: {e}"))?;
+        .map_err(|e| ConfinedReadError::Path(format!("repository root unavailable: {e}")))?;
     // Containment is decided above, before any metadata of the file is read.
     let meta = candidate
         .metadata()
-        .map_err(|e| format!("cannot stat '{rel}': {e}"))?;
+        .map_err(|e| ConfinedReadError::Io(format!("cannot stat '{rel}': {e}")))?;
     // A path that appeared after the missing check must still resolve inside.
     if was_missing && !crate::paths::contains(&canonical_root, &candidate) {
-        return Err(format!("document path escapes repository: '{rel}'"));
+        return Err(ConfinedReadError::Path(format!(
+            "document path escapes repository: '{rel}'"
+        )));
     }
     let len = meta.len();
     if len > cap_bytes {
-        return Err(format!("'{rel}' too large ({len} bytes > {cap_bytes})"));
+        return Err(ConfinedReadError::Io(format!(
+            "'{rel}' too large ({len} bytes > {cap_bytes})"
+        )));
     }
     // take(cap+1): the metadata check races file growth; the bounded read
     // cannot be outrun.
-    let mut file =
-        std::fs::File::open(&candidate).map_err(|e| format!("cannot read '{rel}': {e}"))?;
+    let mut file = std::fs::File::open(&candidate)
+        .map_err(|e| ConfinedReadError::Io(format!("cannot read '{rel}': {e}")))?;
     let mut bytes = Vec::new();
     use std::io::Read as _;
     file.by_ref()
         .take(cap_bytes + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read '{rel}': {e}"))?;
+        .map_err(|e| ConfinedReadError::Io(format!("cannot read '{rel}': {e}")))?;
     if bytes.len() as u64 > cap_bytes {
-        return Err(format!("'{rel}' too large (> {cap_bytes} bytes)"));
+        return Err(ConfinedReadError::Io(format!(
+            "'{rel}' too large (> {cap_bytes} bytes)"
+        )));
     }
     Ok(bytes)
+}
+
+pub fn confined_read(root: &Path, rel: &str, cap_bytes: u64) -> Result<Vec<u8>, String> {
+    confined_read_classified(root, rel, cap_bytes).map_err(ConfinedReadError::into_message)
 }
 
 /// The containment decision alone: `rel` must resolve inside the canonical `root`,
@@ -473,6 +501,33 @@ mod tests {
     use super::*;
     use crate::testutil::tmpdir;
     use std::path::PathBuf;
+
+    #[test]
+    fn classified_confinement_errors_keep_their_kind() {
+        let dir = tmpdir("sem-classified-read");
+        std::fs::write(dir.join("big.txt"), vec![b'x'; 100]).unwrap();
+
+        let escape = confined_read_classified(&dir, "../escape.txt", 1024).unwrap_err();
+        assert!(matches!(&escape, ConfinedReadError::Path(_)));
+        assert_eq!(
+            escape.into_message(),
+            confined_read(&dir, "../escape.txt", 1024).unwrap_err()
+        );
+
+        let missing = confined_read_classified(&dir, "missing.txt", 1024).unwrap_err();
+        assert!(matches!(&missing, ConfinedReadError::Io(_)));
+        assert_eq!(
+            missing.into_message(),
+            confined_read(&dir, "missing.txt", 1024).unwrap_err()
+        );
+
+        let too_large = confined_read_classified(&dir, "big.txt", 64).unwrap_err();
+        assert!(matches!(&too_large, ConfinedReadError::Io(_)));
+        assert_eq!(
+            too_large.into_message(),
+            confined_read(&dir, "big.txt", 64).unwrap_err()
+        );
+    }
 
     #[test]
     fn doc_path_rejects_traversal_and_absolutes() {

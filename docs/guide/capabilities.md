@@ -63,6 +63,51 @@ automatically. Knowledge records are revisioned, and explicit bindings point
 to one record revision. A binding records a relationship, not whether the
 record itself is true.
 
+## Selected-anchor packets
+
+`packet` combines results for one to five anchors that you choose after search
+or query. A position selector contains `path`, `line` and `col` (and may include
+`symbol`); a name selector contains `target` and may narrow with `in` and
+`kind`. Exact unique names resolve. Ambiguous, missing, no-index, and
+unavailable anchors remain per-anchor outcomes; a duplicate selector remains a
+separate outcome but can share one snippet. The packet never selects a
+candidate for you.
+
+The response carries one result envelope with the per-anchor contexts, explicit
+knowledge bindings and source snippets that fit the `max_bytes` JSON-response
+budget. Depth defaults to 3 (range 1–6), context limit to 20 (range 1–100), and
+`max_bytes` to 32768 (range 8192–131072). The anchors array is at most 16384
+normalized bytes in both transports; CLI JSON input also has a 16384-byte raw
+cap. Snippets are capped at 40 LF-delimited lines and 4096 bytes each, and a
+source file larger than the indexer's 1 MiB read cap is unavailable.
+
+`available`, `truncated` and `unavailable` describe snippet delivery. A
+`source-changed` result means the current source digest differs from the index;
+reindex and select the anchor again before using a new context. A uniquely
+identified stored span may still appear as stale metadata; ambiguous or missing
+syntax identity is not guessed. `invalid-source-range` means a stored range does
+not fit the verified UTF-8 source and its snippet and follow-up range are
+withheld. Other unavailable reasons are reported per anchor/snippet. A digest
+labelled `fnv1a-64` is a non-cryptographic change detector, not proof that
+content is identical or safe.
+When `follow_up.source` is present (it is null without a unique source range),
+its digest covers the whole indexed file. Validate repository containment,
+read and hash the full current file, compare the 16-digit lowercase hex digest,
+then slice the half-open `requested_range` from that same buffer. Do not hash
+only the range.
+Exit 0 means a packet document was formed, even when some anchors are ambiguous,
+not found, no-index or unavailable. Invalid input and a response whose required
+metadata cannot fit `max_bytes` exit 2 without partial output; path or storage
+failures remain errors. A packet is not a change-safety verdict.
+
+Packet knowledge is limited to explicit bindings. `knowledge_status` and
+`knowledge_generation` are reported per anchor; the knowledge database has its
+own read generation and is not part of the pinned code snapshot. Packet anchors
+always use `query: null` and `semantic: false` internally; packet does not run
+lexical or semantic retrieval. Both the CLI command and MCP tool are read-only;
+they do not create or migrate databases, and a missing code index returns a
+`no-index` outcome.
+
 ## Structure and documentation facts
 
 `riltra index` also stores three more kinds of syntax fact and a word index for
@@ -312,8 +357,8 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves sixteen local stdio tools. Fifteen read repository,
-index, code, and knowledge data. The remaining tool,
+`riltra mcp` serves seventeen local stdio tools. Sixteen read repository,
+index, code, knowledge, and selected-anchor packet data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the
 network. The MCP handlers themselves do not create, migrate, or replace a

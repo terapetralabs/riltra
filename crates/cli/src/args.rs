@@ -23,6 +23,9 @@ pub enum Command {
     RepoStatus {
         repo: String,
     },
+    Overview {
+        repo: String,
+    },
     Doctor {
         repo: Option<String>,
     },
@@ -295,6 +298,21 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "-V" | "--version" | "version" if args.len() == 1 => Ok(Command::Version),
         "status" if args.len() == 1 => Ok(Command::Status),
         "mcp" if args.len() == 1 => Ok(Command::Mcp),
+        "overview" => {
+            let mut repo = None;
+            let mut i = 1;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            match repo {
+                Some(repo) => Ok(Command::Overview { repo }),
+                None => Err(crate::usage()),
+            }
+        }
         "agent-block" if args.len() == 1 => Ok(Command::AgentBlock),
         "init" => {
             let mut repo = None;
@@ -1250,6 +1268,20 @@ mod tests {
         assert!(p(&["repo"]).is_err());
         assert!(p(&["repo", "status"]).is_err());
         assert!(p(&["repo", "drop", "--repo", "r"]).is_err());
+    }
+
+    #[test]
+    fn parses_overview_with_required_repo() {
+        assert!(matches!(
+            p(&["overview", "--repo", "r"]),
+            Ok(Command::Overview { repo }) if repo == "r"
+        ));
+        assert!(matches!(
+            p(&["overview", "--repo=r"]),
+            Ok(Command::Overview { repo }) if repo == "r"
+        ));
+        assert!(p(&["overview"]).is_err());
+        assert!(p(&["overview", "--repo", "r", "--json"]).is_err());
     }
 
     #[test]

@@ -1,12 +1,50 @@
 # Agent setup guide
 
-This guide is for people who connect an AI coding agent to Riltra, and for the agent itself. It covers what to prepare, which tool answers which question, how to read the labels in the answers, and a snippet to paste into your agent's instruction file.
+This guide helps you orient a new project, connect an AI coding agent to Riltra, choose a definition, and read its evidence labels. It also includes a snippet to paste into your agent's instruction file.
 
-It assumes Riltra is installed and its MCP server is registered with your client; the [README](../../README.md#connect-a-coding-agent) shows how. Riltra is a map of your code, not a source of truth: an answer is a place to look, and the cited source is what to rely on.
+Riltra is a map of your code, not a source of truth: an answer is a place to look, and the cited source is what to rely on.
 
+## Guided first use
+
+From a new project folder, run:
+
+```sh
+riltra start
+```
+
+Use `--path <directory>` to select another folder and `--name <name>` to set its registry name. The wizard is interactive only when stdin and stdout are terminals and `--json` is absent. It shows readiness and the absolute `RILTRA_HOME` target before writing. Registration and indexing have separate default-no prompts. Selecting `--client codex|claude|opencode` only selects an integration; it does not approve configuration changes. Any offered setup action or probe has its own consent prompt.
+
+The overview lists the index freshness and reasons, language coverage, source directories, build/test documents, candidate entry points, and definitions. Entry points are candidates inferred from definitions or conventional paths, not proof of executed flow. Manifest and instruction excerpts are live document evidence, distinct from indexed snapshot evidence. Select a definition from the menu; the wizard builds a packet for that selection without asking you to enter coordinates. If the snapshot changes while you choose, it refreshes the menu and asks again.
+
+JSON and nonterminal mode are read-only: `riltra start --path <directory> --json` prints the overview but does not register the project, index it, configure a client, or create a selected-definition packet. Use the interactive wizard for those steps, or prepare the project manually with the commands below.
+
+### Freshness and recovery
+
+- `fresh` describes the index snapshot used for indexed facts; it does not mean the current source or a runtime flow was verified. Live excerpts are labelled separately.
+- `stale` or `unknown`: review the reported reason, run `riltra index --repo <name>` after approval, then select the definition again.
+- `no-index`: approve indexing in the wizard, or run the manual `init` and `index` commands below.
+- `unsupported-schema:<found>`: overview leaves the existing store untouched. Compare `<found>` with `riltra_health.versions.code_index_schema`, the supported schema; health is environment-wide and does not provide repository-specific recovery instructions. Call `riltra_repo_status` for this repository to distinguish `schema_outdated` (`<found>` is lower) from `schema_ahead` (`<found>` is higher). For `schema_outdated`, follow that response's CLI migration instruction (`riltra index status --repo <name>`). This command can migrate and write the store, so get the user's separate approval before running it; then verify the result and do not assume migration succeeded. For `schema_ahead`, leave the store untouched and use a Riltra build that supports it if one is available; do not reindex or rebuild it with a build that reports it as newer.
+- `source-changed` or a changed selection snapshot: reindex, refresh the menu, and choose the definition again before relying on its packet.
+- `ambiguous`: inspect candidates and choose the intended definition; the wizard never chooses one automatically. No matching definitions does not prove that every project language is unsupported.
+
+A successful command or MCP document means the response was formed, not that every fact is complete or current. Packet statuses are per anchor; check each one. `UNKNOWN`, `partial`, `unavailable`, or an empty result means the evidence does not establish the answer.
+
+### Client setup when evidence is incomplete
+
+Setup reports keep `configuration`, `probe`, and `connection` separate. `manual_required` means the effective client configuration or its precedence could not be established safely. Preserve existing entries and inspect the targeted configuration before making a change. Replace the absolute-path placeholders with paths on your machine, and consult the client documentation for your installed version:
+
+```sh
+codex mcp add riltra --env RILTRA_HOME=<absolute-home> -- <absolute-riltra-binary> mcp
+claude mcp add --env RILTRA_HOME=<absolute-home> --transport stdio --scope user riltra -- <absolute-riltra-binary> mcp
+opencode mcp add riltra --global --env RILTRA_HOME=<absolute-home> -- <absolute-riltra-binary> mcp
+```
+
+These are client-specific command previews, not a guarantee that an existing entry can be replaced or that every client version behaves the same. Do not run an add command over an existing `riltra` entry; inspect it and keep the existing configuration unless you have reviewed and approved a change. OpenCode automatic application remains disabled because native isolation and effective configuration layers have not been established for this task.
+
+The optional `in_process_handler` probe tests Riltra's handler in this process over bounded in-memory transport. It does not test the installed executable, operating-system stdio, or a client connection. A probe result does not establish configuration or connectivity. Use the [Codex](https://developers.openai.com/codex/mcp/), [Claude Code](https://code.claude.com/docs/en/mcp), and [OpenCode](https://opencode.ai/docs/mcp-servers/) documentation for version-specific setup and verification.
 ## Prepare the repository
 
-The MCP tools only read. They never create or migrate an index, so a person or a script prepares each repository once, in a terminal:
+Most MCP tools read existing state. `riltra_code_semantic` can start a configured language server that may write its own cache, run project tools, or access the network. MCP overview does not create or migrate an index, so prepare each repository in a terminal:
 
 ```text
 riltra init --repo <path-to-repository> --name <name>
@@ -165,7 +203,8 @@ identity, integrity, or safety.
 | `partial` | Coverage is incomplete (unresolved owners or targets, missing provider coverage). | A short or empty list does not mean nothing is affected. |
 | `fresh`, `stale`, `unknown` | Whether the index, or the source a stored note points at, still matches the current source. | On `stale`, re-run `riltra index` and re-read the source. A stale binding is never re-bound automatically. |
 | `no-index` | No index exists for this repository. | Ask the user to run `riltra init` and `riltra index`. |
-| `schema_outdated` | A store was written by a different Riltra version and was left untouched. | Follow the migration instruction in the response; `riltra index` rebuilds the code index. |
+| `schema_outdated` | The repository's code-index schema is older than the version this build supports; the MCP read leaves it untouched. | Follow the `riltra_repo_status` response's CLI instruction (`riltra index status --repo <name>`). This command can migrate and write the store, so get separate user approval before running it; then verify the result. Migration is not guaranteed. |
+| `schema_ahead` | The repository's code-index schema is newer than the version this build supports; the MCP read leaves it untouched. | Keep the store untouched. Use a Riltra build that supports the schema if one is available; do not reindex or rebuild with the older build. |
 | `snippet-cap`, `source-changed`, `source-unavailable` | Packet snippet delivery was clipped or current source could not be used. | For `follow_up.source`, use the full-file hash procedure above; if it differs, reindex and select the anchor again. |
 | `invalid-source-range` | The pinned index range cannot be applied to the verified UTF-8 source bytes. | The snippet and follow-up source range are withheld; rebuild the index before relying on that anchor's source. |
 
@@ -235,20 +274,21 @@ Paste this into your agent's instruction file (for example `AGENTS.md` or `CLAUD
 ```markdown
 ## Code intelligence (Riltra)
 
-This repository is indexed by Riltra, a local code map reached through MCP tools named `riltra_*`. It is a map, not a source of truth: confirm anything you rely on by reading the cited source.
+Riltra is a local code map, not a source of truth. Confirm answers against the cited source; index freshness and evidence labels limit what an answer establishes.
 
-- Start with `riltra_repo_status` for `<name>`. If the index is missing or stale, say so and ask the user to run `riltra index --repo <name>`; then continue from the source itself.
-- Find a definition by name with `riltra_code_search`, and use its `path`, `span.start_line` and `span.start_col` as the anchor (`path`, `line`, `col`) for `riltra_context`, `riltra_code_callers`, `riltra_code_callees`, `riltra_code_trace` and `riltra_code_impact`.
-- Find code by concept with `riltra_code_query` (free text). A query result has no column: pass its `name` as `target` and its `path` as `in` to those tools instead.
+- For a new folder, run `riltra start [--path <directory>] [--name <name>]` in a terminal. The wizard shows readiness and the effective `RILTRA_HOME`; registration and indexing each require a separate default-no approval. `--client` selects an integration only; it does not approve writes.
+- In the wizard, choose a definition from the overview menu. Riltra builds a packet from that selection, so do not guess line or column coordinates. Entry points are candidates from indexed definitions or conventional locations, not proof of runtime flow. Document and manifest excerpts are labelled live evidence.
+- `fresh` describes the selected index snapshot. On `stale`, `unknown`, `source-changed`, or a changed menu snapshot, reindex and select again.
+- `no-index` needs an approved index. `unsupported-schema:<found>` means overview left the store untouched; compare `<found>` with `riltra_health.versions.code_index_schema` (the supported schema; health is environment-wide and has no repo recovery instruction). Call `riltra_repo_status` for this repo to distinguish `schema_outdated` (`<found>` is lower) from `schema_ahead` (`<found>` is higher). For `schema_outdated`, follow that response's CLI migration instruction (`riltra index status --repo <name>`). That command can migrate and write the store, so get the user's separate approval before running it; then verify the result and do not assume migration succeeded. For `schema_ahead`, leave the store untouched and use a Riltra build that supports it if one is available; do not reindex or rebuild it with a build that reports it as newer. If no definitions are found, do not claim the project language is unsupported.
+- JSON or nonterminal `riltra start` prints a read-only overview; it does not register, index, set up a client, or produce a selected-definition packet. `riltra overview --repo <name>` is also read-only.
+- Setup evidence is separate: `configuration`, `probe`, and `connection` are not interchangeable. `probe_scope: in_process_handler` tests this process's handler over bounded in-memory transport only; it does not test the installed executable, OS stdio, or a client connection. A connected client is not inferred.
+- If setup says `manual_required`, inspect the named client's effective configuration and preserve any existing entry. Substitute absolute paths and follow the client's current documentation before running a command. Codex: `codex mcp add riltra --env RILTRA_HOME=<absolute-home> -- <absolute-riltra-binary> mcp`. Claude Code: `claude mcp add --env RILTRA_HOME=<absolute-home> --transport stdio --scope user riltra -- <absolute-riltra-binary> mcp`. OpenCode: `opencode mcp add riltra --global --env RILTRA_HOME=<absolute-home> -- <absolute-riltra-binary> mcp`; this preview is not proof that every OpenCode version or configuration layer is safe to modify. OpenCode automatic application remains disabled because native isolation and effective configuration layers have not been established for this task. See the [Codex](https://developers.openai.com/codex/mcp/), [Claude Code](https://code.claude.com/docs/en/mcp), and [OpenCode](https://opencode.ai/docs/mcp-servers/) documentation.
+- For manual recovery, prepare the project with `riltra init --repo <path> --name <name>` and `riltra index --repo <name>`, then call `riltra overview --repo <name>`, choose a definition from its evidence, and pass its name/path to `riltra packet`. Recheck freshness before relying on the packet.
+- Find definitions with `riltra_code_search` or concepts with `riltra_code_query`. A query result has no column: pass its `name` as `target` and `path` as `in`.
 - For several selected locations, call `riltra_code_packet` with one to five explicit anchors and inspect every status; exit 0 does not mean all resolved or that a change is safe. If source is `source-changed`, reindex and select the anchor again. Use `follow_up.context` with `riltra_context`. When `follow_up.source` is present, validate repository containment, read the full file, compare its 16-digit lowercase FNV-1a 64 digest, then extract the half-open `requested_range` from that same buffer. Do not hash only the range; FNV is a change detector, not cryptographic proof.
-- If a name does not resolve to exactly one definition (status `ambiguous` or `not-found`), do not pick a candidate for the user: read the candidates and the source, then anchor on the right definition with `path`, `line` and `col`.
-- Before editing a symbol, run `riltra_code_impact` on it.
-- After editing and before committing, run `riltra_code_changes` and read which definitions your change touched.
-- `UNKNOWN` or `partial` is not a clean check, and an empty result means "not established", never "nothing exists".
-- Use the graph tools first; use text search when they answer empty and for literal strings.
-- Never rename by find-and-replace. A `POTENTIAL_CALL` is a lead to open and read, not proof of a call; check each use against the cited source.
-- Before changing code, call `riltra_knowledge_at_anchor` on it. Report what it returns as a stored, `Unverified` note with its revision, not as established fact.
-- Say which Riltra answers you used and which labels they carried.
+- If a name is ambiguous or not found, inspect candidates and source; do not choose on the user's behalf. Before editing a symbol, run `riltra_code_impact`; after editing, run `riltra_code_changes` and inspect touched definitions.
+- `UNKNOWN` or `partial` is not a clean check, and an empty result means “not established,” never “nothing exists.” `POTENTIAL_CALL` is a lead to verify in source, not proof of a call.
+- Before changing code, call `riltra_knowledge_at_anchor`. Report a stored note as `Unverified` with its revision, not as established fact. Say which Riltra answers you used and which labels they carried.
 ```
 
 ## When something is off

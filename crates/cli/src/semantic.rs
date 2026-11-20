@@ -276,13 +276,14 @@ pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
 #[derive(Debug, PartialEq)]
 pub(crate) enum ConfinedReadError {
     Path(String),
+    NotFound(String),
     Io(String),
 }
 
 impl ConfinedReadError {
     pub(crate) fn into_message(self) -> String {
         match self {
-            Self::Path(message) | Self::Io(message) => message,
+            Self::Path(message) | Self::NotFound(message) | Self::Io(message) => message,
         }
     }
 }
@@ -292,42 +293,298 @@ pub(crate) fn confined_read_classified(
     rel: &str,
     cap_bytes: u64,
 ) -> Result<Vec<u8>, ConfinedReadError> {
-    let (candidate, was_missing) = confined_path(root, rel).map_err(ConfinedReadError::Path)?;
+    confined_read_classified_with(root, rel, cap_bytes, || {}, || {})
+}
+
+fn confined_read_classified_with(
+    root: &Path,
+    rel: &str,
+    cap_bytes: u64,
+    after_root_open: impl FnOnce(),
+    before_open: impl FnOnce(),
+) -> Result<Vec<u8>, ConfinedReadError> {
+    // Pin the caller-supplied root before resolving child paths; canonicalize-then-open
+    // lets a root replacement redirect the handle outside the validated root.
+    let root_handle = open_root_directory(root)
+        .map_err(|e| ConfinedReadError::Io(format!("repository root unavailable: {e}")))?;
+    after_root_open();
     let canonical_root = root
         .canonicalize()
-        .map_err(|e| ConfinedReadError::Path(format!("repository root unavailable: {e}")))?;
-    // Containment is decided above, before any metadata of the file is read.
-    let meta = candidate
-        .metadata()
-        .map_err(|e| ConfinedReadError::Io(format!("cannot stat '{rel}': {e}")))?;
-    // A path that appeared after the missing check must still resolve inside.
-    if was_missing && !crate::paths::contains(&canonical_root, &candidate) {
-        return Err(ConfinedReadError::Path(format!(
-            "document path escapes repository: '{rel}'"
+        .map_err(|e| ConfinedReadError::Io(format!("repository root unavailable: {e}")))?;
+    let (candidate, _) = confined_path(&canonical_root, rel).map_err(ConfinedReadError::Path)?;
+    let meta = candidate.metadata().map_err(|e| {
+        let message = format!("cannot stat '{rel}': {e}");
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ConfinedReadError::NotFound(message)
+        } else {
+            ConfinedReadError::Io(message)
+        }
+    })?;
+    if meta.len() > cap_bytes {
+        return Err(ConfinedReadError::Io(format!(
+            "'{rel}' too large ({} bytes > {cap_bytes})",
+            meta.len()
         )));
     }
-    let len = meta.len();
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|e| ConfinedReadError::Io(format!("cannot resolve '{rel}': {e}")))?;
+    let relative = resolved.strip_prefix(&canonical_root).map_err(|_| {
+        ConfinedReadError::Path(format!("document path escapes repository: '{rel}'"))
+    })?;
+    // The test hook models a path swap after validation and immediately before open.
+    before_open();
+    let mut file = open_relative_to_root(&root_handle, relative).map_err(|e| {
+        let message = format!("cannot read '{rel}': {e}");
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ConfinedReadError::NotFound(message)
+        } else {
+            ConfinedReadError::Io(message)
+        }
+    })?;
+    // Check the file actually opened, not the path checked before open.
+    let len = file
+        .metadata()
+        .map_err(|e| ConfinedReadError::Io(format!("cannot stat opened '{rel}': {e}")))?
+        .len();
     if len > cap_bytes {
         return Err(ConfinedReadError::Io(format!(
             "'{rel}' too large ({len} bytes > {cap_bytes})"
         )));
     }
-    // take(cap+1): the metadata check races file growth; the bounded read
-    // cannot be outrun.
-    let mut file = std::fs::File::open(&candidate)
-        .map_err(|e| ConfinedReadError::Io(format!("cannot read '{rel}': {e}")))?;
+    // take(cap+1): the opened handle remains stable if the path changes later.
     let mut bytes = Vec::new();
     use std::io::Read as _;
     file.by_ref()
         .take(cap_bytes + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| ConfinedReadError::Io(format!("cannot read '{rel}': {e}")))?;
+        .map_err(|e| {
+            let message = format!("cannot read '{rel}': {e}");
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ConfinedReadError::NotFound(message)
+            } else {
+                ConfinedReadError::Io(message)
+            }
+        })?;
     if bytes.len() as u64 > cap_bytes {
         return Err(ConfinedReadError::Io(format!(
             "'{rel}' too large (> {cap_bytes} bytes)"
         )));
     }
     Ok(bytes)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_root_directory(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::FromRawFd;
+
+    unsafe extern "C" {
+        fn open(path: *const i8, flags: i32, ...) -> i32;
+    }
+    #[cfg(target_os = "linux")]
+    const SEARCH: i32 = 0x200000; // O_PATH
+    #[cfg(target_os = "macos")]
+    const SEARCH: i32 = 0x40000000; // O_EXEC; with O_DIRECTORY this is O_SEARCH
+    #[cfg(target_os = "linux")]
+    const DIRECTORY: i32 = 0x10000;
+    #[cfg(target_os = "macos")]
+    const DIRECTORY: i32 = 0x100000;
+    #[cfg(target_os = "linux")]
+    const CLOEXEC: i32 = 0x80000;
+    #[cfg(target_os = "macos")]
+    const CLOEXEC: i32 = 0x1000000;
+    let path = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+    let path = std::ffi::CString::new(path)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
+    let fd = unsafe { open(path.as_ptr(), SEARCH | DIRECTORY | CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: open returned a new owned descriptor.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_relative_to_root(root: &std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    unsafe extern "C" {
+        fn openat(dirfd: i32, path: *const i8, flags: i32, ...) -> i32;
+    }
+    #[cfg(target_os = "linux")]
+    const CLOEXEC: i32 = 0x80000;
+    #[cfg(target_os = "macos")]
+    const CLOEXEC: i32 = 0x1000000;
+    #[cfg(target_os = "linux")]
+    const DIRECTORY: i32 = 0x10000;
+    #[cfg(target_os = "macos")]
+    const DIRECTORY: i32 = 0x100000;
+    #[cfg(target_os = "linux")]
+    const NOFOLLOW: i32 = 0x20000;
+    #[cfg(target_os = "macos")]
+    const NOFOLLOW: i32 = 0x100;
+    #[cfg(target_os = "linux")]
+    const SEARCH: i32 = 0x200000; // O_PATH
+    #[cfg(target_os = "macos")]
+    const SEARCH: i32 = 0x40000000; // O_EXEC; with O_DIRECTORY this is O_SEARCH
+
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty path",
+        ));
+    }
+    let mut parent = root.try_clone()?;
+    for (index, component) in components.iter().enumerate() {
+        let name = CString::new(component.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
+        let flags = CLOEXEC
+            | NOFOLLOW
+            | if index + 1 < components.len() {
+                SEARCH | DIRECTORY
+            } else {
+                0
+            };
+        let fd = unsafe { openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a new owned descriptor.
+        parent = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(parent)
+}
+
+#[cfg(windows)]
+fn open_root_directory(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_relative_to_root(root: &std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u16,
+    }
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: u32,
+        root_directory: *mut std::ffi::c_void,
+        object_name: *mut UnicodeString,
+        attributes: u32,
+        security_descriptor: *mut std::ffi::c_void,
+        security_qos: *mut std::ffi::c_void,
+    }
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: usize,
+        information: usize,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtCreateFile(
+            file_handle: *mut *mut std::ffi::c_void,
+            desired_access: u32,
+            object_attributes: *mut ObjectAttributes,
+            io_status: *mut IoStatusBlock,
+            allocation_size: *mut i64,
+            file_attributes: u32,
+            share_access: u32,
+            create_disposition: u32,
+            create_options: u32,
+            ea_buffer: *mut std::ffi::c_void,
+            ea_length: u32,
+        ) -> i32;
+        fn RtlNtStatusToDosError(status: i32) -> u32;
+    }
+    const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+    const OBJ_DONT_REPARSE: u32 = 0x1000;
+    const FILE_READ_DATA: u32 = 1;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const SYNCHRONIZE: u32 = 0x00100000;
+    const FILE_SHARE_ALL: u32 = 7;
+    const FILE_OPEN: u32 = 1;
+    const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+    let path = relative.to_string_lossy().replace('/', "\\");
+    let mut wide: Vec<u16> = path.encode_utf16().collect();
+    if wide.is_empty() || wide.len() * 2 > u16::MAX as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid relative path",
+        ));
+    }
+    let mut name = UnicodeString {
+        length: (wide.len() * 2) as u16,
+        maximum_length: (wide.len() * 2) as u16,
+        buffer: wide.as_mut_ptr(),
+    };
+    let mut attributes = ObjectAttributes {
+        length: std::mem::size_of::<ObjectAttributes>() as u32,
+        root_directory: root.as_raw_handle().cast(),
+        object_name: &mut name,
+        attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        security_descriptor: std::ptr::null_mut(),
+        security_qos: std::ptr::null_mut(),
+    };
+    let mut status = IoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut handle = std::ptr::null_mut();
+    let code = unsafe {
+        NtCreateFile(
+            &mut handle,
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &mut attributes,
+            &mut status,
+            std::ptr::null_mut(),
+            0,
+            FILE_SHARE_ALL,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if code < 0 {
+        let win_error = unsafe { RtlNtStatusToDosError(code) };
+        return Err(std::io::Error::from_raw_os_error(win_error as i32));
+    }
+    // SAFETY: NtCreateFile returned an owned handle on success.
+    use std::os::windows::io::FromRawHandle;
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn open_root_directory(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "root handle confinement unavailable",
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn open_relative_to_root(
+    _root: &std::fs::File,
+    _relative: &Path,
+) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "relative confined open unavailable",
+    ))
 }
 
 pub fn confined_read(root: &Path, rel: &str, cap_bytes: u64) -> Result<Vec<u8>, String> {
@@ -515,7 +772,7 @@ mod tests {
         );
 
         let missing = confined_read_classified(&dir, "missing.txt", 1024).unwrap_err();
-        assert!(matches!(&missing, ConfinedReadError::Io(_)));
+        assert!(matches!(&missing, ConfinedReadError::NotFound(_)));
         assert_eq!(
             missing.into_message(),
             confined_read(&dir, "missing.txt", 1024).unwrap_err()
@@ -527,6 +784,119 @@ mod tests {
             too_large.into_message(),
             confined_read(&dir, "big.txt", 64).unwrap_err()
         );
+    }
+
+    #[test]
+    fn root_directory_replaced_after_open_reads_from_pinned_root() {
+        let root = tmpdir("sem-pinned-root");
+        let outside = tmpdir("sem-replacement-root");
+        std::fs::write(root.join("README.md"), "inside root").unwrap();
+        std::fs::write(outside.join("README.md"), "outside root").unwrap();
+        let moved_root = root.with_extension("moved");
+        let swapped = std::cell::Cell::new(false);
+        let result = confined_read_classified_with(
+            &root,
+            "README.md",
+            1024,
+            || {
+                std::fs::rename(&root, &moved_root).unwrap();
+                std::fs::rename(&outside, &root).unwrap();
+                swapped.set(true);
+            },
+            || {},
+        );
+        assert!(swapped.get());
+        assert_eq!(result.unwrap(), b"inside root");
+    }
+
+    #[test]
+    fn symlink_swapped_after_validation_cannot_read_outside() {
+        let root = tmpdir("sem-swap-root");
+        let outside = tmpdir("sem-swap-outside");
+        let document = root.join("README.md");
+        let secret = outside.join("secret.md");
+        std::fs::write(&document, "inside").unwrap();
+        std::fs::write(&secret, "outside secret").unwrap();
+        let swapped = std::cell::Cell::new(false);
+        let result = confined_read_classified_with(
+            &root,
+            "README.md",
+            1024,
+            || {},
+            || {
+                std::fs::remove_file(&document).unwrap();
+                #[cfg(unix)]
+                let linked = std::os::unix::fs::symlink(&secret, &document).is_ok();
+                #[cfg(windows)]
+                let linked = std::os::windows::fs::symlink_file(&secret, &document).is_ok();
+                swapped.set(linked);
+            },
+        );
+        if swapped.get() {
+            if let Ok(bytes) = result {
+                assert_eq!(bytes, b"inside");
+            }
+        } else {
+            assert!(matches!(result, Err(ConfinedReadError::NotFound(_))));
+        }
+    }
+
+    #[test]
+    fn confined_read_keeps_internal_symlink_support() {
+        let root = tmpdir("sem-internal-link");
+        let target = root.join("docs").join("guide.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "inside target").unwrap();
+        let link = root.join("README.md");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink("docs/guide.md", &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file("docs/guide.md", &link).is_ok();
+        if !linked {
+            return;
+        }
+        assert_eq!(
+            confined_read_classified(&root, "README.md", 1024).unwrap(),
+            b"inside target"
+        );
+    }
+
+    #[test]
+    fn confined_read_supports_execute_only_directories() {
+        #[cfg(windows)]
+        {
+            eprintln!("SKIP execute-only directory permissions: Unix mode bits are unavailable on Windows");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            unsafe extern "C" {
+                fn geteuid() -> u32;
+            }
+            if unsafe { geteuid() } == 0 {
+                eprintln!(
+                    "SKIP execute-only directory permissions: test process is privileged (euid 0)"
+                );
+                return;
+            }
+
+            let root = tmpdir("sem-search-only");
+            let intermediate = root.join("private");
+            std::fs::create_dir(&intermediate).unwrap();
+            std::fs::write(intermediate.join("source.rs"), "readable source").unwrap();
+            std::fs::set_permissions(&intermediate, std::fs::Permissions::from_mode(0o111))
+                .unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o111)).unwrap();
+
+            let result = confined_read_classified(&root, "private/source.rs", 1024);
+
+            // Restore cleanup permissions even when the read fails.
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&intermediate, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            assert_eq!(result.unwrap(), b"readable source");
+        }
     }
 
     #[test]

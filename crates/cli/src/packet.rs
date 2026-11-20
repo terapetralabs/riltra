@@ -226,7 +226,10 @@ fn read_source_using(
         Err(crate::semantic::ConfinedReadError::Path(message)) => {
             return Err(PacketQueryError::Path(message))
         }
-        Err(crate::semantic::ConfinedReadError::Io(_)) => {
+        Err(
+            crate::semantic::ConfinedReadError::NotFound(_)
+            | crate::semantic::ConfinedReadError::Io(_),
+        ) => {
             crate::semantic::confined_path(root, path).map_err(PacketQueryError::Path)?;
             (None, Some("source-unavailable"))
         }

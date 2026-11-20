@@ -357,7 +357,7 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves seventeen local stdio tools. Sixteen read repository,
+`riltra mcp` serves eighteen local stdio tools. Seventeen read repository,
 index, code, knowledge, and selected-anchor packet data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the

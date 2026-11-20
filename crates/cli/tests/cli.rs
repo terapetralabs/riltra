@@ -72,29 +72,34 @@ fn git_fixture(dir: &Path) {
 
 const AGENT_BLOCK: &str = r#"## Code intelligence (Riltra)
 
-This repository is indexed by Riltra, a local code map reached through MCP tools named `riltra_*`. It is a map, not a source of truth: confirm anything you rely on by reading the cited source.
+Riltra is a local code map, not a source of truth. Confirm answers against the cited source; index freshness and evidence labels limit what an answer establishes.
 
-- Start with `riltra_repo_status` for `<name>`. If the index is missing or stale, say so and ask the user to run `riltra index --repo <name>`; then continue from the source itself.
-- Find a definition by name with `riltra_code_search`, and use its `path`, `span.start_line` and `span.start_col` as the anchor (`path`, `line`, `col`) for `riltra_context`, `riltra_code_callers`, `riltra_code_callees`, `riltra_code_trace` and `riltra_code_impact`.
-- Find code by concept with `riltra_code_query` (free text). A query result has no column: pass its `name` as `target` and its `path` as `in` to those tools instead.
+- For a new folder, run `riltra start [--path <directory>] [--name <name>]` in a terminal. The wizard shows readiness and the effective `RILTRA_HOME`; registration and indexing each require a separate default-no approval. `--client` selects an integration only; it does not approve writes.
+- In the wizard, choose a definition from the overview menu. Riltra builds a packet from that selection, so do not guess line or column coordinates. Entry points are candidates from indexed definitions or conventional locations, not proof of runtime flow. Document and manifest excerpts are labelled live evidence.
+- `fresh` describes the selected index snapshot. On `stale`, `unknown`, `source-changed`, or a changed menu snapshot, reindex and select again.
+- `no-index` needs an approved index. `unsupported-schema:<found>` means overview left the store untouched; compare `<found>` with `riltra_health.versions.code_index_schema` (the supported schema; health is environment-wide and has no repo recovery instruction). Call `riltra_repo_status` for this repo to distinguish `schema_outdated` (`<found>` is lower) from `schema_ahead` (`<found>` is higher). For `schema_outdated`, follow that response's CLI migration instruction (`riltra index status --repo <name>`). That command can migrate and write the store, so get the user's separate approval before running it; then verify the result and do not assume migration succeeded. For `schema_ahead`, leave the store untouched and use a Riltra build that supports it if one is available; do not reindex or rebuild it with a build that reports it as newer. If no definitions are found, do not claim the project language is unsupported.
+- JSON or nonterminal `riltra start` prints a read-only overview; it does not register, index, set up a client, or produce a selected-definition packet. `riltra overview --repo <name>` is also read-only.
+- Setup evidence is separate: `configuration`, `probe`, and `connection` are not interchangeable. `probe_scope: in_process_handler` tests this process's handler over bounded in-memory transport only; it does not test the installed executable, OS stdio, or a client connection. A connected client is not inferred.
+- If setup says `manual_required`, inspect the named client's effective configuration and preserve any existing entry. Substitute absolute paths and follow the client's current documentation before running a command. Codex: `codex mcp add riltra --env RILTRA_HOME=<absolute-home> -- <absolute-riltra-binary> mcp`. Claude Code: `claude mcp add --env RILTRA_HOME=<absolute-home> --transport stdio --scope user riltra -- <absolute-riltra-binary> mcp`. OpenCode: `opencode mcp add riltra --global --env RILTRA_HOME=<absolute-home> -- <absolute-riltra-binary> mcp`; this preview is not proof that every OpenCode version or configuration layer is safe to modify. OpenCode automatic application remains disabled because native isolation and effective configuration layers have not been established for this task. See the [Codex](https://developers.openai.com/codex/mcp/), [Claude Code](https://code.claude.com/docs/en/mcp), and [OpenCode](https://opencode.ai/docs/mcp-servers/) documentation.
+- For manual recovery, prepare the project with `riltra init --repo <path> --name <name>` and `riltra index --repo <name>`, then call `riltra overview --repo <name>`, choose a definition from its evidence, and pass its name/path to `riltra packet`. Recheck freshness before relying on the packet.
+- Find definitions with `riltra_code_search` or concepts with `riltra_code_query`. A query result has no column: pass its `name` as `target` and `path` as `in`.
 - For several selected locations, call `riltra_code_packet` with one to five explicit anchors and inspect every status; exit 0 does not mean all resolved or that a change is safe. If source is `source-changed`, reindex and select the anchor again. Use `follow_up.context` with `riltra_context`. When `follow_up.source` is present, validate repository containment, read the full file, compare its 16-digit lowercase FNV-1a 64 digest, then extract the half-open `requested_range` from that same buffer. Do not hash only the range; FNV is a change detector, not cryptographic proof.
-- If a name does not resolve to exactly one definition (status `ambiguous` or `not-found`), do not pick a candidate for the user: read the candidates and the source, then anchor on the right definition with `path`, `line` and `col`.
-- Before editing a symbol, run `riltra_code_impact` on it.
-- After editing and before committing, run `riltra_code_changes` and read which definitions your change touched.
-- `UNKNOWN` or `partial` is not a clean check, and an empty result means "not established", never "nothing exists".
-- Use the graph tools first; use text search when they answer empty and for literal strings.
-- Never rename by find-and-replace. A `POTENTIAL_CALL` is a lead to open and read, not proof of a call; check each use against the cited source.
-- Before changing code, call `riltra_knowledge_at_anchor` on it. Report what it returns as a stored, `Unverified` note with its revision, not as established fact.
-- Say which Riltra answers you used and which labels they carried.
+- If a name is ambiguous or not found, inspect candidates and source; do not choose on the user's behalf. Before editing a symbol, run `riltra_code_impact`; after editing, run `riltra_code_changes` and inspect touched definitions.
+- `UNKNOWN` or `partial` is not a clean check, and an empty result means “not established,” never “nothing exists.” `POTENTIAL_CALL` is a lead to verify in source, not proof of a call.
+- Before changing code, call `riltra_knowledge_at_anchor`. Report a stored note as `Unverified` with its revision, not as established fact. Say which Riltra answers you used and which labels they carried.
 "#;
 
-const AGENT_BLOCK_MARKERS: [&str; 6] = [
-    "run `riltra_code_impact`",
-    "run `riltra_code_changes`",
-    "`UNKNOWN` or `partial`",
-    "use text search",
-    "Never rename by find-and-replace",
-    "`riltra_code_packet`",
+const AGENT_BLOCK_MARKERS: [&str; 10] = [
+    "`riltra start [--path <directory>] [--name <name>]`",
+    "`unsupported-schema:<found>`",
+    "`riltra_health.versions.code_index_schema`",
+    "`riltra_repo_status`",
+    "`schema_ahead` (`<found>` is higher)",
+    "separate approval before running it",
+    "`probe_scope: in_process_handler`",
+    "OpenCode automatic application remains disabled",
+    "`UNKNOWN` or `partial` is not a clean check",
+    "`riltra_knowledge_at_anchor`.",
 ];
 
 /// The fenced block under the snippet heading of the agent setup guide.
@@ -114,9 +119,14 @@ fn agent_setup_snippet() -> &'static str {
 /// Drive-letter paths, UNC shares, /home/ and /Users/ roots, and GitNexus.
 fn leaks_local_path(text: &str) -> bool {
     let bytes = text.as_bytes();
-    let drive_letter = bytes
-        .windows(3)
-        .any(|w| w[0].is_ascii_alphabetic() && w[1] == b':' && (w[2] == b'\\' || w[2] == b'/'));
+    let drive_letter = bytes.windows(3).enumerate().any(|(i, w)| {
+        let is_url_scheme = (i >= 3 && bytes.get(i - 3..i + 4) == Some(&b"http://"[..]))
+            || (i >= 4 && bytes.get(i - 4..i + 4) == Some(&b"https://"[..]));
+        w[0].is_ascii_alphabetic()
+            && w[1] == b':'
+            && (w[2] == b'\\' || w[2] == b'/')
+            && !is_url_scheme
+    });
     let lower = text.to_ascii_lowercase();
     drive_letter
         || text.contains("\\\\")
@@ -178,8 +188,10 @@ fn agent_block_has_no_local_path_or_private_name() {
 fn agent_block_leak_check_catches_planted_leaks_only() {
     // Built from pieces: a tracked file must not contain a local-path literal, even a planted one.
     let planted_leaks = [
-        ["C", ":\\", "Users", "\\dev", "\\repo"].concat(),
-        ["D", ":/", "work/repo"].concat(),
+        ["worktree: ", "C", ":\\", "Users", "\\dev", "\\repo"].concat(),
+        ["located at ", "D", ":/", "work/repo"].concat(),
+        ["prefix", "C", ":\\", "Users", "\\dev", "\\repo"].concat(),
+        ["repo1", "D", ":/", "work/repo"].concat(),
         ["\\\\", "server", "\\share"].concat(),
         ["/ho", "me/dev/repo"].concat(),
         ["/Us", "ers/dev/repo"].concat(),
@@ -188,6 +200,19 @@ fn agent_block_leak_check_catches_planted_leaks_only() {
     for planted in &planted_leaks {
         assert!(leaks_local_path(planted), "missed: {planted}");
     }
+    assert!(!leaks_local_path(
+        "See https://example.test/docs/mcp-servers/ for current guidance"
+    ));
+    assert!(!leaks_local_path(
+        "See http://example.test/docs/ for guidance"
+    ));
+    let url_with_local_path = concat!(
+        "See https://example.test/files/",
+        "C",
+        ":/",
+        "Users/dev/repo",
+    );
+    assert!(leaks_local_path(url_with_local_path));
     assert!(!leaks_local_path("Riltra: cited/source, ratio 1/2"));
 }
 

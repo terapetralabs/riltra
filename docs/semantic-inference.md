@@ -100,6 +100,8 @@ build):
 }
 ```
 
+`source_repository` names where the pinned commit was published. CI fetches the same commit from a mirror; see [ONNX Runtime source provenance](onnxruntime-source.md).
+
 The manifest is an operator-reviewed local assertion. Its hash detects a file
 that differs from the reviewed manifest, but the unsigned manifest and binary
 do not prove build provenance or prove that telemetry was disabled. Build

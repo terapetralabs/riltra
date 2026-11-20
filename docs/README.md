@@ -20,6 +20,7 @@
 ## Optional and reference guides
 
 - [Optional local semantic inference](semantic-inference.md)
+- [ONNX Runtime source provenance](onnxruntime-source.md)
 - [Code binding compatibility](riltra-binding-compatibility.md)
 - [Recording a Why review](riltra-why-review-workflow.md)
 - [Changelog](../CHANGELOG.md)

@@ -18,7 +18,14 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_MANIFEST = ROOT / "crates/cli/src/model_manifest.json"
 INFERENCE_SOURCE = ROOT / "crates/cli/src/inference.rs"
-REPOSITORY_URL = "https://github.com/microsoft/onnxruntime"
+# Provenance identity of the pinned commit. It is written into the runtime
+# manifest and checked by crates/cli/src/inference.rs; the commit itself was
+# published by Microsoft. Read docs/onnxruntime-source.md before changing it.
+SOURCE_REPOSITORY = "https://github.com/microsoft/onnxruntime"
+# Where CI fetches that commit from. The upstream repository was removed from
+# GitHub around 2026-11-18; the mirror holds the same commit, and main() refuses
+# any checkout whose HEAD differs from the pin. See docs/onnxruntime-source.md.
+FETCH_REPOSITORY_URL = "https://github.com/terapetralabs/onnxruntime"
 MODEL_NAME = "intfloat/multilingual-e5-small"
 MODEL_REVISION = "ccc66d3bcd826f577e26b9a4072cc5fe3a7ad6a3"
 
@@ -224,7 +231,7 @@ def main():
     if ort_source.exists():
         fail("temporary ONNX Runtime source path already exists")
     subprocess.check_call(
-        ["git", "clone", "--filter=blob:none", "--no-checkout", REPOSITORY_URL, str(ort_source)]
+        ["git", "clone", "--filter=blob:none", "--no-checkout", FETCH_REPOSITORY_URL, str(ort_source)]
     )
     subprocess.check_call(["git", "-C", str(ort_source), "checkout", "--detach", source_commit])
     subprocess.check_call(
@@ -259,7 +266,7 @@ def main():
             "onnxruntime_BUILD_SHARED_LIB=ON",
             "onnxruntime_BUILD_UNIT_TESTS=OFF",
         ],
-        "source_repository": REPOSITORY_URL,
+        "source_repository": SOURCE_REPOSITORY,
         "source_commit": source_commit,
         "cpu_only": True,
         "api": api,

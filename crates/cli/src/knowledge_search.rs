@@ -2,9 +2,22 @@
 
 use std::path::Path;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use crate::{knowledge_store, registry::RepoEntry};
 
 pub(crate) const SEMANTIC_CANDIDATE_LIMIT: usize = 1000;
+
+#[cfg(test)]
+thread_local! {
+    static SEARCH_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_search_call_count() -> usize {
+    SEARCH_CALLS.with(Cell::get)
+}
 
 pub(crate) enum SearchOutcome {
     Lexical(knowledge_store::SearchPage),
@@ -37,6 +50,9 @@ pub(crate) fn search(
     semantic: bool,
     model_dir: Option<&Path>,
 ) -> Result<SearchOutcome, String> {
+    #[cfg(test)]
+    SEARCH_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     if !semantic {
         return knowledge_store::search(
             conn,

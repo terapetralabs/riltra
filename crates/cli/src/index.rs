@@ -837,7 +837,7 @@ fn fallback_full(
 
 /// Build the live source state for a stored snapshot: git/config fields
 /// from the row, content identity recomputed over its files rows.
-fn live_state_for(
+pub(crate) fn live_state_for(
     conn: &rusqlite::Connection,
     snapshot: &store::Snapshot,
 ) -> Result<crate::semantic::LiveState, String> {
@@ -1326,6 +1326,32 @@ pub struct EdgeAnchor {
     pub data_member: bool,
 }
 
+#[derive(Debug)]
+pub(crate) enum GraphQueryError {
+    Anchor(String),
+    Store(String),
+}
+
+impl GraphQueryError {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Anchor(message) | Self::Store(message) => message,
+        }
+    }
+}
+
+impl From<String> for GraphQueryError {
+    fn from(message: String) -> Self {
+        Self::Store(message)
+    }
+}
+
+impl From<&str> for GraphQueryError {
+    fn from(message: &str) -> Self {
+        Self::Store(message.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchorKind {
     Semantic,
@@ -1426,6 +1452,7 @@ fn snapshot_byte_offset(
 /// proves it, else the nearest enclosing syntax definition with explicit
 /// uncertainty. `line0`/`col0` are 0-based (M5 convention). Ambiguous or
 /// contradicted anchors fail loudly — never an arbitrary pick.
+#[allow(dead_code)] // Compatibility entry point; classified callers use the typed helper.
 pub fn resolve_edge_anchor(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
@@ -1449,6 +1476,30 @@ pub(crate) fn resolve_edge_anchor_with_source(
     symbol: Option<&str>,
     cached_source: Option<&[u8]>,
 ) -> Result<EdgeAnchor, String> {
+    resolve_edge_anchor_classified(
+        tx,
+        snapshot_id,
+        canon,
+        validated,
+        line0,
+        col0,
+        symbol,
+        cached_source,
+    )
+    .map_err(GraphQueryError::into_message)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_edge_anchor_classified(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    validated: &str,
+    line0: u32,
+    col0: u32,
+    symbol: Option<&str>,
+    cached_source: Option<&[u8]>,
+) -> Result<EdgeAnchor, GraphQueryError> {
     let facts = store::semantic_facts_at(tx, snapshot_id, validated)?;
     let source = cached_source.map(std::borrow::Cow::Borrowed).or_else(|| {
         crate::semantic::confined_read(canon, validated, crate::scan::MAX_FILE_BYTES)
@@ -1517,9 +1568,9 @@ pub(crate) fn resolve_edge_anchor_with_source(
     }
     if let Some(want) = symbol {
         if best.is_empty() || !best.iter().any(|f| f.symbol_uri.as_deref() == Some(want)) {
-            return Err(
+            return Err(GraphQueryError::Anchor(
                 "anchor unresolved: --symbol disagrees with the position identity".to_string(),
-            );
+            ));
         }
         best.retain(|f| f.symbol_uri.as_deref() == Some(want));
     }
@@ -1531,14 +1582,19 @@ pub(crate) fn resolve_edge_anchor_with_source(
                     uris.insert(uri.to_string());
                 }
                 None => {
-                    return Err("occurrence has no symbol identity: unresolved".to_string());
+                    return Err(GraphQueryError::Anchor(
+                        "occurrence has no symbol identity: unresolved".to_string(),
+                    ));
                 }
             }
         }
         if uris.len() > 1 {
             let mut list: Vec<&str> = uris.iter().map(String::as_str).collect();
             list.sort();
-            return Err(format!("ambiguous anchor identities: {}", list.join(", ")));
+            return Err(GraphQueryError::Anchor(format!(
+                "ambiguous anchor identities: {}",
+                list.join(", ")
+            )));
         }
         let uri = uris.into_iter().next().unwrap_or_default();
         let mut imports = BTreeSet::new();
@@ -1546,10 +1602,10 @@ pub(crate) fn resolve_edge_anchor_with_source(
             imports.insert(fact.import_id);
         }
         if imports.len() > 1 {
-            return Err(format!(
+            return Err(GraphQueryError::Anchor(format!(
                 "ambiguous anchor: same identity from {} imports, resolve with a rebuild",
                 imports.len()
-            ));
+            )));
         }
         let import_id = best[0].import_id;
         let local = uri == "local" || uri.starts_with("local ");
@@ -1590,10 +1646,14 @@ pub(crate) fn resolve_edge_anchor_with_source(
         });
     }
     if symbol.is_some() {
-        return Err("anchor unresolved: no semantic occurrence here".to_string());
+        return Err(GraphQueryError::Anchor(
+            "anchor unresolved: no semantic occurrence here".to_string(),
+        ));
     }
     // Syntax fallback: nearest enclosing definition by byte containment.
-    let source = source.ok_or("anchor unresolved: source unavailable")?;
+    let source = source.ok_or_else(|| {
+        GraphQueryError::Anchor("anchor unresolved: source unavailable".to_string())
+    })?;
     // Unsupported files are refused before parsing, so they never have an index
     // row. The reason names that refusal instead of a changed source.
     let kind = classify(Path::new(validated));
@@ -1603,18 +1663,19 @@ pub(crate) fn resolve_edge_anchor_with_source(
         FileKind::UnsupportedExtension => Some("files of this type are never parsed or indexed"),
     };
     if let Some(detail) = refusal {
-        return Err(format!(
+        return Err(GraphQueryError::Anchor(format!(
             "anchor unresolved: {}; {detail}",
             scan::unsupported_reason(&kind)
-        ));
+        )));
     }
     if !indexed.is_some_and(|(_, digest)| *digest == store::content_digest(&source)) {
-        return Err(
+        return Err(GraphQueryError::Anchor(
             "anchor unresolved: source-changed; reindex before syntax fallback".to_string(),
-        );
+        ));
     }
-    let off = byte_offset_of(&source, line0, col0)
-        .ok_or_else(|| "anchor unresolved: position outside the source".to_string())?;
+    let off = byte_offset_of(&source, line0, col0).ok_or_else(|| {
+        GraphQueryError::Anchor("anchor unresolved: position outside the source".to_string())
+    })?;
     let mut best_width = usize::MAX;
     let mut best: Vec<&store::SymbolRow> = Vec::new();
     let defs = store::symbols_at(tx, snapshot_id, validated)?;
@@ -1643,12 +1704,14 @@ pub(crate) fn resolve_edge_anchor_with_source(
         ));
     }
     if keys.len() > 1 {
-        return Err("ambiguous anchor: overlapping definitions".to_string());
+        return Err(GraphQueryError::Anchor(
+            "ambiguous anchor: overlapping definitions".to_string(),
+        ));
     }
     let def = best
         .into_iter()
         .next()
-        .ok_or_else(|| "no anchor here".to_string())?;
+        .ok_or_else(|| GraphQueryError::Anchor("no anchor here".to_string()))?;
     let data_member = def.kind == "field";
     let uncertainty = match (&def.name, data_member) {
         (Some(name), true) => format!(
@@ -2561,6 +2624,20 @@ pub(crate) fn edge_query_tx(
     pinned: impl FnOnce(),
     known_freshness: Option<(&str, &[String])>,
 ) -> Result<EdgeQueryOut, String> {
+    edge_query_tx_classified(tx, name, canon, validated, request, pinned, known_freshness)
+        .map_err(GraphQueryError::into_message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn edge_query_tx_classified(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    canon: &Path,
+    validated: &str,
+    request: &EdgeRequest<'_>,
+    pinned: impl FnOnce(),
+    known_freshness: Option<(&str, &[String])>,
+) -> Result<EdgeQueryOut, GraphQueryError> {
     let snapshot = store::latest_snapshot(tx)?.ok_or("no snapshot: index the repository first")?;
     pinned();
     store::require_graph_proof(tx, snapshot.id)?;
@@ -2577,7 +2654,7 @@ pub(crate) fn edge_query_tx(
     };
     let live = live_state_for(tx, &snapshot)?;
     let revision = crate::semantic::revision_string(&live);
-    let anchor = resolve_edge_anchor(
+    let anchor = resolve_edge_anchor_classified(
         tx,
         snapshot.id,
         canon,
@@ -2585,8 +2662,10 @@ pub(crate) fn edge_query_tx(
         request.anchor.line1 - 1,
         request.anchor.col1 - 1,
         request.symbol,
+        None,
     )?;
-    let endpoint = anchor_endpoint(&anchor).ok_or("anchor has no endpoint")?;
+    let endpoint = anchor_endpoint(&anchor)
+        .ok_or_else(|| GraphQueryError::Anchor("anchor has no endpoint".to_string()))?;
     let aliases = if request.direction == EdgeDir::Callees {
         crate::edges::syntax_aliases(tx, snapshot.id, &endpoint)?
     } else {
@@ -2997,6 +3076,25 @@ pub(crate) fn graph_query_tx(
     impact: bool,
     candidates: bool,
 ) -> Result<TraceQueryOut, String> {
+    graph_query_tx_classified(
+        tx, name, canon, rel, dest_path, request, started, pinned, impact, candidates,
+    )
+    .map_err(GraphQueryError::into_message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn graph_query_tx_classified(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    canon: &Path,
+    rel: &str,
+    dest_path: Option<&str>,
+    request: &TraceRequest<'_>,
+    started: Instant,
+    pinned: impl FnOnce(),
+    impact: bool,
+    candidates: bool,
+) -> Result<TraceQueryOut, GraphQueryError> {
     let snapshot = store::latest_snapshot(tx)?.ok_or("no snapshot: index the repository first")?;
     // `pinned` is a test seam that runs with the snapshot already pinned. Its
     // duration is not query work, so it must not consume the traversal budget.
@@ -3004,7 +3102,7 @@ pub(crate) fn graph_query_tx(
     pinned();
     let started = started + hook_started.elapsed();
     store::require_graph_proof(tx, snapshot.id)?;
-    let anchor = resolve_edge_anchor(
+    let anchor = resolve_edge_anchor_classified(
         tx,
         snapshot.id,
         canon,
@@ -3012,14 +3110,27 @@ pub(crate) fn graph_query_tx(
         request.source.line1 - 1,
         request.source.col1 - 1,
         request.symbol,
+        None,
     )?;
     let destination = request
         .destination
         .as_ref()
         .zip(dest_path)
-        .map(|(d, p)| resolve_edge_anchor(tx, snapshot.id, canon, p, d.line1 - 1, d.col1 - 1, None))
+        .map(|(d, p)| {
+            resolve_edge_anchor_classified(
+                tx,
+                snapshot.id,
+                canon,
+                p,
+                d.line1 - 1,
+                d.col1 - 1,
+                None,
+                None,
+            )
+        })
         .transpose()?;
-    let start = anchor_endpoint(&anchor).ok_or("source has no identity")?;
+    let start = anchor_endpoint(&anchor)
+        .ok_or_else(|| GraphQueryError::Anchor("source has no identity".to_string()))?;
     let target = destination.as_ref().and_then(anchor_endpoint);
     let (freshness, mut freshness_reasons) = evaluate_snapshot(tx, name, canon, &snapshot);
     freshness_reasons.sort();
@@ -3381,7 +3492,7 @@ pub(crate) struct FactSections {
     pub callees: EdgeQueryOut,
 }
 
-enum SpanOutcome {
+pub(crate) enum SpanOutcome {
     Span(usize, usize),
     Missing,
     Ambiguous(usize),
@@ -4279,6 +4390,30 @@ pub struct TargetQuery<'a> {
     pub kind: Option<&'a str>,
 }
 
+pub(crate) struct TargetCandidate {
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub kind: String,
+    pub reason: &'static str,
+}
+
+pub(crate) enum TargetOutcome {
+    One {
+        path: String,
+        line: u32,
+        col: u32,
+    },
+    NoIndex,
+    Unresolved {
+        status: &'static str,
+        total: usize,
+        total_exact: bool,
+        candidates: Vec<TargetCandidate>,
+        truncated: bool,
+    },
+}
+
 /// The position a by-name anchor resolves to, or the document that answers instead.
 pub enum TargetResolution {
     One { path: String, line: u32, col: u32 },
@@ -4293,9 +4428,34 @@ pub fn resolve_target(
     repo: &str,
     query: &TargetQuery,
 ) -> Result<TargetResolution, String> {
+    match resolve_target_data(conn, query)? {
+        TargetOutcome::One { path, line, col } => Ok(TargetResolution::One { path, line, col }),
+        TargetOutcome::NoIndex => Ok(TargetResolution::Doc(no_index_target_document(repo, query))),
+        TargetOutcome::Unresolved {
+            status,
+            total,
+            total_exact,
+            candidates,
+            truncated,
+        } => Ok(TargetResolution::Doc(target_document(
+            repo,
+            query,
+            status,
+            total,
+            total_exact,
+            &candidates,
+            truncated,
+        ))),
+    }
+}
+
+pub(crate) fn resolve_target_data(
+    conn: &rusqlite::Connection,
+    query: &TargetQuery<'_>,
+) -> Result<TargetOutcome, String> {
     let snapshot = match store::latest_snapshot(conn) {
         Ok(Some(snapshot)) => snapshot,
-        Ok(None) => return Ok(TargetResolution::Doc(no_index_target_document(repo, query))),
+        Ok(None) => return Ok(TargetOutcome::NoIndex),
         Err(_) => return Err("index database unreadable; rebuild with `index`".to_string()),
     };
     let (exact_total, exact) = store::exact_symbols(
@@ -4310,23 +4470,29 @@ pub fn resolve_target(
         let Some(hit) = exact.first() else {
             return Err("index database unreadable; rebuild with `index`".to_string());
         };
-        return Ok(TargetResolution::One {
+        return Ok(TargetOutcome::One {
             path: hit.path.clone(),
             line: hit.start_line,
             col: hit.start_col,
         });
     }
     if exact_total > 1 {
-        let doc = target_document(
-            repo,
-            query,
-            "ambiguous",
-            exact_total,
-            true,
-            &exact,
-            "exact-name",
-        );
-        return Ok(TargetResolution::Doc(doc));
+        return Ok(TargetOutcome::Unresolved {
+            status: "ambiguous",
+            total: exact_total,
+            total_exact: true,
+            candidates: exact
+                .into_iter()
+                .map(|hit| TargetCandidate {
+                    path: hit.path,
+                    line: hit.start_line,
+                    col: hit.start_col,
+                    kind: hit.kind,
+                    reason: "exact-name",
+                })
+                .collect(),
+            truncated: exact_total > TARGET_CANDIDATE_LIMIT,
+        });
     }
     // Substring matches never resolve. Only true substrings of the name count
     // (LIKE, not FTS token prefixes), and the filters run in SQL, so `total` is
@@ -4340,31 +4506,35 @@ pub fn resolve_target(
         TARGET_CANDIDATE_LIMIT,
     )?;
     if total == 0 {
-        return Ok(TargetResolution::Doc(target_document(
-            repo,
-            query,
-            "not-found",
-            0,
-            true,
-            &[],
-            "name-contains",
-        )));
+        return Ok(TargetOutcome::Unresolved {
+            status: "not-found",
+            total: 0,
+            total_exact: true,
+            candidates: Vec::new(),
+            truncated: false,
+        });
     }
-    let doc = target_document(
-        repo,
-        query,
-        "ambiguous",
+    Ok(TargetOutcome::Unresolved {
+        status: "ambiguous",
         total,
-        true,
-        &matches,
-        "name-contains",
-    );
-    Ok(TargetResolution::Doc(doc))
+        total_exact: true,
+        candidates: matches
+            .into_iter()
+            .map(|hit| TargetCandidate {
+                path: hit.path,
+                line: hit.start_line,
+                col: hit.start_col,
+                kind: hit.kind,
+                reason: "name-contains",
+            })
+            .collect(),
+        truncated: total > TARGET_CANDIDATE_LIMIT,
+    })
 }
 
 /// The answer when no code index exists yet: nothing to resolve, nothing created.
 pub fn no_index_target_document(repo: &str, query: &TargetQuery) -> String {
-    target_document(repo, query, "no-index", 0, true, &[], "name-contains")
+    target_document(repo, query, "no-index", 0, true, &[], false)
 }
 
 /// The non-resolved by-name document; key order is fixed for CLI and MCP alike.
@@ -4374,19 +4544,20 @@ fn target_document(
     status: &str,
     total: usize,
     total_exact: bool,
-    hits: &[store::Hit],
-    reason: &str,
+    hits: &[TargetCandidate],
+    truncated: bool,
 ) -> String {
     let candidates: Vec<String> = hits
         .iter()
         .take(TARGET_CANDIDATE_LIMIT)
         .map(|hit| {
             format!(
-                "{{\"path\":\"{}\",\"line\":{},\"col\":{},\"kind\":\"{}\",\"reason\":\"{reason}\"}}",
+                "{{\"path\":\"{}\",\"line\":{},\"col\":{},\"kind\":\"{}\",\"reason\":\"{}\"}}",
                 crate::json::escape(&hit.path),
-                hit.start_line,
-                hit.start_col,
-                crate::json::escape(&hit.kind)
+                hit.line,
+                hit.col,
+                crate::json::escape(&hit.kind),
+                hit.reason
             )
         })
         .collect();
@@ -4397,7 +4568,7 @@ fn target_document(
         json_optional(query.in_path),
         json_optional(query.kind),
         candidates.join(","),
-        total > TARGET_CANDIDATE_LIMIT
+        truncated
     )
 }
 
@@ -4410,24 +4581,18 @@ fn json_optional(value: Option<&str>) -> String {
 
 #[cfg(test)]
 mod target_tests {
-    use super::{no_index_target_document, target_document, TargetQuery, TARGET_CANDIDATE_LIMIT};
-    use crate::store::Hit;
+    use super::{
+        build, no_index_target_document, resolve_target, resolve_target_data, target_document,
+        TargetCandidate, TargetOutcome, TargetQuery, TargetResolution, TARGET_CANDIDATE_LIMIT,
+    };
 
-    fn hit(path: &str, kind: &str, line: u32) -> Hit {
-        Hit {
-            snapshot_id: 1,
+    fn hit(path: &str, kind: &str, line: u32) -> TargetCandidate {
+        TargetCandidate {
             path: path.to_string(),
             kind: kind.to_string(),
-            name: Some("save".to_string()),
-            start_line: line,
-            start_col: 1,
-            end_line: line,
-            end_col: 9,
-            byte_start: 0,
-            byte_end: 8,
-            provider: "syntax".to_string(),
-            grammar: "g".to_string(),
-            language: "python".to_string(),
+            line,
+            col: 1,
+            reason: "exact-name",
         }
     }
 
@@ -4439,7 +4604,7 @@ mod target_tests {
             kind: None,
         };
         let hits = [hit("d\"e.py", "method", 3)];
-        let doc = target_document("r", &query, "ambiguous", 2, false, &hits, "exact-name");
+        let doc = target_document("r", &query, "ambiguous", 2, false, &hits, false);
         assert_eq!(
             doc,
             "{\"schema_version\":1,\"repo\":\"r\",\"status\":\"ambiguous\",\"target\":\"a\\\"b\\\\c\",\"in\":\"d\\\"e.py\",\"kind\":null,\"total\":2,\"total_exact\":false,\"candidates\":[{\"path\":\"d\\\"e.py\",\"line\":3,\"col\":1,\"kind\":\"method\",\"reason\":\"exact-name\"}],\"truncated\":false}"
@@ -4453,8 +4618,9 @@ mod target_tests {
             in_path: None,
             kind: None,
         };
-        let hits: Vec<Hit> = (1..=21).map(|line| hit("a.py", "function", line)).collect();
-        let doc = target_document("r", &query, "ambiguous", 21, true, &hits, "exact-name");
+        let hits: Vec<TargetCandidate> =
+            (1..=21).map(|line| hit("a.py", "function", line)).collect();
+        let doc = target_document("r", &query, "ambiguous", 21, true, &hits, true);
         assert!(doc.contains("\"total\":21,\"total_exact\":true"), "{doc}");
         assert!(doc.ends_with("\"truncated\":true}"), "{doc}");
         assert_eq!(
@@ -4475,6 +4641,94 @@ mod target_tests {
             no_index_target_document("r", &query),
             "{\"schema_version\":1,\"repo\":\"r\",\"status\":\"no-index\",\"target\":\"save\",\"in\":null,\"kind\":\"method\",\"total\":0,\"total_exact\":true,\"candidates\":[],\"truncated\":false}"
         );
+    }
+
+    #[test]
+    fn target_data_preserves_legacy_resolution_documents() {
+        let home = crate::testutil::tmpdir("target-data-home");
+        let root = home.join("src");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("a.py"),
+            "def solo():\n    pass\n\ndef same():\n    pass\n\ndef rare():\n    pass\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("b.py"), "def same():\n    pass\n").unwrap();
+        for n in 0..21 {
+            std::fs::write(
+                root.join(format!("crowded_{n:02}.py")),
+                format!("def crowded():\n    return {n}\n"),
+            )
+            .unwrap();
+        }
+        build(&home, "r", &root, true).unwrap();
+        let db = crate::store::db_path(&home, "r");
+        let conn = match crate::store::open_read(&db) {
+            crate::store::IndexRead::Ready(conn) => conn,
+            other => panic!("index unavailable: {other:?}"),
+        };
+
+        let query = |target| TargetQuery {
+            target,
+            in_path: None,
+            kind: None,
+        };
+        assert!(matches!(
+            resolve_target(&conn, "r", &query("solo")).unwrap(),
+            TargetResolution::One { path, .. } if path == "a.py"
+        ));
+        assert!(matches!(
+            resolve_target_data(&conn, &query("solo")).unwrap(),
+            TargetOutcome::One { path, .. } if path == "a.py"
+        ));
+        let duplicate = resolve_target(&conn, "r", &query("same")).unwrap();
+        let TargetResolution::Doc(duplicate_doc) = duplicate else {
+            panic!("duplicate exact names must remain a document")
+        };
+        assert_eq!(duplicate_doc,
+            "{\"schema_version\":1,\"repo\":\"r\",\"status\":\"ambiguous\",\"target\":\"same\",\"in\":null,\"kind\":null,\"total\":2,\"total_exact\":true,\"candidates\":[{\"path\":\"a.py\",\"line\":4,\"col\":1,\"kind\":\"function\",\"reason\":\"exact-name\"},{\"path\":\"b.py\",\"line\":1,\"col\":1,\"kind\":\"function\",\"reason\":\"exact-name\"}],\"truncated\":false}"
+        );
+        assert!(matches!(
+            resolve_target_data(&conn, &query("same")).unwrap(),
+            TargetOutcome::Unresolved { status: "ambiguous", total: 2, total_exact: true, candidates, truncated: false }
+                if candidates.iter().map(|c| c.path.as_str()).collect::<Vec<_>>() == ["a.py", "b.py"]
+        ));
+
+        let missing = resolve_target(&conn, "r", &query("absent")).unwrap();
+        assert!(
+            matches!(missing, TargetResolution::Doc(ref doc) if doc == "{\"schema_version\":1,\"repo\":\"r\",\"status\":\"not-found\",\"target\":\"absent\",\"in\":null,\"kind\":null,\"total\":0,\"total_exact\":true,\"candidates\":[],\"truncated\":false}")
+        );
+        assert!(matches!(
+            resolve_target_data(&conn, &query("absent")).unwrap(),
+            TargetOutcome::Unresolved { status: "not-found", total: 0, total_exact: true, candidates, truncated: false } if candidates.is_empty()
+        ));
+        let substring = resolve_target(&conn, "r", &query("ar")).unwrap();
+        assert!(
+            matches!(substring, TargetResolution::Doc(ref doc) if doc.contains("\"status\":\"ambiguous\""))
+        );
+        assert!(matches!(
+            resolve_target_data(&conn, &query("ar")).unwrap(),
+            TargetOutcome::Unresolved { status: "ambiguous", total: 1, total_exact: true, candidates, truncated: false }
+                if candidates.len() == 1 && candidates[0].reason == "name-contains"
+        ));
+        let crowded = resolve_target(&conn, "r", &query("crowded")).unwrap();
+        assert!(
+            matches!(crowded, TargetResolution::Doc(ref doc) if doc.contains("\"total\":21") && doc.matches("\"reason\"").count() == TARGET_CANDIDATE_LIMIT && doc.ends_with("\"truncated\":true}"))
+        );
+        assert!(matches!(
+            resolve_target_data(&conn, &query("crowded")).unwrap(),
+            TargetOutcome::Unresolved { status: "ambiguous", total: 21, total_exact: true, candidates, truncated: true }
+                if candidates.len() == TARGET_CANDIDATE_LIMIT
+        ));
+        let empty = crate::store::open_memory().unwrap();
+        let no_index = resolve_target(&empty, "r", &query("solo")).unwrap();
+        assert!(
+            matches!(no_index, TargetResolution::Doc(ref doc) if doc == "{\"schema_version\":1,\"repo\":\"r\",\"status\":\"no-index\",\"target\":\"solo\",\"in\":null,\"kind\":null,\"total\":0,\"total_exact\":true,\"candidates\":[],\"truncated\":false}")
+        );
+        assert!(matches!(
+            resolve_target_data(&empty, &query("solo")).unwrap(),
+            TargetOutcome::NoIndex
+        ));
     }
 }
 

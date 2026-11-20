@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -25,6 +27,16 @@ const RUNTIME_SOURCE_COMMIT: &str = "2d924974ef147392ced8409d36bd6d2e7fcc8a74";
 const RUNTIME_SOURCE_REPOSITORY: &str = "https://github.com/microsoft/onnxruntime";
 const KNOWN_TELEMETRY_ENABLED_WINDOWS_RUNTIME_SHA256: &str =
     "b95efb2113b603bbbf3f191061c5516a871ed546893c820e4f3b7b6c358dbf2a";
+
+#[cfg(test)]
+thread_local! {
+    static VECTOR_MODEL_LOAD_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_vector_model_load_call_count() -> usize {
+    VECTOR_MODEL_LOAD_CALLS.with(Cell::get)
+}
 
 #[derive(Debug, Deserialize)]
 struct ModelManifest {
@@ -541,6 +553,8 @@ fn validate_embedding(vector: Vec<f32>) -> Result<Vec<f32>, InferenceError> {
 
 impl LocalEmbeddings {
     pub(crate) fn load_vector_model(model_dir: &Path) -> Result<Self, String> {
+        #[cfg(test)]
+        VECTOR_MODEL_LOAD_CALLS.with(|calls| calls.set(calls.get() + 1));
         Self::load(model_dir).map_err(|error| error.to_string())
     }
 

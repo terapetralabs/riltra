@@ -64,6 +64,7 @@ pub enum Command {
     Trace(TraceArgs),
     Impact(TraceArgs),
     Context(ContextArgs),
+    Packet(PacketArgs),
     Changes(ChangesArgs),
     ChangesRefused(String),
     Knowledge {
@@ -72,6 +73,15 @@ pub enum Command {
     Mcp,
     /// Print the agent instruction block (Markdown text, not JSON). No arguments.
     AgentBlock,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct PacketArgs {
+    pub repo: String,
+    pub anchors: String,
+    pub depth: Option<String>,
+    pub limit: Option<String>,
+    pub max_bytes: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -563,6 +573,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Ok(Command::Impact(parsed))
         }
         "context" => parse_context_args(args).map(Command::Context),
+        "packet" => parse_packet_args(args).map(Command::Packet),
         "changes" => parse_changes_args(args),
         "knowledge" => match args.get(1).map(String::as_str) {
             Some(sub) => parse_knowledge_op(sub, args).map(|op| Command::Knowledge { op }),
@@ -609,6 +620,31 @@ fn parse_changes_args(args: &[String]) -> Result<Command, String> {
         })),
         Err(message) => Ok(Command::ChangesRefused(message)),
     }
+}
+
+fn parse_packet_args(args: &[String]) -> Result<PacketArgs, String> {
+    let mut values = std::collections::BTreeMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let mut matched = false;
+        for flag in ["--repo", "--anchors", "--depth", "--limit", "--max-bytes"] {
+            if let Some(value) = take_value(args, &mut i, flag) {
+                values.insert(flag, value);
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Err(crate::usage());
+        }
+    }
+    Ok(PacketArgs {
+        repo: values.remove("--repo").ok_or_else(crate::usage)?,
+        anchors: values.remove("--anchors").ok_or_else(crate::usage)?,
+        depth: values.remove("--depth"),
+        limit: values.remove("--limit"),
+        max_bytes: values.remove("--max-bytes"),
+    })
 }
 
 fn parse_context_args(args: &[String]) -> Result<ContextArgs, String> {

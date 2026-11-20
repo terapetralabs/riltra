@@ -36,11 +36,121 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | How might A reach B? | `riltra_code_trace` | Optional `to` (`PATH:LINE:COL`) and `depth` (default 3, 1 to 6). Paths are plausible traversal, not execution. |
 | What might this change affect? | `riltra_code_impact` | Returns a coverage verdict; plausible, not execution. Treat `UNKNOWN` and `partial` as "not established". |
 | What code, impact and knowledge context is available here? | `riltra_context` | Combines a bounded graph with explicit bindings and optional relevance candidates; an unlinked match is not a proven relationship. |
+| What bounded context and source snippets are available for these selected anchors? | `riltra_code_packet` | Pass one to five explicit position or name selectors. Each keeps its own outcome; ambiguous names are not selected automatically. |
 | Is there a recorded decision for this code? | `riltra_knowledge_at_anchor` | Explicit bindings at a source position. An unlinked anchor stays unlinked. |
 | What does that record say, and what is it linked to? | `riltra_knowledge_show`, `riltra_knowledge_related`, `riltra_knowledge_search` | `show` reads one revision with its evidence freshness; `related` follows links one hop (`direction` is `outbound` or `inbound`); `search` matches literal text or an exact stored evidence path by default. Set `semantic: true` for optional local vector search; when unavailable it reports the FTS5 fallback reason. |
 | Definition or references from a language server | `riltra_code_semantic` | Opt-in; see below. |
 
 The MCP tools cannot write. Decisions and their bindings to code are recorded with the CLI (`riltra knowledge ...`, see the [README](../../README.md#available-today)).
+
+## Selected-anchor packets
+
+Use a packet after search or query has shown which anchors matter. Select one to
+five anchors explicitly. A position uses `path`, `line`, `col`, and optional
+`symbol`; a name uses `target` with optional `in` and `kind`. Duplicate
+selectors are allowed and keep separate outcomes, while identical source ranges
+share a snippet. Unknown fields, mixed selector forms, zero coordinates, an
+empty array, or more than five anchors are rejected. Packet input does not
+accept `query` or `semantic`; it does not run lexical or semantic knowledge
+retrieval.
+
+Start with a query, then select a result by its `name` and `path`. Query results
+do not contain a column, so use a name selector instead of guessing a position:
+
+```sh
+riltra query --repo myrepo --text "parse input"
+```
+
+Pass a selected result to `packet` to see whether the name resolves uniquely:
+
+```sh
+riltra packet --repo myrepo --anchors '[{"target":"parse","in":"src/parser.rs","kind":"function"}]'
+```
+
+The same single-quoted JSON literal works in PowerShell and POSIX shells. For a
+position from code search, use its repository-relative `path`, 1-based `line`,
+and byte-based `col`:
+
+```powershell
+riltra packet --repo myrepo --anchors '[{"path":"src/parser.rs","line":42,"col":5}]' --depth 3 --limit 20 --max-bytes 32768
+```
+
+The MCP tool `riltra_code_packet` takes `repo`, `anchors`, `depth`, `limit`,
+and `max_bytes` with the same defaults and selector forms. For example, its
+arguments can be:
+
+```json
+{"repo":"myrepo","anchors":[{"target":"parse","in":"src/parser.rs","kind":"function"}],"depth":3,"limit":20,"max_bytes":32768}
+```
+
+Defaults are `depth: 3` (1–6), `limit: 20` (1–100 per context), and
+`max_bytes: 32768` (8192–131072 JSON bytes). The `anchors` array has a normalized
+16 KiB cap in CLI and MCP; the CLI literal also has a raw 16 KiB cap. Snippets
+contain at most 40 LF-delimited lines and 4096 bytes; source reading is capped
+at 1 MiB per file. The byte budget applies to the serialized response, not
+tokens. If required response metadata alone does not fit, CLI exits 2 without
+partial output; MCP returns `invalid_input`.
+
+The top-level response has `schema_version: 1` and `operation: "packet"`. Each
+anchor has its own status (`resolved`, `ambiguous`, `not-found`, `no-index`, or
+`unavailable`). Exit 0 means that the document was formed, not that every
+selector resolved, that source is fresh, or that the packet establishes a
+change is safe. Invalid selectors/options use exit 2; unsafe paths and fatal
+repository or storage failures use exit 3. MCP returns the corresponding tool
+error for invalid input or fatal data failures.
+
+`available`, `truncated`, or `unavailable` describes source snippet delivery.
+On `source-changed`, reindex and choose the anchor again before relying on a new
+context. Packet knowledge lookup is limited to explicit bindings; each anchor
+reports its knowledge status and generation separately from the pinned code
+snapshot. It does not retrieve related knowledge by words or vector search.
+Packet is read-only in both transports: it does not create or migrate code or
+knowledge databases. A missing code index produces a `no-index` packet
+document.
+
+For more detail, `follow_up.context` names `riltra_context` and gives the
+resolved position and arguments for a new request. That request may see a newer
+snapshot, so check freshness again. `follow_up.source` is a nullable path/range
+descriptor for a client's native source reader; it may be null when no unique
+source range is available. Riltra adds no source-range tool. Use the context
+descriptor to make a new context request, or follow this sequence when the
+source descriptor is present:
+
+The same follow-up can be requested from the CLI. Copy the supplied `repo`,
+`path`, `line`, `col`, `depth`, and `limit`; include `--symbol` when the
+follow-up's symbol is non-null. For example:
+
+```sh
+riltra context --repo demo --path src/main.rs --line 42 --col 9 --depth 3 --limit 20 --max-bytes 131072
+```
+
+This is a new context query, not a continuation of the packet transaction. Its
+response reports a `snapshot` (`id`, `nonce`, and `revision`), plus
+`freshness.status` and `freshness.reasons`. Compare those and the returned
+`anchor` identity with the packet's snapshot and resolved anchor; if the
+identity changed or freshness is `stale` or `unknown`, reindex and select the
+anchor again before relying on the context.
+
+1. Validate that its path resolves inside the repository; reject traversal or
+   symlink escapes before reading.
+2. Read the complete current file as bytes into one buffer. Compute FNV-1a 64
+   over the entire buffer; its digest is 16 lowercase hexadecimal digits.
+   Compare it with the descriptor's digest. Do not hash only the indicated
+   range: the digest covers the complete indexed file.
+3. Only if the digest matches, take `requested_range.start .. requested_range.end`
+   from that same buffer. The range is half-open byte offsets. `returned_range`
+   describes what the packet snippet returned; it does not change the digest's
+   scope.
+
+If containment cannot be verified or the digest differs, do not use those byte
+offsets; if it differs (`source-changed`), reindex and resolve the anchor again.
+The `fnv1a-64` digest is a non-cryptographic change detector, not proof of
+identity, integrity, or safety.
+
+| Follow-up field | Next step |
+| --- | --- |
+| `follow_up.context` | Call `riltra_context` with its supplied arguments, then check that response's freshness. |
+| `follow_up.source` | When present, validate containment, hash the entire file, compare its digest, then slice the half-open `requested_range` from that same buffer. |
 
 **`riltra_code_semantic` is different.** It works only when an operator has set `RILTRA_LSP_SERVER` to the absolute path of a language server, and it starts that server as a local process. The server reads the project, may write its own cache, and may run project tools or reach the network, so this tool is not read-only. The references it returns are locations, not call edges, and an empty answer does not mean the symbol does not exist.
 
@@ -56,6 +166,8 @@ The MCP tools cannot write. Decisions and their bindings to code are recorded wi
 | `fresh`, `stale`, `unknown` | Whether the index, or the source a stored note points at, still matches the current source. | On `stale`, re-run `riltra index` and re-read the source. A stale binding is never re-bound automatically. |
 | `no-index` | No index exists for this repository. | Ask the user to run `riltra init` and `riltra index`. |
 | `schema_outdated` | A store was written by a different Riltra version and was left untouched. | Follow the migration instruction in the response; `riltra index` rebuilds the code index. |
+| `snippet-cap`, `source-changed`, `source-unavailable` | Packet snippet delivery was clipped or current source could not be used. | For `follow_up.source`, use the full-file hash procedure above; if it differs, reindex and select the anchor again. |
+| `invalid-source-range` | The pinned index range cannot be applied to the verified UTF-8 source bytes. | The snippet and follow-up source range are withheld; rebuild the index before relying on that anchor's source. |
 
 `impact` also lists the name-matched callers of the anchor and of each node it reaches through a proven edge, for every such node a name can be derived for. Each such path has `"basis": "candidate-name"` (every path has `basis` `proven`, `unproven` or `candidate-name`), and the `candidates` object reports `"followed": false`: candidates are not followed further, so the answer is not the full transitive impact. A node that cannot be seeded makes the answer incomplete and adds `candidate-pass-skipped` to `unresolved`. The verdict stays `UNKNOWN` while any candidate path exists, `--limit` also caps the candidates per node, and `total` is `null` unless every candidate was counted. `bridges` may list owner mappings for candidate callers too. A C/C++ data-member anchor takes no name candidates and stays complete for that reason, and a node reached by two proven routes gets its candidates on the first route only, with `completeness.covered`, `total` and `visits.edges` counting candidate paths and rows too (the status stays `partial` and the verdict `UNKNOWN`).
 
@@ -128,6 +240,7 @@ This repository is indexed by Riltra, a local code map reached through MCP tools
 - Start with `riltra_repo_status` for `<name>`. If the index is missing or stale, say so and ask the user to run `riltra index --repo <name>`; then continue from the source itself.
 - Find a definition by name with `riltra_code_search`, and use its `path`, `span.start_line` and `span.start_col` as the anchor (`path`, `line`, `col`) for `riltra_context`, `riltra_code_callers`, `riltra_code_callees`, `riltra_code_trace` and `riltra_code_impact`.
 - Find code by concept with `riltra_code_query` (free text). A query result has no column: pass its `name` as `target` and its `path` as `in` to those tools instead.
+- For several selected locations, call `riltra_code_packet` with one to five explicit anchors and inspect every status; exit 0 does not mean all resolved or that a change is safe. If source is `source-changed`, reindex and select the anchor again. Use `follow_up.context` with `riltra_context`. When `follow_up.source` is present, validate repository containment, read the full file, compare its 16-digit lowercase FNV-1a 64 digest, then extract the half-open `requested_range` from that same buffer. Do not hash only the range; FNV is a change detector, not cryptographic proof.
 - If a name does not resolve to exactly one definition (status `ambiguous` or `not-found`), do not pick a candidate for the user: read the candidates and the source, then anchor on the right definition with `path`, `line` and `col`.
 - Before editing a symbol, run `riltra_code_impact` on it.
 - After editing and before committing, run `riltra_code_changes` and read which definitions your change touched.

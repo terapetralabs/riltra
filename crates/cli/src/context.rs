@@ -34,6 +34,20 @@ pub struct ContextRequest<'a> {
     pub max_bytes: usize,
 }
 
+#[derive(Debug)]
+pub(crate) enum PinnedContextError {
+    Path(String),
+    Store(String),
+}
+
+impl PinnedContextError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Path(message) | Self::Store(message) => message,
+        }
+    }
+}
+
 pub struct ContextNode {
     pub endpoint: store::EdgeEndpoint,
     pub distance: Option<usize>,
@@ -142,6 +156,76 @@ pub fn query_conn(
     query_conn_inner(conn, home, entry, repo, root, request, || {}, || {})
 }
 
+/// Batch callers keep this transaction alive through the code-anchor lookup
+/// used for knowledge bindings; the knowledge database remains independent.
+#[cfg(test)]
+pub(crate) fn query_pinned(
+    tx: &rusqlite::Transaction<'_>,
+    home: &Path,
+    entry: &registry::RepoEntry,
+    repo: &str,
+    root: &Path,
+    request: &ContextRequest<'_>,
+) -> Result<ContextResult, PinnedContextError> {
+    query_pinned_with_hook(tx, home, entry, repo, root, request, |_| {})
+}
+
+pub(crate) fn query_pinned_with_hook(
+    tx: &rusqlite::Transaction<'_>,
+    home: &Path,
+    entry: &registry::RepoEntry,
+    repo: &str,
+    root: &Path,
+    request: &ContextRequest<'_>,
+    between_resolutions: impl FnOnce(&rusqlite::Transaction<'_>),
+) -> Result<ContextResult, PinnedContextError> {
+    let (canon, rel) = validate_request(root, request).map_err(PinnedContextError::Path)?;
+    let (trace, facts) = read_code_tx(tx, repo, &canon, &rel, request, || {}, between_resolutions)?;
+    let mut graph = context_nodes(&trace);
+    let omitted_nodes = graph.len().saturating_sub(request.limit);
+    graph.truncate(request.limit);
+    let knowledge = knowledge_context(tx, home, entry, root, &trace, request, || {});
+    Ok(ContextResult {
+        graph,
+        trace,
+        knowledge,
+        facts,
+        limit: request.limit,
+        omitted_nodes,
+        max_bytes: request.max_bytes,
+    })
+}
+
+fn read_code_tx(
+    tx: &rusqlite::Transaction<'_>,
+    repo: &str,
+    canon: &Path,
+    rel: &str,
+    request: &ContextRequest<'_>,
+    pinned: impl FnOnce(),
+    between_resolutions: impl FnOnce(&rusqlite::Transaction<'_>),
+) -> Result<(index::TraceQueryOut, index::FactSections), PinnedContextError> {
+    let trace = index::graph_query_tx_classified(
+        tx,
+        repo,
+        canon,
+        rel,
+        None,
+        &trace_request(request),
+        Instant::now(),
+        pinned,
+        true,
+        false,
+    )
+    .map_err(|error| match error {
+        index::GraphQueryError::Anchor(message) => PinnedContextError::Path(message),
+        index::GraphQueryError::Store(message) => PinnedContextError::Store(message),
+    })?;
+    between_resolutions(tx);
+    let facts = fact_sections(tx, repo, canon, rel, request, &trace)?;
+    Ok((trace, facts))
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn query_conn_with_hooks(
@@ -178,25 +262,12 @@ fn query_conn_inner(
     before_bindings: impl FnOnce(),
 ) -> Result<ContextResult, String> {
     let (canon, rel) = validate_request(root, request)?;
-    let trace_request = trace_request(request);
     // One read transaction: the graph and every fact section see the same
     // pinned snapshot. The knowledge store is a separate database, read after.
     let (trace, facts) = {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let trace = index::graph_query_tx(
-            &tx,
-            repo,
-            &canon,
-            &rel,
-            None,
-            &trace_request,
-            Instant::now(),
-            pinned,
-            true,
-            false,
-        )?;
-        let facts = fact_sections(&tx, repo, &canon, &rel, request, &trace)?;
-        (trace, facts)
+        read_code_tx(&tx, repo, &canon, &rel, request, pinned, |_| {})
+            .map_err(PinnedContextError::into_message)?
     };
     let mut graph = context_nodes(&trace);
     let omitted_nodes = graph.len().saturating_sub(request.limit);
@@ -222,11 +293,13 @@ fn fact_sections(
     rel: &str,
     request: &ContextRequest<'_>,
     trace: &index::TraceQueryOut,
-) -> Result<index::FactSections, String> {
+) -> Result<index::FactSections, PinnedContextError> {
     let snapshot_id = trace.snapshot.id;
-    let identity = index::fact_identity(tx, snapshot_id, canon, &trace.anchor)?;
-    let imports = index::import_facts(tx, snapshot_id, rel, request.limit)?;
-    let callees = index::edge_query_tx(
+    let identity = index::fact_identity(tx, snapshot_id, canon, &trace.anchor)
+        .map_err(PinnedContextError::Store)?;
+    let imports = index::import_facts(tx, snapshot_id, rel, request.limit)
+        .map_err(PinnedContextError::Store)?;
+    let callees = index::edge_query_tx_classified(
         tx,
         repo,
         canon,
@@ -245,7 +318,11 @@ fn fact_sections(
         },
         || {},
         Some((&trace.freshness, &trace.freshness_reasons)),
-    )?;
+    )
+    .map_err(|error| match error {
+        index::GraphQueryError::Anchor(message) => PinnedContextError::Path(message),
+        index::GraphQueryError::Store(message) => PinnedContextError::Store(message),
+    })?;
     let (containment, heritage) = match &identity {
         index::FactIdentity::Span {
             file_id,
@@ -263,7 +340,8 @@ fn fact_sections(
                 *file_id,
                 span,
                 request.limit,
-            )?;
+            )
+            .map_err(PinnedContextError::Store)?;
             let heritage = index::heritage_facts(
                 tx,
                 snapshot_id,
@@ -272,7 +350,8 @@ fn fact_sections(
                 name.as_deref(),
                 *is_type,
                 request.limit,
-            )?;
+            )
+            .map_err(PinnedContextError::Store)?;
             (Some(containment), Some(heritage))
         }
         index::FactIdentity::Unavailable { .. } => (None, None),
@@ -850,6 +929,73 @@ mod tests {
             limit: 20,
             max_bytes: DEFAULT_MAX_BYTES,
         }
+    }
+
+    #[test]
+    fn packet_pinned_context_keeps_code_identity_for_binding_lookup() {
+        let fixture = fixture("packet-code-pin");
+        let mut code = store::open_live(&store::db_path(&fixture.home, "r")).unwrap();
+        let tx = code.transaction().unwrap();
+        let snapshot = store::latest_snapshot(&tx).unwrap().unwrap();
+        let indexed_digest = store::file_identity(&tx, snapshot.id, "a.py")
+            .unwrap()
+            .unwrap()
+            .1;
+        let mut req = request();
+        req.query = None;
+        req.semantic = false;
+        let first =
+            query_pinned(&tx, &fixture.home, &fixture.entry, "r", &fixture.root, &req).unwrap();
+        std::fs::write(
+            fixture.root.join("a.py"),
+            b"def anchor():\n    changed_call()\n",
+        )
+        .unwrap();
+        index::build_full(&fixture.home, "r", &fixture.root).unwrap();
+        let pinned_anchor =
+            knowledge_binding::anchor_from_trace(&tx, &fixture.entry, &fixture.root, &first.trace)
+                .unwrap();
+        assert_eq!(pinned_anchor.source_digest, indexed_digest);
+        assert_eq!(pinned_anchor.snapshot_nonce, snapshot.nonce);
+        // A stale syntax anchor is refused by the existing context contract.
+        // Restore its bytes before testing another query on the old snapshot.
+        std::fs::write(
+            fixture.root.join("a.py"),
+            b"def anchor():\n    old_call()\n",
+        )
+        .unwrap();
+        let second =
+            query_pinned(&tx, &fixture.home, &fixture.entry, "r", &fixture.root, &req).unwrap();
+        for result in [first, second] {
+            assert_eq!(result.trace.snapshot.nonce, snapshot.nonce);
+            let anchor = knowledge_binding::anchor_from_trace(
+                &tx,
+                &fixture.entry,
+                &fixture.root,
+                &result.trace,
+            )
+            .unwrap();
+            assert_eq!(anchor.source_digest, indexed_digest);
+            assert_eq!(anchor.snapshot_nonce, snapshot.nonce);
+            assert_eq!(result.knowledge.bindings.bindings.len(), 1);
+            assert_eq!(
+                result.knowledge.bindings.bindings[0].snapshot_nonce,
+                snapshot.nonce
+            );
+            assert!(!result.knowledge.query.requested);
+            assert!(!result.knowledge.semantic.requested);
+            assert_eq!(result.knowledge.query.status, "not_requested");
+        }
+        let live = store::open_live(&store::db_path(&fixture.home, "r")).unwrap();
+        let latest = store::latest_snapshot(&live).unwrap().unwrap();
+        assert_ne!(latest.nonce, snapshot.nonce);
+        assert_ne!(
+            store::file_identity(&live, latest.id, "a.py")
+                .unwrap()
+                .unwrap()
+                .1,
+            indexed_digest
+        );
     }
 
     #[test]

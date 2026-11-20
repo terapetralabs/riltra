@@ -33,6 +33,9 @@ change is safe. See [capabilities and limits](docs/guide/capabilities.md).
 - A durable SQLite code index with symbol search and explicit freshness.
 - A bounded relationship graph and revisioned knowledge store with explicit
   source bindings.
+- Selected-anchor context packets with bounded source snippets; choose the
+  anchors explicitly and verify source before relying on it. See the [agent
+  setup guide](docs/guide/agent-setup.md#selected-anchor-packets).
 - Optional SCIP import and operator-configured language-server queries.
 - `riltra agent-block` prints a Markdown instruction block for your agent's
   instruction file. It is plain text, not JSON, and it writes nothing.
@@ -76,12 +79,13 @@ Run `riltra --help` for the full command list. Git is needed for repository
 fingerprints; without it, Riltra reports that status as unavailable instead of
 guessing.
 
-## MCP server (fifteen read-only tools, one provider-backed tool)
+## MCP server (sixteen read-only tools, one provider-backed tool)
 
 <a id="mcp-server-twelve-read-only-tools-one-provider-backed-tool"></a>
+<a id="mcp-server-sixteen-read-only-tools-one-provider-backed-tool"></a>
 
-Run `riltra mcp` to start a local stdio MCP server with sixteen tools: fifteen
-read-only tools for repository, code, and knowledge queries, plus
+Run `riltra mcp` to start a local stdio MCP server with seventeen tools: sixteen
+read-only tools for repository, code, knowledge, and selected-anchor packets, plus
 `riltra_code_semantic`, which starts the language server configured by the
 operator. That server may write its own cache, run project tools, or access the
 network. Riltra's MCP handlers do not create, migrate, or replace a database.

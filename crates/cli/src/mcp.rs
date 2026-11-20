@@ -30,7 +30,7 @@ use crate::knowledge_store_absent;
 use crate::lexical;
 use crate::{
     context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_search,
-    knowledge_store, paths, registry, response, store,
+    knowledge_store, packet, paths, registry, response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -198,6 +198,64 @@ struct ContextInput {
     limit: Option<usize>,
     /// Maximum final JSON bytes (default 32768, range 8192-131072).
     max_bytes: Option<usize>,
+}
+
+// Keep schema validation inside the handler so refusals have the packet error category.
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct PacketInput(serde_json::Value);
+
+impl JsonSchema for PacketInput {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PacketInput".into()
+    }
+    fn json_schema(generator: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+        PacketParams::json_schema(generator)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct PacketParams {
+    /// Registered repository name.
+    repo: String,
+    /// One to five explicitly selected position or name anchors.
+    anchors: Vec<PacketSelector>,
+    /// Maximum graph depth (default 3, range 1-6).
+    depth: Option<usize>,
+    /// Maximum context nodes per anchor (default 20, range 1-100).
+    limit: Option<usize>,
+    /// Maximum UTF-8 JSON bytes (default 32768, range 8192-131072).
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars", inline)]
+struct PacketSelector {
+    path: Option<String>,
+    line: Option<u32>,
+    col: Option<u32>,
+    symbol: Option<String>,
+    target: Option<String>,
+    #[serde(rename = "in")]
+    in_path: Option<String>,
+    kind: Option<String>,
+}
+
+impl From<PacketSelector> for packet::AnchorInput {
+    fn from(value: PacketSelector) -> Self {
+        Self {
+            path: value.path,
+            line: value.line,
+            col: value.col,
+            symbol: value.symbol,
+            target: value.target,
+            in_path: value.in_path,
+            kind: value.kind,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -486,6 +544,23 @@ impl RiltraMcp {
     )]
     async fn riltra_context(&self, Parameters(input): Parameters<ContextInput>) -> CallToolResult {
         blocking(move || context_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_code_packet",
+        description = "Read bounded source snippets and graph context for one to five explicitly selected code anchors. Source snippets are capped and freshness evidence is retained. When to call: after choosing anchors with search or query.",
+        annotations(
+            title = "Read selected code context",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_packet(
+        &self,
+        Parameters(input): Parameters<PacketInput>,
+    ) -> CallToolResult {
+        blocking(move || packet_doc(input)).await
     }
 
     #[tool(
@@ -1221,7 +1296,12 @@ fn missing_index() -> CallToolResult {
 #[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn repo_root(repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
     let home = paths::config_dir();
-    let reg = match registry::load(&paths::registry_path()) {
+    repo_root_at(&home, repo)
+}
+
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
+fn repo_root_at(home: &Path, repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
+    let reg = match registry::load(&home.join("registry.json")) {
         Ok(reg) => reg,
         Err(e) => return Err(tool_error("store_error", &e)),
     };
@@ -1250,7 +1330,7 @@ fn repo_root(repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
             &format!("registered root moved or retargeted (record '{recorded}')"),
         ));
     }
-    Ok((home, canon))
+    Ok((home.to_path_buf(), canon))
 }
 
 /// Classify a graph-query refusal by its CLI text (design gate §3): missing
@@ -1511,6 +1591,75 @@ fn impact_doc(input: &ImpactInput) -> CallToolResult {
             include_tests: input.include_tests,
         },
     )
+}
+
+fn packet_query_error(error: packet::PacketQueryError) -> CallToolResult {
+    match error {
+        packet::PacketQueryError::Path(message) => tool_error("invalid_input", &message),
+        packet::PacketQueryError::Store(message) => tool_error("store_error", &message),
+    }
+}
+
+fn packet_doc(input: PacketInput) -> CallToolResult {
+    packet_doc_with_home(input, &paths::config_dir())
+}
+
+fn packet_doc_with_home(input: PacketInput, config_home: &Path) -> CallToolResult {
+    let input: PacketParams = match serde_json::from_value(input.0) {
+        Ok(input) => input,
+        Err(e) => return tool_error("invalid_input", &format!("invalid packet input: {e}")),
+    };
+    let request = packet::PacketRequest {
+        anchors: input.anchors.into_iter().map(Into::into).collect(),
+        depth: input.depth.unwrap_or(context::DEFAULT_DEPTH),
+        limit: input.limit.unwrap_or(context::DEFAULT_LIMIT),
+        max_bytes: input.max_bytes.unwrap_or(context::DEFAULT_MAX_BYTES),
+    };
+    if let Err(e) = packet::validate_request(&request) {
+        return tool_error("invalid_input", &e);
+    }
+    let (home, root) = match repo_root_at(config_home, &input.repo) {
+        Ok(value) => value,
+        Err(e) => return e,
+    };
+    if let Err(e) = packet::validate_paths(&root, &request) {
+        return tool_error("invalid_input", &e);
+    }
+    let entry = registry::RepoEntry {
+        name: input.repo.clone(),
+        root: root.to_string_lossy().into_owned(),
+        added_unix: 0,
+    };
+    let result = match store::open_read(&store::db_path(&home, &input.repo)) {
+        store::IndexRead::Missing => Ok(packet::no_index(&input.repo, &request)),
+        store::IndexRead::Outdated(v) => {
+            return tool_error("schema_outdated", &outdated_message(&input.repo, v))
+        }
+        store::IndexRead::Ahead(v) => {
+            return tool_error(
+                "schema_ahead",
+                &format!(
+                    "database schema v{v} is newer than supported v{}",
+                    store::SCHEMA_VERSION
+                ),
+            )
+        }
+        store::IndexRead::Error(e) => return tool_error("store_error", &e),
+        store::IndexRead::Ready(mut conn) => {
+            packet::query_conn_classified(&mut conn, &home, &entry, &input.repo, &root, &request)
+        }
+    };
+    let result = match result {
+        Ok(value) => value,
+        Err(e) => return packet_query_error(e),
+    };
+    match response::packet_query_json(&result) {
+        Ok(value) => exact_doc(&value),
+        Err(e) if e == "packet response metadata exceeds max_bytes" => {
+            tool_error("invalid_input", &e)
+        }
+        Err(e) => tool_error("store_error", &e),
+    }
 }
 
 fn context_doc(input: &ContextInput) -> CallToolResult {
@@ -2109,6 +2258,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_code_callers",
                 "riltra_code_changes",
                 "riltra_code_impact",
+                "riltra_code_packet",
                 "riltra_code_query",
                 "riltra_code_search",
                 "riltra_code_semantic",
@@ -2203,6 +2353,311 @@ pub(crate) fn run() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{doc, sorted_tool_definitions, structured_doc, tool_error};
+
+    #[test]
+    fn packet_late_confinement_and_store_errors_keep_distinct_kinds() {
+        let home = crate::testutil::tmpdir("mcp-packet-late-path-home");
+        let root = crate::testutil::tmpdir("mcp-packet-late-path-root")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("a.py"), "def alpha_first():\n    return 1\n").unwrap();
+        std::fs::write(root.join("b.py"), "def beta_second():\n    return 2\n").unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+        let entry = crate::registry::RepoEntry {
+            name: "r".to_string(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+        let request = crate::packet::PacketRequest {
+            anchors: crate::packet::parse_anchors(
+                r#"[{"target":"alpha_first"},{"target":"beta_second"}]"#,
+            )
+            .unwrap(),
+            depth: crate::context::DEFAULT_DEPTH,
+            limit: crate::context::DEFAULT_LIMIT,
+            max_bytes: crate::context::DEFAULT_MAX_BYTES,
+        };
+
+        // The first target resolves and is read while the root is safe. Move
+        // the root between anchors; the second confined read must stay typed.
+        let parked = root.with_file_name("mcp-packet-late-path-parked");
+        let mut conn = crate::store::open_live(&crate::store::db_path(&home, "r")).unwrap();
+        let result = crate::packet::query_conn_classified_with_hook(
+            &mut conn,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &request,
+            |anchor| {
+                if anchor == 0 {
+                    std::fs::rename(&root, &parked).unwrap();
+                }
+            },
+        );
+        std::fs::rename(&parked, &root).unwrap();
+        let path_error = match result {
+            Err(crate::packet::PacketQueryError::Path(message)) => message,
+            Err(crate::packet::PacketQueryError::Store(message)) => {
+                panic!("late confinement was classified as store error: {message}")
+            }
+            Ok(_) => panic!("late confinement unexpectedly returned a packet"),
+        };
+        let path_result =
+            super::packet_query_error(crate::packet::PacketQueryError::Path(path_error));
+        let path_doc: serde_json::Value =
+            serde_json::from_str(&path_result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(path_doc["kind"], "invalid_input", "{path_doc}");
+
+        // A database read failure remains a store error even if its diagnostic
+        // happens to contain wording that resembles a path refusal.
+        let mut broken = crate::store::open_live(&crate::store::db_path(&home, "r")).unwrap();
+        broken.execute("DROP TABLE semantic_facts", []).unwrap();
+        let store_error =
+            crate::packet::query_conn_classified(&mut broken, &home, &entry, "r", &root, &request);
+        let store_error = match store_error {
+            Err(error @ crate::packet::PacketQueryError::Store(_)) => error,
+            Err(crate::packet::PacketQueryError::Path(message)) => {
+                panic!("database failure was classified as path error: {message}")
+            }
+            Ok(_) => panic!("query unexpectedly succeeded after its snapshot table was dropped"),
+        };
+        let mapped = super::packet_query_error(store_error);
+        let store_doc: serde_json::Value =
+            serde_json::from_str(&mapped.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(store_doc["kind"], "store_error", "{store_doc}");
+
+        let path_shaped_store_error =
+            super::packet_query_error(crate::packet::PacketQueryError::Store(
+                "document path escapes repository: simulated storage diagnostic".to_string(),
+            ));
+        let path_shaped_doc: serde_json::Value =
+            serde_json::from_str(&path_shaped_store_error.content[0].as_text().unwrap().text)
+                .unwrap();
+        assert_eq!(path_shaped_doc["kind"], "store_error", "{path_shaped_doc}");
+    }
+
+    #[test]
+    fn packet_path_errors_are_invalid_input_without_message_matching() {
+        let result = super::packet_query_error(crate::packet::PacketQueryError::Path(
+            "repository root unavailable: test".to_string(),
+        ));
+        let document: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(document["kind"], "invalid_input", "{document}");
+    }
+
+    #[test]
+    fn packet_missing_unindexed_position_is_invalid_input() {
+        let home = crate::testutil::tmpdir("mcp-packet-missing-position-home");
+        let root = crate::testutil::tmpdir("mcp-packet-missing-position-root")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("indexed.py"), "def present():\n    return 1\n").unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let mut registry = crate::registry::Registry {
+            version: 1,
+            repos: Vec::new(),
+        };
+        crate::registry::add(&mut registry, "r", &root_text, 0).unwrap();
+        crate::registry::save(&home.join("registry.json"), &registry).unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+        let missing = root.join("never-indexed.py");
+        assert!(!missing.exists());
+
+        let result = super::packet_doc_with_home(
+            super::PacketInput(serde_json::json!({
+                "repo":"r",
+                "anchors":[{"path":"never-indexed.py", "line":1, "col":1}]
+            })),
+            &home,
+        );
+        let document: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(document["kind"], "invalid_input", "{document}");
+    }
+
+    #[test]
+    fn packet_anchor_resolution_refusals_are_invalid_input() {
+        let home = crate::testutil::tmpdir("mcp-packet-anchor-refusal-home");
+        let root = crate::testutil::tmpdir("mcp-packet-anchor-refusal-root")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("a.py"), "def present():\n    return 1\n").unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let mut registry = crate::registry::Registry {
+            version: 1,
+            repos: Vec::new(),
+        };
+        crate::registry::add(&mut registry, "r", &root_text, 0).unwrap();
+        crate::registry::save(&home.join("registry.json"), &registry).unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+
+        for anchor in [
+            serde_json::json!({"path":"a.py", "line":9999, "col":1}),
+            serde_json::json!({"path":"a.py", "line":1, "col":5, "symbol":"not-present"}),
+        ] {
+            let result = super::packet_doc_with_home(
+                super::PacketInput(serde_json::json!({"repo":"r", "anchors":[anchor]})),
+                &home,
+            );
+            let document: serde_json::Value =
+                serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+            assert_eq!(document["kind"], "invalid_input", "{document}");
+        }
+    }
+
+    #[test]
+    fn packet_second_resolution_preserves_anchor_and_store_errors() {
+        let home = crate::testutil::tmpdir("mcp-packet-second-resolution-home");
+        let root = crate::testutil::tmpdir("mcp-packet-second-resolution-root")
+            .canonicalize()
+            .unwrap();
+        let source = b"def present():\n    return 1\n";
+        std::fs::write(root.join("a.py"), source).unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let mut registry = crate::registry::Registry {
+            version: 1,
+            repos: Vec::new(),
+        };
+        crate::registry::add(&mut registry, "r", &root_text, 0).unwrap();
+        crate::registry::save(&home.join("registry.json"), &registry).unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+        let entry = crate::registry::RepoEntry {
+            name: "r".to_string(),
+            root: root_text,
+            added_unix: 0,
+        };
+        let request = crate::packet::PacketRequest {
+            anchors: crate::packet::parse_anchors(r#"[{"path":"a.py","line":1,"col":5}]"#).unwrap(),
+            depth: crate::context::DEFAULT_DEPTH,
+            limit: crate::context::DEFAULT_LIMIT,
+            max_bytes: crate::context::DEFAULT_MAX_BYTES,
+        };
+
+        let mut conn = crate::store::open_live(&crate::store::db_path(&home, "r")).unwrap();
+        let changed = crate::packet::query_conn_classified_with_hooks(
+            &mut conn,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &request,
+            |_| {},
+            |_, _| {
+                std::fs::write(root.join("a.py"), b"def changed():\n    return 2\n").unwrap();
+            },
+        );
+        let changed = match changed {
+            Err(error) => super::packet_query_error(error),
+            Ok(_) => panic!("second resolution unexpectedly accepted changed source"),
+        };
+        std::fs::write(root.join("a.py"), source).unwrap();
+        let changed_doc: serde_json::Value =
+            serde_json::from_str(&changed.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(changed_doc["kind"], "invalid_input", "{changed_doc}");
+
+        let removed = crate::packet::query_conn_classified_with_hooks(
+            &mut conn,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &request,
+            |_| {},
+            |_, _| std::fs::remove_file(root.join("a.py")).unwrap(),
+        );
+        let removed = match removed {
+            Err(error) => super::packet_query_error(error),
+            Ok(_) => panic!("second resolution unexpectedly accepted missing source"),
+        };
+        std::fs::write(root.join("a.py"), source).unwrap();
+        let removed_doc: serde_json::Value =
+            serde_json::from_str(&removed.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(removed_doc["kind"], "invalid_input", "{removed_doc}");
+
+        let database = crate::packet::query_conn_classified_with_hooks(
+            &mut conn,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &request,
+            |_| {},
+            |_, tx| {
+                tx.execute("DROP TABLE semantic_facts", []).unwrap();
+            },
+        );
+        let database = match database {
+            Err(error) => super::packet_query_error(error),
+            Ok(_) => panic!("second resolution unexpectedly succeeded after DB failure"),
+        };
+        let database_doc: serde_json::Value =
+            serde_json::from_str(&database.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(database_doc["kind"], "store_error", "{database_doc}");
+    }
+
+    #[test]
+    fn packet_resolved_with_knowledge_store_skips_retrieval_and_model_loader() {
+        let home = crate::testutil::tmpdir("mcp-packet-no-retrieval-home");
+        let root = crate::testutil::tmpdir("mcp-packet-no-retrieval-root")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("a.py"), "def packet_target():\n    return 1\n").unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let mut registry = crate::registry::Registry {
+            version: 1,
+            repos: Vec::new(),
+        };
+        crate::registry::add(&mut registry, "r", &root_text, 0).unwrap();
+        crate::registry::save(&home.join("registry.json"), &registry).unwrap();
+        crate::index::build_full(&home, "r", &root).unwrap();
+        let entry = crate::registry::RepoEntry {
+            name: "r".to_string(),
+            root: root_text,
+            added_unix: 0,
+        };
+        let mut knowledge = crate::knowledge_store::open_knowledge_at(&home, &entry, true).unwrap();
+        crate::knowledge_store::create_record(
+            &mut knowledge,
+            &crate::knowledge::NewRecord {
+                id: "read-rule".to_string(),
+                kind: "decision".to_string(),
+                title: "Read rule".to_string(),
+                body: "Packet source reads stay local.".to_string(),
+                status: "active".to_string(),
+                author: "test".to_string(),
+            },
+        )
+        .unwrap();
+        drop(knowledge);
+        assert!(crate::knowledge_store::knowledge_db_path(&home, "r").is_file());
+
+        let searches_before = crate::knowledge_search::test_search_call_count();
+        #[cfg(feature = "semantic-knowledge")]
+        let model_loads_before = crate::inference::test_vector_model_load_call_count();
+        let result = super::packet_doc_with_home(
+            super::PacketInput(serde_json::json!({
+                "repo":"r",
+                "anchors":[{"target":"packet_target", "kind":"function"}]
+            })),
+            &home,
+        );
+        let document: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(document["anchors"][0]["status"], "resolved", "{document}");
+        assert_eq!(
+            crate::knowledge_search::test_search_call_count(),
+            searches_before,
+            "packet must not enter lexical or semantic knowledge search"
+        );
+        #[cfg(feature = "semantic-knowledge")]
+        assert_eq!(
+            crate::inference::test_vector_model_load_call_count(),
+            model_loads_before,
+            "packet must not load a local vector model"
+        );
+    }
 
     fn assert_schema_keys_are_sorted(value: &serde_json::Value) {
         match value {

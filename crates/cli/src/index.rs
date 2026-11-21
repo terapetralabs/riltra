@@ -191,6 +191,14 @@ fn prepare_staging(
         }
     };
     let conn = store::open_live(&staging)?;
+    // shortcut: a debug-only hold so tests can kill a watcher mid-rebuild; replace it with an injected hook if a test seam for builds is ever added.
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("RILTRA_TEST_HOLD_AFTER_STAGING_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms.min(60_000)));
+    }
     Ok((
         conn,
         db,

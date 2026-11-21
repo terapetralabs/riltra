@@ -72,8 +72,6 @@ pub fn lock_path(home: &Path, repo: &str) -> PathBuf {
 }
 
 /// Watcher lock, held for the whole life of one `riltra watch` process.
-// shortcut: no caller until the watch command lands (Task 2); drop this allow then.
-#[allow(dead_code)]
 pub fn watch_lock_path(home: &Path, repo: &str) -> PathBuf {
     home.join("index").join(format!("{repo}.watch.lock"))
 }

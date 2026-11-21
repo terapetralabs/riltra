@@ -5,13 +5,16 @@
 //! followed, `.git` skipped), `index::config_fingerprint` and the read-only
 //! `git::head_branch`, and it writes nothing.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::git;
 use crate::index::{self, Freshness, IndexSummary};
 use crate::scan::{self, PlanAction};
+use crate::{json, response};
 
 /// What a poll compares. `files` maps a repository-relative path to
 /// (length, mtime in nanoseconds since the epoch, 0 when the platform reports none).
@@ -133,6 +136,41 @@ pub enum Event {
     Failed { reason: String },
     Busy,
     Stopped { reason: String },
+}
+
+/// One event as a single-line JSON object with a fixed key order (C10). `built`
+/// nests the index summary verbatim, as `response::index_summary_json` renders it.
+pub fn event_json(repo: &str, root: &str, e: &Event) -> String {
+    let name = json::escape(repo);
+    match e {
+        Event::Started { status } => format!(
+            "{{\"event\":\"started\",\"repo\":\"{name}\",\"status\":\"{}\"}}",
+            json::escape(status)
+        ),
+        Event::Built(summary) => format!(
+            "{{\"event\":\"built\",\"index\":{}}}",
+            response::index_summary_json(repo, root, summary)
+        ),
+        Event::Failed { reason } => format!(
+            "{{\"event\":\"failed\",\"repo\":\"{name}\",\"reason\":\"{}\"}}",
+            json::escape(reason)
+        ),
+        Event::Busy => format!("{{\"event\":\"busy\",\"repo\":\"{name}\"}}"),
+        Event::Stopped { reason } => format!(
+            "{{\"event\":\"stopped\",\"repo\":\"{name}\",\"reason\":\"{}\"}}",
+            json::escape(reason)
+        ),
+    }
+}
+
+/// Writes one event line, then a newline, then flushes. A failed write is
+/// returned as an error; it never panics (C10).
+pub fn write_event(out: &mut dyn Write, line: &str) -> Result<(), String> {
+    let written = out
+        .write_all(line.as_bytes())
+        .and_then(|()| out.write_all(b"\n"))
+        .and_then(|()| out.flush());
+    written.map_err(|e| format!("cannot write watch event: {e}"))
 }
 
 /// Everything the loop reads from outside, so a test can script it.
@@ -262,6 +300,87 @@ pub fn run(
         // A change that landed during the build differs from `before`, so the next poll sets pending.
         last = before;
     }
+}
+
+/// Stops `inner` once an event could not be written, so a closed stdout ends the watch.
+struct Guarded<'a> {
+    inner: &'a mut dyn WatchDeps,
+    failed: &'a Cell<bool>,
+}
+
+impl WatchDeps for Guarded<'_> {
+    fn now_ms(&mut self) -> u64 {
+        self.inner.now_ms()
+    }
+
+    fn sleep(&mut self, ms: u64) {
+        self.inner.sleep(ms);
+    }
+
+    fn signature(&mut self) -> Result<Signature, String> {
+        self.inner.signature()
+    }
+
+    fn build(&mut self) -> Result<IndexSummary, String> {
+        self.inner.build()
+    }
+
+    fn freshness(&mut self) -> Freshness {
+        self.inner.freshness()
+    }
+
+    fn should_stop(&mut self) -> bool {
+        self.failed.get() || self.inner.should_stop()
+    }
+}
+
+/// Runs the loop with `deps`, writes every event to `out`, and returns the exit
+/// code (C10): 0 when the loop ends normally, 3 when an event cannot be written
+/// or `run` fails. A `run` failure is reported as a final `stopped` event.
+pub fn drive_events(
+    opts: &Options,
+    deps: &mut dyn WatchDeps,
+    repo: &str,
+    root: &str,
+    out: &mut dyn Write,
+    err: &mut String,
+) -> i32 {
+    let failed = Cell::new(false);
+    let mut write_error: Option<String> = None;
+    let result = {
+        let mut guarded = Guarded {
+            inner: deps,
+            failed: &failed,
+        };
+        let mut emit = |event: &Event| {
+            if write_error.is_some() {
+                return;
+            }
+            if let Err(msg) = write_event(&mut *out, &event_json(repo, root, event)) {
+                failed.set(true);
+                write_error = Some(msg);
+            }
+        };
+        run(opts, &mut guarded, &mut emit)
+    };
+    let mut code = 0;
+    if let Err(reason) = &result {
+        code = 3;
+        if write_error.is_none() {
+            let stopped = Event::Stopped {
+                reason: reason.clone(),
+            };
+            if let Err(msg) = write_event(out, &event_json(repo, root, &stopped)) {
+                err.push_str(&format!("error: {msg}\n"));
+            }
+        }
+        err.push_str(&format!("error: {reason}\n"));
+    }
+    if let Some(msg) = &write_error {
+        code = 3;
+        err.push_str(&format!("error: {msg}\n"));
+    }
+    code
 }
 
 #[cfg(test)]
@@ -497,9 +616,10 @@ mod tests {
 
 #[cfg(test)]
 mod loop_tests {
-    use super::{run, Event, Options, Signature, WatchDeps};
+    use super::{drive_events, event_json, run, write_event, Event, Options, Signature, WatchDeps};
     use crate::index::{Freshness, IndexSummary, PhaseMs};
     use std::collections::{BTreeMap, VecDeque};
+    use std::io::{self, Write};
 
     /// Scripted clock and signatures. The clock moves only in `sleep`.
     struct Fake {
@@ -811,5 +931,129 @@ mod loop_tests {
         let (result, names) = drive(&Options::default(), &mut fake);
         assert_eq!(result, Err("gone".to_string()));
         assert_eq!(names, vec!["started"]);
+    }
+
+    #[test]
+    fn event_json_shapes() {
+        let started = Event::Started {
+            status: "stale".to_string(),
+        };
+        assert_eq!(
+            event_json("r", "/root", &started),
+            r#"{"event":"started","repo":"r","status":"stale"}"#
+        );
+        assert_eq!(
+            event_json("r", "/root", &Event::Busy),
+            r#"{"event":"busy","repo":"r"}"#
+        );
+        let failed = Event::Failed {
+            reason: "a\"b".to_string(),
+        };
+        assert_eq!(
+            event_json("r", "/root", &failed),
+            r#"{"event":"failed","repo":"r","reason":"a\"b"}"#
+        );
+        let stopped = Event::Stopped {
+            reason: "gone".to_string(),
+        };
+        assert_eq!(
+            event_json("r", "/root", &stopped),
+            r#"{"event":"stopped","repo":"r","reason":"gone"}"#
+        );
+        let index = crate::response::index_summary_json("r", "/root", &summary());
+        assert_eq!(
+            event_json("r", "/root", &Event::Built(summary())),
+            format!("{{\"event\":\"built\",\"index\":{index}}}")
+        );
+    }
+
+    /// A writer whose every write fails the way a closed pipe does.
+    struct BrokenPipe;
+
+    impl Write for BrokenPipe {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_event_maps_broken_pipe() {
+        assert!(write_event(&mut BrokenPipe, r#"{"event":"busy","repo":"r"}"#).is_err());
+        let mut sink: Vec<u8> = Vec::new();
+        write_event(&mut sink, "x").unwrap();
+        assert_eq!(sink, b"x\n");
+    }
+
+    #[test]
+    fn drive_exits_3_when_an_event_cannot_be_written() {
+        let mut fake = Fake::new("stale", "A");
+        let mut err = String::new();
+        let code = drive_events(
+            &Options::default(),
+            &mut fake,
+            "r",
+            "/root",
+            &mut BrokenPipe,
+            &mut err,
+        );
+        assert_eq!(code, 3);
+        assert!(err.contains("cannot write watch event"), "{err}");
+        assert!(fake.builds.is_empty(), "no build once the output is gone");
+    }
+
+    #[test]
+    fn drive_writes_each_event_and_exits_0() {
+        let mut fake = Fake::new("stale", "A");
+        let mut sink: Vec<u8> = Vec::new();
+        let mut err = String::new();
+        let code = drive_events(
+            &Options::default(),
+            &mut fake,
+            "r",
+            "/root",
+            &mut sink,
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert!(err.is_empty(), "{err}");
+        let text = String::from_utf8(sink).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(
+            lines[0],
+            r#"{"event":"started","repo":"r","status":"stale"}"#
+        );
+        assert!(
+            lines[1].starts_with(r#"{"event":"built","index":{"#),
+            "{}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn drive_run_error_writes_stopped_then_exits_3() {
+        let mut fake = Fake::new("fresh", "A");
+        fake.sigs = VecDeque::from(vec![Ok("A".to_string()), Err("gone".to_string())]);
+        let mut sink: Vec<u8> = Vec::new();
+        let mut err = String::new();
+        let code = drive_events(
+            &Options::default(),
+            &mut fake,
+            "r",
+            "/root",
+            &mut sink,
+            &mut err,
+        );
+        assert_eq!(code, 3);
+        let text = String::from_utf8(sink).unwrap();
+        assert_eq!(
+            text.lines().last(),
+            Some(r#"{"event":"stopped","repo":"r","reason":"gone"}"#)
+        );
+        assert!(err.contains("gone"), "{err}");
     }
 }

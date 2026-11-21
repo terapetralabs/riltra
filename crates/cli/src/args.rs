@@ -43,6 +43,13 @@ pub enum Command {
     IndexStatus {
         repo: String,
     },
+    Watch {
+        repo: String,
+        interval_ms: u64,
+        debounce_ms: u64,
+        max_wait_ms: u64,
+        max_builds: Option<u64>,
+    },
     Search {
         repo: String,
         symbol: String,
@@ -423,6 +430,46 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }),
                 None => Err(crate::usage()),
             }
+        }
+        "watch" => {
+            let mut repo = None;
+            let mut interval_ms = 1000;
+            let mut debounce_ms = 500;
+            let mut max_wait_ms = None;
+            let mut max_builds = None;
+            let mut i = 1;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--interval-ms") {
+                    interval_ms = watch_value(&v, 100, 60_000)?;
+                } else if let Some(v) = take_value(args, &mut i, "--debounce-ms") {
+                    debounce_ms = watch_value(&v, 0, 60_000)?;
+                } else if let Some(v) = take_value(args, &mut i, "--max-wait-ms") {
+                    max_wait_ms = Some(watch_value(&v, 1_000, 600_000)?);
+                } else if let Some(v) = take_value(args, &mut i, "--max-builds") {
+                    max_builds = Some(watch_value(&v, 1, u64::MAX)?);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            let Some(repo) = repo else {
+                return Err(crate::usage());
+            };
+            // C9: without an explicit ceiling it is max(10000, debounce); an explicit
+            // one below the debounce is refused.
+            let max_wait_ms = match max_wait_ms {
+                Some(max) if max < debounce_ms => return Err(crate::usage()),
+                Some(max) => max,
+                None => debounce_ms.max(10_000),
+            };
+            Ok(Command::Watch {
+                repo,
+                interval_ms,
+                debounce_ms,
+                max_wait_ms,
+                max_builds,
+            })
         }
         "search" => {
             let mut repo = None;
@@ -1179,6 +1226,14 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
 
 /// Consume `--flag value` or `--flag=value` at `args[*i]`; `None` when the
 /// token is not that flag (index untouched) or the value is missing.
+/// A `watch` numeric flag: an integer in `min..=max`, otherwise usage (exit 2).
+fn watch_value(value: &str, min: u64, max: u64) -> Result<u64, String> {
+    match value.parse::<u64>() {
+        Ok(n) if (min..=max).contains(&n) => Ok(n),
+        _ => Err(crate::usage()),
+    }
+}
+
 fn take_value(args: &[String], i: &mut usize, flag: &str) -> Option<String> {
     let token = args.get(*i)?;
     if let Some(rest) = token.strip_prefix(flag) {
@@ -1455,6 +1510,61 @@ mod tests {
         ));
         assert!(p(&["index", "--repo", "r", "--full=x"]).is_err());
         assert!(p(&["index", "--repo", "r", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_watch_defaults_and_bounds() {
+        assert!(matches!(
+            p(&["watch", "--repo", "r"]),
+            Ok(Command::Watch {
+                repo,
+                interval_ms: 1000,
+                debounce_ms: 500,
+                max_wait_ms: 10_000,
+                max_builds: None,
+            }) if repo == "r"
+        ));
+        // C9: an omitted ceiling follows the debounce when the debounce is longer.
+        assert!(matches!(
+            p(&["watch", "--repo", "r", "--debounce-ms", "30000"]),
+            Ok(Command::Watch {
+                debounce_ms: 30_000,
+                max_wait_ms: 30_000,
+                ..
+            })
+        ));
+        assert!(matches!(
+            p(&[
+                "watch",
+                "--repo",
+                "r",
+                "--interval-ms=200",
+                "--max-builds",
+                "3"
+            ]),
+            Ok(Command::Watch {
+                interval_ms: 200,
+                max_builds: Some(3),
+                ..
+            })
+        ));
+        assert!(p(&[
+            "watch",
+            "--repo",
+            "r",
+            "--debounce-ms",
+            "3000",
+            "--max-wait-ms",
+            "2000"
+        ])
+        .is_err());
+        assert!(p(&["watch", "--repo", "r", "--interval-ms=50"]).is_err());
+        assert!(p(&["watch", "--repo", "r", "--interval-ms", "60001"]).is_err());
+        assert!(p(&["watch", "--repo", "r", "--debounce-ms", "60001"]).is_err());
+        assert!(p(&["watch", "--repo", "r", "--max-wait-ms", "999"]).is_err());
+        assert!(p(&["watch", "--repo", "r", "--max-builds", "0"]).is_err());
+        assert!(p(&["watch"]).is_err());
+        assert!(p(&["watch", "--repo", "r", "--bogus"]).is_err());
     }
 
     #[test]

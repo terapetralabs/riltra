@@ -27,7 +27,9 @@ and `.tpp` files are not indexed.
 The optional SCIP path imports an index that you provide; it does not run the
 indexer. A configured language server answers definition or reference queries
 at a position. It must be explicitly configured, and may have its own project
-or network behavior. Neither provider is enabled by default.
+or network behavior. Neither provider is enabled by default. To see which
+guided producers and language-server settings are present, see [semantic
+provider setup](#semantic-provider-setup-read-only).
 
 ## Search, relationships, and freshness
 
@@ -379,6 +381,106 @@ read tools do the same, so this is not new to `changes`. The repository is never
 written.
 
 The output is the structure of a change, not an impact verdict.
+
+## Semantic provider setup (read-only)
+
+`riltra semantic setup --repo <name> [--lsp-server <abs-path>]` prints one JSON
+report on the semantic providers for a registered repository. It reads files,
+the index, git metadata and `PATH`. It installs nothing and runs no provider or
+language server. Its only subprocess is the read-only git check that
+`riltra index status` also runs, and only for a repository with its own `.git`.
+Its only file effect is that SQLite can create `-wal` and `-shm` sidecars beside
+an existing index. An older index is reported as `schema_outdated`, not
+migrated.
+
+The report separates three things:
+
+- **Index state.** `index.status` is `ready`, `no-index`, `schema_outdated` or
+  `schema_ahead`. Freshness and its reasons are reported only for a ready index.
+  `fresh` is reported only after the git check confirms it.
+- **Scan completeness.** A directory that cannot be read, or that points outside
+  the repository, makes `scan.complete` false. The language list and the
+  manifests may then be incomplete.
+- **Imports and providers.** Each SCIP import is listed with its verification.
+  Each family present in the repository gets its capability values and the
+  state of its producer and language server.
+
+Languages are listed per family with these capability values:
+
+| Family | Languages | SCIP import | Language server | Guided producer |
+|---|---|---|---|---|
+| typescript | typescript, tsx | verified-fixture | contract-only | scip-typescript |
+| rust | rust | verified-fixture | contract-only | rust-analyzer |
+| python | python | contract-only | contract-only | none |
+| javascript | javascript | contract-only | contract-only | none |
+| c | c | contract-only | contract-only | none |
+| cpp | cpp | contract-only | contract-only | none |
+| go | go | not-tried | not-tried | none |
+| java | java | not-tried | not-tried | none |
+
+`verified-fixture` means an import from that real producer was verified on a
+Riltra fixture. `contract-only` means Riltra implements the transport but no
+real provider was verified for this language. `not-tried` means no evidence
+exists. TypeScript and Rust are the only languages with guided producers.
+
+**Producers.** For a guided family, the report names the producer and the
+command to run yourself from the repository root. Riltra does not run that
+command or check its output.
+
+- `scip-typescript` needs a `tsconfig.json` at the root and is run as
+  `scip-typescript index`. Without `tsconfig.json`, the command is
+  `scip-typescript index --infer-tsconfig`.
+- `rust-analyzer` needs a `Cargo.toml` at the root and is run as
+  `rust-analyzer scip .`. Without `Cargo.toml`, no command is offered.
+
+After the producer writes `index.scip`, import it with the command the report
+gives, `riltra semantic import --repo <name> --scip index.scip`. The import path
+for artifacts you provide is unchanged.
+
+For `scip-typescript`, Riltra first looks in the repository's `node_modules/.bin`,
+then in each `PATH` directory in order. `rust-analyzer` is looked up on `PATH`
+only. On Windows a producer is found only as a `.exe`, `.cmd` or `.bat`
+file; npm's extensionless shell shim is not used, because PowerShell cannot run
+it. On other systems the file name has no extension. The first regular file
+wins and is never executed. `found` means only that a file with that name
+exists. It does not show that the file runs or that it is the expected tool. A
+producer that is not found is reported as `not-found`, with a step to install
+it yourself; Riltra does not install providers.
+
+**Language server.** The server path comes from `--lsp-server`, or else from the
+`RILTRA_LSP_SERVER` environment variable; the report's `source` field says which
+(`--lsp-server`, `RILTRA_LSP_SERVER` or `none`). An empty
+`RILTRA_LSP_SERVER` counts as unset. An empty `--lsp-server` value is a usage
+error. The path is classified from its file name without starting it. The file
+name is taken without `.exe`, `.cmd` or `.bat`, and lowercased on Windows. The
+state is one of:
+
+- `not-configured`: no path is given.
+- `not-absolute`: the path is not absolute.
+- `not-found`: the path is not a regular file.
+- `launch-incompatible`: the name is `typescript-language-server`. That server
+  needs `--stdio`, and Riltra starts language servers with no arguments, so
+  use the SCIP path for TypeScript.
+- `configured`: the name is the server expected for the family (`rust-analyzer`
+  for Rust).
+- `mismatch`: the name is a known server for another family.
+- `unrecognized`: any other name. Riltra cannot tell which language that server
+  serves.
+
+A configured language server answers position queries, and the references it
+returns are locations, not call edges. The setup report does not change that.
+
+**Next steps.** `next` lists the steps in a fixed order: build or rebuild the
+code index, the partial-scan notice, the producer steps, re-running stale
+imports, and the optional language-server and TypeScript notes. A step text
+never contains a command; a command is in its own field, or `null` when there
+is none. Commands are quoted for the shell in the report's `shell` field:
+PowerShell on Windows, POSIX sh elsewhere. They are meant to be run from the
+repository root, and the repository name is quoted.
+
+Exit codes follow the CLI contract. An unknown repository, a moved root, or a
+storage error exits with 3. A usage error exits with 2. Every other case,
+including a missing or outdated index, exits with 0.
 
 ## Optional semantic knowledge search
 

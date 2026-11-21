@@ -58,6 +58,8 @@ Use `<name>` as the `repo` argument of every tool. Re-run `riltra index --repo <
 
 `riltra watch` is an opt-in CLI process that rebuilds the code index after source changes; see the [capabilities guide](capabilities.md#automatic-index-updates-opt-in). An agent may suggest `riltra watch`, but it must not start it without the user's approval. MCP reads published snapshots only.
 
+An agent may run `riltra semantic setup --repo <name>`, which is read-only, to explain the SCIP producer and language-server options in the [capabilities guide](capabilities.md#semantic-provider-setup-read-only); installing a producer, running it, or setting `RILTRA_LSP_SERVER` needs the user's approval.
+
 For optional semantic knowledge search, build the derived vector index from
 the CLI with `riltra knowledge vector build --repo <name> --model-dir <model-dir>`.
 The MCP client must also receive `RILTRA_MODEL_DIR` pointing at the provisioned

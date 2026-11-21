@@ -704,11 +704,7 @@ fn inspect_setup(
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .flat_map(|dir| [dir.join(name), dir.join(format!("{name}.exe"))])
-        .find(|path| path.is_file())
+    crate::paths::find_executable_in(name, &crate::paths::path_dirs(), &["", ".exe"])
 }
 
 fn claude_sources(root: &Path) -> (bool, Vec<agent_setup::ClaudeConfigSource>) {

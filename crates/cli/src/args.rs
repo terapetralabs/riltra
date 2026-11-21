@@ -177,6 +177,11 @@ pub enum SemanticOp {
         refs: bool,
         lsp_server: Option<String>,
     },
+    /// Read-only provider setup report (D4). Never runs a producer or server.
+    Setup {
+        repo: String,
+        lsp_server: Option<String>,
+    },
 }
 
 /// M7 knowledge subcommands. Value flags are kept as raw strings and parsed in
@@ -617,6 +622,30 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                         },
                     }),
                     _ => Err(crate::usage()),
+                }
+            }
+            Some("setup") => {
+                let mut repo = None;
+                let mut lsp_server = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if let Some(v) = take_value(args, &mut i, "--repo") {
+                        repo = Some(v);
+                    } else if let Some(v) = take_value(args, &mut i, "--lsp-server") {
+                        // An empty value is a usage error: it names no server.
+                        if v.is_empty() {
+                            return Err(crate::usage());
+                        }
+                        lsp_server = Some(v);
+                    } else {
+                        return Err(crate::usage());
+                    }
+                }
+                match repo {
+                    Some(repo) => Ok(Command::Semantic {
+                        op: SemanticOp::Setup { repo, lsp_server },
+                    }),
+                    None => Err(crate::usage()),
                 }
             }
             _ => Err(crate::usage()),
@@ -1370,6 +1399,36 @@ mod tests {
         ));
         assert!(p(&["scan"]).is_err());
         assert!(p(&["scan", "--path", "a.py"]).is_err());
+    }
+
+    #[test]
+    fn parses_semantic_setup() {
+        assert_eq!(
+            p(&["semantic", "setup", "--repo", "r"]),
+            Ok(Command::Semantic {
+                op: SemanticOp::Setup {
+                    repo: "r".to_string(),
+                    lsp_server: None,
+                },
+            })
+        );
+        assert_eq!(
+            p(&["semantic", "setup", "--repo", "r", "--lsp-server=/x"]),
+            Ok(Command::Semantic {
+                op: SemanticOp::Setup {
+                    repo: "r".to_string(),
+                    lsp_server: Some("/x".to_string()),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn semantic_setup_rejects_usage_errors() {
+        assert!(p(&["semantic", "setup", "--repo=r", "--lsp-server="]).is_err());
+        assert!(p(&["semantic", "setup", "--repo", "r", "--lsp-server", ""]).is_err());
+        assert!(p(&["semantic", "setup"]).is_err());
+        assert!(p(&["semantic", "setup", "--repo", "r", "--bogus"]).is_err());
     }
 
     #[test]

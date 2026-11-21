@@ -529,8 +529,8 @@ fn document_evidence_with(
             candidates.insert(f.path.clone());
         }
     }
-    // Guessed names go in the root and in each ancestor directory of an indexed file that has
-    // at most two components, so crates/alpha/src/lib.rs reaches crates and crates/alpha only.
+    // Guessed names go in the root and in every ancestor directory with at most two components
+    // of an indexed file, so crates/alpha/src/lib.rs reaches crates and crates/alpha only.
     let dirs = files
         .iter()
         .flat_map(|f| Path::new(&f.path).ancestors().skip(1))
@@ -1059,19 +1059,12 @@ mod tests {
     #[test]
     fn document_candidate_reads_are_limited_and_ordered_by_depth() {
         let root = tmpdir("overview-document-read-limit");
+        // Three nested directories give 15 root candidates, 39 depth-2 and 39 depth-3 guessed
+        // candidates: 93 in total, so the 64-read window reaches depth 3 and 29 are omitted.
         let mut files = Vec::new();
-        for n in 0..200 {
+        for n in 0..3 {
             files.push(store::FileRow {
-                path: format!("nested{n}/child/README.md"),
-                language: "markdown".into(),
-                bytes: 0,
-                digest: String::new(),
-                errors: 0,
-            });
-        }
-        for n in 0..70 {
-            files.push(store::FileRow {
-                path: format!("level{n:02}/source.rs"),
+                path: format!("d{n}/e{n}/source.rs"),
                 language: "rust".into(),
                 bytes: 0,
                 digest: String::new(),
@@ -1084,7 +1077,11 @@ mod tests {
             Ok(b"doc".to_vec())
         });
 
-        assert!(reads.borrow().len() <= 64);
+        assert_eq!(reads.borrow().len(), MAX_DOCUMENT_READS);
+        assert!(reads
+            .borrow()
+            .iter()
+            .any(|path| document_path_depth(path) == 3));
         assert!(reads
             .borrow()
             .iter()
@@ -1095,7 +1092,7 @@ mod tests {
             .map(|path| (document_path_depth(path), path.clone()))
             .collect::<Vec<_>>();
         assert!(ordered.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(omitted > 0);
+        assert_eq!(omitted, 29);
         assert!(docs.iter().all(|doc| document_path_depth(&doc.path) <= 3));
 
         let mut value = empty("demo", SnapshotState::NoIndex, vec![], None);
@@ -1143,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_setup_py_is_a_candidate_at_depth_four() {
+    fn indexed_setup_py_is_a_candidate_at_depth_five() {
         let root = tmpdir("overview-deep-setup-py");
         let files = vec![store::FileRow {
             path: "a/b/c/d/setup.py".into(),
@@ -1166,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn root_manifest_is_read_before_one_level_candidates() {
+    fn root_manifest_is_read_before_nested_candidates() {
         let root = tmpdir("overview-root-manifest-priority");
         fs::write(root.join("package.json"), r#"{"name":"demo"}"#).unwrap();
         let files = (0..70)

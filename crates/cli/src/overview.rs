@@ -525,15 +525,16 @@ fn document_evidence_with(
         "Makefile".into(),
     ]);
     for f in files {
-        if document_path_depth(&f.path) <= 2 && (is_manifest(&f.path) || is_instruction(&f.path)) {
+        if is_manifest(&f.path) || is_instruction(&f.path) {
             candidates.insert(f.path.clone());
         }
     }
-    // The indexed directory list bounds candidate discovery to the root and one known level.
+    // Guessed names go in the root and in each ancestor directory of an indexed file that has
+    // at most two components, so crates/alpha/src/lib.rs reaches crates and crates/alpha only.
     let dirs = files
         .iter()
-        .filter_map(|f| Path::new(&f.path).parent())
-        .filter(|p| p.components().count() == 1)
+        .flat_map(|f| Path::new(&f.path).ancestors().skip(1))
+        .filter(|p| matches!(p.components().count(), 1 | 2))
         .map(|p| p.to_string_lossy().to_string())
         .collect::<BTreeSet<_>>();
     for d in dirs {
@@ -559,13 +560,11 @@ fn document_evidence_with(
         .iter()
         .map(|f| f.path.as_str())
         .collect::<BTreeSet<_>>();
-    let (mut root_candidates, mut child_candidates): (Vec<_>, Vec<_>) = candidates
-        .into_iter()
-        .partition(|path| document_path_depth(path) == 1);
-    root_candidates.append(&mut child_candidates);
+    let mut ordered = candidates.into_iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|path| (document_path_depth(path), path.clone()));
     // This counts candidates not attempted; their existence on disk is unknown.
-    let omitted = root_candidates.len().saturating_sub(MAX_DOCUMENT_READS);
-    let documents = root_candidates
+    let omitted = ordered.len().saturating_sub(MAX_DOCUMENT_READS);
+    let documents = ordered
         .into_iter()
         .take(MAX_DOCUMENT_READS)
         .filter_map(|path| {
@@ -1058,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn document_candidate_reads_are_limited_and_only_consider_one_level() {
+    fn document_candidate_reads_are_limited_and_ordered_by_depth() {
         let root = tmpdir("overview-document-read-limit");
         let mut files = Vec::new();
         for n in 0..200 {
@@ -1089,9 +1088,15 @@ mod tests {
         assert!(reads
             .borrow()
             .iter()
-            .all(|path| path.matches('/').count() <= 1));
+            .all(|path| Path::new(path).components().count() <= 3));
+        let ordered = reads
+            .borrow()
+            .iter()
+            .map(|path| (document_path_depth(path), path.clone()))
+            .collect::<Vec<_>>();
+        assert!(ordered.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(omitted > 0);
-        assert!(docs.iter().all(|doc| doc.path.matches('/').count() <= 1));
+        assert!(docs.iter().all(|doc| document_path_depth(&doc.path) <= 3));
 
         let mut value = empty("demo", SnapshotState::NoIndex, vec![], None);
         record_document_evidence(&mut value, docs, omitted);
@@ -1102,6 +1107,62 @@ mod tests {
             .unwrap();
         assert_eq!(omission.reason, OmissionReason::UnattemptedCandidatePaths);
         assert_eq!(omission.omitted_count, omitted);
+    }
+
+    #[test]
+    fn document_candidates_include_member_manifests_through_ancestor_directories() {
+        let root = tmpdir("overview-member-manifests");
+        let files = vec![
+            store::FileRow {
+                path: "crates/alpha/src/lib.rs".into(),
+                language: "rust".into(),
+                bytes: 0,
+                digest: String::new(),
+                errors: 0,
+            },
+            store::FileRow {
+                path: "crates/beta/src/main.rs".into(),
+                language: "rust".into(),
+                bytes: 0,
+                digest: String::new(),
+                errors: 0,
+            },
+        ];
+        let reads = std::cell::RefCell::new(Vec::new());
+        let _ = document_evidence_with(&root, &files, |_, path, _| {
+            reads.borrow_mut().push(path.to_string());
+            Ok(b"doc".to_vec())
+        });
+
+        let reads = reads.into_inner();
+        assert!(reads.contains(&"crates/alpha/Cargo.toml".to_string()));
+        assert!(reads.contains(&"crates/beta/Cargo.toml".to_string()));
+        assert!(!reads
+            .iter()
+            .any(|path| path.starts_with("crates/alpha/src/")));
+    }
+
+    #[test]
+    fn indexed_setup_py_is_a_candidate_at_depth_four() {
+        let root = tmpdir("overview-deep-setup-py");
+        let files = vec![store::FileRow {
+            path: "a/b/c/d/setup.py".into(),
+            language: "python".into(),
+            bytes: 0,
+            digest: String::new(),
+            errors: 0,
+        }];
+        let reads = std::cell::RefCell::new(Vec::new());
+        let (docs, omitted) = document_evidence_with(&root, &files, |_, path, _| {
+            reads.borrow_mut().push(path.to_string());
+            Ok(b"doc".to_vec())
+        });
+
+        assert_eq!(omitted, 0);
+        assert!(reads.borrow().contains(&"a/b/c/d/setup.py".to_string()));
+        assert!(docs
+            .iter()
+            .any(|doc| doc.path == "a/b/c/d/setup.py" && doc.status == EvidenceStatus::Available));
     }
 
     #[test]

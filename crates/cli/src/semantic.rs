@@ -304,7 +304,7 @@ fn confined_read_classified_with(
 ) -> Result<Vec<u8>, ConfinedReadError> {
     let canonical_root = root
         .canonicalize()
-        .map_err(|e| ConfinedReadError::Io(format!("repository root unavailable: {e}")))?;
+        .map_err(|e| ConfinedReadError::Path(format!("repository root unavailable: {e}")))?;
     let (candidate, _) = confined_path(&canonical_root, rel).map_err(ConfinedReadError::Path)?;
     let entry_meta = candidate.symlink_metadata().map_err(|e| {
         let message = format!("cannot stat '{rel}': {e}");
@@ -590,6 +590,14 @@ mod tests {
             too_large.into_message(),
             confined_read(&dir, "big.txt", 64).unwrap_err()
         );
+    }
+
+    #[test]
+    fn unavailable_repository_root_is_a_path_error() {
+        let root = tmpdir("sem-unavailable-root");
+        let missing = root.with_extension("missing");
+        let result = confined_read_classified(&missing, "file.txt", 1024);
+        assert!(matches!(result, Err(ConfinedReadError::Path(_))));
     }
 
     #[test]

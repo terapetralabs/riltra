@@ -104,6 +104,7 @@ pub enum ActionKind {
     RegisterProject,
     BuildIndex,
     RefreshIndex,
+    UseCompatibleBuild,
     ReviewFreshness,
     ReadInstructions,
     ChooseDefinition,
@@ -159,15 +160,42 @@ pub fn collect(home: &Path, repo: &str, root: &Path) -> Result<ProjectOverview, 
     let db = store::db_path(home, repo);
     let overview = match store::open_read(&db) {
         store::IndexRead::Missing => with_live_documents(
-            empty(repo, SnapshotState::NoIndex, vec!["no-index".into()], None),
+            empty(
+                repo,
+                SnapshotState::NoIndex,
+                vec!["no-index".into()],
+                None,
+                build_index_action(),
+            ),
             root,
         ),
-        store::IndexRead::Outdated(v) | store::IndexRead::Ahead(v) => with_live_documents(
+        store::IndexRead::Outdated(v) => with_live_documents(
             empty(
                 repo,
                 SnapshotState::UnsupportedSchema,
                 vec![format!("unsupported-schema:{v}")],
                 None,
+                NextAction {
+                    kind: ActionKind::RefreshIndex,
+                    reason: format!(
+                        "index schema v{v} is older than supported; migrate with `riltra index status --repo {repo}` after the user approves"
+                    ),
+                },
+            ),
+            root,
+        ),
+        store::IndexRead::Ahead(v) => with_live_documents(
+            empty(
+                repo,
+                SnapshotState::UnsupportedSchema,
+                vec![format!("unsupported-schema:{v}")],
+                None,
+                NextAction {
+                    kind: ActionKind::UseCompatibleBuild,
+                    reason: format!(
+                        "index schema v{v} is newer than supported; keep the store untouched and use a Riltra build that supports it; do not reindex"
+                    ),
+                },
             ),
             root,
         ),
@@ -187,6 +215,7 @@ pub fn collect(home: &Path, repo: &str, root: &Path) -> Result<ProjectOverview, 
                         SnapshotState::Unknown,
                         vec!["no-snapshot".into()],
                         None,
+                        build_index_action(),
                     ),
                     root,
                 ));
@@ -353,11 +382,19 @@ pub fn render(overview: &ProjectOverview) -> Result<String, String> {
     serde_json::to_string(overview).map_err(|e| format!("cannot encode overview: {e}"))
 }
 
+fn build_index_action() -> NextAction {
+    NextAction {
+        kind: ActionKind::BuildIndex,
+        reason: "create an index to see project structure".into(),
+    }
+}
+
 fn empty(
     repo: &str,
     status: SnapshotState,
     reasons: Vec<String>,
     nonce: Option<String>,
+    action: NextAction,
 ) -> ProjectOverview {
     ProjectOverview {
         repo: repo.into(),
@@ -371,10 +408,7 @@ fn empty(
         entry_points: Vec::new(),
         build_test_sources: Vec::new(),
         definitions: Vec::new(),
-        next_actions: vec![NextAction {
-            kind: ActionKind::BuildIndex,
-            reason: "create an index to see project structure".into(),
-        }],
+        next_actions: vec![action],
         omissions: Vec::new(),
     }
 }
@@ -842,7 +876,13 @@ mod tests {
     use std::fs;
     #[test]
     fn json_budget_removes_excerpts_before_definition_samples_and_keeps_identity() {
-        let mut value = empty("demo", SnapshotState::Fresh, vec![], Some("nonce".into()));
+        let mut value = empty(
+            "demo",
+            SnapshotState::Fresh,
+            vec![],
+            Some("nonce".into()),
+            build_index_action(),
+        );
         for n in 0..12 {
             value.definitions.push(SourceEvidence {
                 kind: EvidenceKind::Definition,
@@ -893,7 +933,13 @@ mod tests {
             text: None,
         };
 
-        let mut many = empty("demo", SnapshotState::Fresh, vec![], Some("nonce".into()));
+        let mut many = empty(
+            "demo",
+            SnapshotState::Fresh,
+            vec![],
+            Some("nonce".into()),
+            build_index_action(),
+        );
         many.definitions = (0..20)
             .map(|n| definition(format!("f{n}-{}", "x".repeat(2500))))
             .collect();
@@ -908,7 +954,13 @@ mod tests {
         assert_eq!(omitted.omitted_count, 20 - got.definitions.len());
         assert!(omitted.omitted_count > 0);
 
-        let mut last = empty("demo", SnapshotState::Fresh, vec![], Some("nonce".into()));
+        let mut last = empty(
+            "demo",
+            SnapshotState::Fresh,
+            vec![],
+            Some("nonce".into()),
+            build_index_action(),
+        );
         last.definitions
             .push(definition("x".repeat(context::DEFAULT_MAX_BYTES + 1)));
         let got = fit(last).unwrap();
@@ -957,6 +1009,47 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, 99, "unsupported schema must not be migrated");
+    }
+
+    #[test]
+    fn schema_direction_selects_recovery_action() {
+        let root = tmpdir("overview-dir-root");
+        for (version, kind, needle) in [
+            (store::SCHEMA_VERSION - 1, ActionKind::RefreshIndex, "older"),
+            (
+                store::SCHEMA_VERSION + 1,
+                ActionKind::UseCompatibleBuild,
+                "newer",
+            ),
+        ] {
+            let home = tmpdir("overview-dir-home");
+            let path = store::db_path(&home, "demo");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(&format!("PRAGMA user_version = {version};"))
+                .unwrap();
+            drop(db);
+            let got = collect(&home, "demo", &root).unwrap();
+            assert_eq!(got.snapshot.status, SnapshotState::UnsupportedSchema);
+            assert_eq!(got.next_actions.len(), 1);
+            let action = &got.next_actions[0];
+            assert_eq!(action.kind, kind);
+            assert!(action.reason.contains(&format!("schema v{version}")));
+            assert!(action.reason.contains(needle));
+            if kind == ActionKind::RefreshIndex {
+                assert!(action.reason.contains("--repo demo"));
+            } else {
+                assert!(action.reason.contains("do not reindex"));
+                assert!(got.next_actions.iter().all(
+                    |a| a.kind != ActionKind::BuildIndex && a.kind != ActionKind::RefreshIndex
+                ));
+                let json = render(&got).unwrap();
+                assert!(json.contains("\"use_compatible_build\""));
+            }
+        }
+        let home = tmpdir("overview-dir-missing");
+        let got = collect(&home, "demo", &root).unwrap();
+        assert_eq!(got.next_actions[0].kind, ActionKind::BuildIndex);
     }
 
     #[cfg(unix)]
@@ -1095,7 +1188,13 @@ mod tests {
         assert_eq!(omitted, 29);
         assert!(docs.iter().all(|doc| document_path_depth(&doc.path) <= 3));
 
-        let mut value = empty("demo", SnapshotState::NoIndex, vec![], None);
+        let mut value = empty(
+            "demo",
+            SnapshotState::NoIndex,
+            vec![],
+            None,
+            build_index_action(),
+        );
         record_document_evidence(&mut value, docs, omitted);
         let omission = value
             .omissions
@@ -1215,7 +1314,13 @@ mod tests {
         assert!(omitted > 0);
         assert_eq!(reads.get(), MAX_DOCUMENT_READS);
 
-        let mut value = empty("demo", SnapshotState::NoIndex, vec![], None);
+        let mut value = empty(
+            "demo",
+            SnapshotState::NoIndex,
+            vec![],
+            None,
+            build_index_action(),
+        );
         record_document_evidence(&mut value, docs, omitted);
         let json = serde_json::to_value(value).unwrap();
         assert_eq!(
@@ -1241,7 +1346,13 @@ mod tests {
 
     #[test]
     fn item_limit_is_reported_even_when_json_fits() {
-        let mut value = empty("demo", SnapshotState::Fresh, vec![], Some("nonce".into()));
+        let mut value = empty(
+            "demo",
+            SnapshotState::Fresh,
+            vec![],
+            Some("nonce".into()),
+            build_index_action(),
+        );
         value.languages = (0..21).map(|n| format!("lang{n:02}")).collect();
         let got = fit(value).unwrap();
         assert_eq!(got.languages.len(), 20);

@@ -1347,7 +1347,8 @@ mod tests {
         fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
         index::build(&home, "demo", &root, false).unwrap();
         let indexed = collect(&home, "demo", &root).unwrap();
-        assert_eq!(indexed.snapshot.status, SnapshotState::Stale);
+        // Baseline freshness depends on timestamp resolution (Stale on Windows, Fresh on
+        // Linux), so only the state after the content change is asserted.
         let main = indexed
             .definitions
             .iter()

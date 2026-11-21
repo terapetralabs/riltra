@@ -671,10 +671,12 @@ mod tests {
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, "inside target").unwrap();
         let link = root.join("README.md");
+        // Windows does not treat '/' inside a symlink target as a separator.
+        let relative_target = std::path::Path::new("docs").join("guide.md");
         #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink("docs/guide.md", &link).is_ok();
+        let linked = std::os::unix::fs::symlink(&relative_target, &link).is_ok();
         #[cfg(windows)]
-        let linked = std::os::windows::fs::symlink_file("docs/guide.md", &link).is_ok();
+        let linked = std::os::windows::fs::symlink_file(&relative_target, &link).is_ok();
         if !linked {
             return;
         }

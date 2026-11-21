@@ -2110,7 +2110,7 @@ pub fn rederive_after_carry(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -2566,7 +2566,7 @@ mod tests {
         store::open_memory().unwrap()
     }
 
-    fn mk_snap(conn: &rusqlite::Connection) -> i64 {
+    pub(crate) fn mk_snap(conn: &rusqlite::Connection) -> i64 {
         let root = std::env::temp_dir().join(format!("riltra-edge-source-{}", store::new_nonce()));
         std::fs::create_dir_all(&root).unwrap();
         store::insert_snapshot(
@@ -2699,7 +2699,7 @@ mod tests {
         fid
     }
 
-    fn ingest_py(conn: &rusqlite::Connection, snap: i64, path: &str, src: &[u8]) -> i64 {
+    pub(crate) fn ingest_py(conn: &rusqlite::Connection, snap: i64, path: &str, src: &[u8]) -> i64 {
         ingest_source(conn, snap, path, src, crate::syntax::Language::Python)
     }
 
@@ -2827,7 +2827,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mk_fact(
+    pub(crate) fn mk_fact(
         snap: i64,
         imp: i64,
         path: &str,
@@ -3563,7 +3563,7 @@ mod tests {
         );
     }
 
-    fn mk_import_full(
+    pub(crate) fn mk_import_full(
         conn: &rusqlite::Connection,
         snap: i64,
         provider: &str,

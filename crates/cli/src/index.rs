@@ -927,7 +927,7 @@ pub(crate) fn live_state_for(
     })
 }
 
-fn canonical_repo_root(root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonical_repo_root(root: &Path) -> Result<PathBuf, String> {
     root.canonicalize()
         .map_err(|e| format!("cannot resolve root: {e}"))
 }
@@ -1127,7 +1127,19 @@ pub fn semantic_status_on(
     // freshness verdict: every answer describes exactly one revision, even
     // if a rebuild or import commits mid-query (WAL snapshot isolation).
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let latest = store::latest_snapshot(&tx)?;
+    let state = semantic_status_tx(&tx, name, canon)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(state)
+}
+
+/// The body of `semantic_status_on`, run on a caller's transaction so a
+/// report can read the same revision as its other queries.
+pub(crate) fn semantic_status_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    canon: &Path,
+) -> Result<SemanticState, String> {
+    let latest = store::latest_snapshot(tx)?;
     let Some(snapshot) = latest else {
         return Ok(SemanticState {
             snapshot: None,
@@ -1139,15 +1151,15 @@ pub fn semantic_status_on(
     // Source freshness from the M3-M4 evaluator on the same transaction:
     // a source that moved after the snapshot (no rebuild yet) downgrades
     // every import to Stale instead of serving old rows as matching.
-    let (source_status, reasons) = evaluate_snapshot(&tx, name, canon, &snapshot);
+    let (source_status, reasons) = evaluate_snapshot(tx, name, canon, &snapshot);
     let source_fresh = source_status == "fresh";
-    let live = live_state_for(&tx, &snapshot)?;
+    let live = live_state_for(tx, &snapshot)?;
     let mut rows = Vec::new();
-    for (id, import) in store::semantic_imports_for(&tx, snapshot.id)? {
+    for (id, import) in store::semantic_imports_for(tx, snapshot.id)? {
         let bound = crate::semantic::verify_live(&import, &live);
         // Import-granular drift: this import's own covered files moved, even
         // where the snapshot-wide freshness is blind (unindexed documents).
-        let drifted = import_source_changed(&tx, snapshot.id, id, canon)?;
+        let drifted = import_source_changed(tx, snapshot.id, id, canon)?;
         let verification = if source_fresh && !drifted {
             bound
         } else {
@@ -4990,6 +5002,65 @@ mod tests {
         };
         assert!(err.starts_with("index-busy:"), "{err}");
         assert_eq!(latest_snapshot_id(&home), s1);
+    }
+
+    #[test]
+    fn semantic_status_tx_matches_semantic_status() {
+        use super::{semantic_status_on, semantic_status_tx};
+        let home = tmpdir("idx-status-tx-home");
+        let root = tmpdir("idx-status-tx-root");
+        let canon = root.canonicalize().unwrap();
+        let db = store::db_path(&home, "r");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let mut conn = store::open_live(&db).unwrap();
+        store::insert_snapshot(
+            &conn,
+            &store::Snapshot {
+                root: canon.to_string_lossy().into_owned(),
+                head: None,
+                branch: None,
+                config_fingerprint: config_fingerprint(&canon),
+                ..store::tests::sample_snapshot()
+            },
+        )
+        .unwrap();
+        let latest = store::latest_snapshot(&conn).unwrap().unwrap();
+        let live = super::live_state_for(&conn, &latest).unwrap();
+        store::insert_semantic_import(
+            &conn,
+            &store::SemanticImport {
+                content_identity: live.content_identity.clone(),
+                source_revision: crate::semantic::revision_string(&live),
+                ..store::tests::sample_semantic_import(latest.id)
+            },
+        )
+        .unwrap();
+        let direct = semantic_status_on(&mut conn, "r", &canon).unwrap();
+        let tx = conn.transaction().unwrap();
+        let via_tx = semantic_status_tx(&tx, "r", &canon).unwrap();
+        assert_eq!(direct.freshness.as_deref(), Some("fresh"));
+        assert_eq!(direct.freshness, via_tx.freshness);
+        assert_eq!(direct.reasons, via_tx.reasons);
+        assert_eq!(direct.snapshot, via_tx.snapshot);
+        let summary = |state: &super::SemanticState| {
+            state
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.import_id,
+                        row.verification.clone(),
+                        row.content_match,
+                        row.revision_match,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(summary(&direct), summary(&via_tx));
+        assert_eq!(
+            summary(&via_tx),
+            vec![(1, "Unverified".to_string(), true, true)]
+        );
     }
 
     #[test]

@@ -33,6 +33,8 @@ mod knowledge_store;
 mod knowledge_vector;
 mod lexical;
 mod lsp;
+#[allow(dead_code)] // Task 3 wires the CLI command and the MCP tool.
+mod map;
 mod mcp;
 mod overview;
 mod packet;

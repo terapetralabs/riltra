@@ -2387,6 +2387,34 @@ pub fn proven_edge_page(
     Ok((edges, unknown as usize))
 }
 
+/// The proven predicate shared by the area map (`map::is_proven`): `CALLS` or
+/// `REFERENCES` at `Exact` precision, no unresolved marker, and a known callee.
+const PROVEN_EDGE_SQL: &str = "edge_kind IN ('CALLS', 'REFERENCES') AND precision = 'Exact' AND unresolved IS NULL AND callee_kind != 'unknown'";
+
+/// Edge rows for an area map read: `CALLS`, `REFERENCES` and `POTENTIAL_CALL`
+/// (never `IMPORTS`). Proven rows come first, then every other row, each group
+/// in `EDGE_ORDER`, so the `limit` drops candidate rows before any proven row.
+pub fn map_edges(conn: &Connection, snapshot_id: i64, limit: i64) -> Result<Vec<EdgeRow>, String> {
+    let sql = format!(
+        "SELECT {EDGE_COLS} FROM code_edges WHERE snapshot_id = ?1 AND edge_kind IN ('CALLS', 'REFERENCES', 'POTENTIAL_CALL') ORDER BY CASE WHEN {PROVEN_EDGE_SQL} THEN 0 ELSE 1 END, {EDGE_ORDER} LIMIT ?2"
+    );
+    let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![snapshot_id, limit], read_edge)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Number of proven rows in one snapshot, never capped by a read limit.
+pub fn proven_edge_count(conn: &Connection, snapshot_id: i64) -> Result<usize, String> {
+    let sql =
+        format!("SELECT COUNT(*) FROM code_edges WHERE snapshot_id = ?1 AND {PROVEN_EDGE_SQL}");
+    conn.query_row(&sql, [snapshot_id], |row| row.get::<_, i64>(0))
+        .map(|n| n as usize)
+        .map_err(|e| e.to_string())
+}
+
 fn snapshot_from_row(row: &rusqlite::Row) -> rusqlite::Result<Snapshot> {
     Ok(Snapshot {
         id: row.get(0)?,
@@ -2725,21 +2753,21 @@ pub fn occurrences_for(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         attach_src, carry_semantic_facts, content_digest, content_identity, db_path, detach_src,
         files_of, finish_snapshot, fts_available, grammar_versions, insert_call, insert_edge,
         insert_file, insert_import, insert_semantic_facts, insert_semantic_import, insert_snapshot,
-        insert_symbol, is_readable_db, latest_snapshot, live_base, meta_get, meta_set, migrate,
-        open_live, open_memory, open_read, promote_staging, proven_edge_page, search_symbols,
-        semantic_facts_for, semantic_generation, semantic_imports_for, staging_path, EdgeEndpoint,
-        EdgeRow, FileRow, IndexRead, SemanticFact, SemanticImport, Snapshot, SymbolRow,
-        SCHEMA_VERSION,
+        insert_symbol, is_readable_db, latest_snapshot, live_base, map_edges, meta_get, meta_set,
+        migrate, open_live, open_memory, open_read, promote_staging, proven_edge_count,
+        proven_edge_page, search_symbols, semantic_facts_for, semantic_generation,
+        semantic_imports_for, staging_path, EdgeEndpoint, EdgeRow, FileRow, IndexRead,
+        SemanticFact, SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
     };
     use crate::testutil::tmpdir;
     use std::path::Path;
 
-    fn sample_snapshot() -> Snapshot {
+    pub(crate) fn sample_snapshot() -> Snapshot {
         Snapshot {
             id: 0,
             repo: "demo".to_string(),
@@ -2904,7 +2932,7 @@ mod tests {
         assert_eq!(meta_get(&live, "graph_proof").unwrap(), before);
     }
 
-    fn sample_symbol(file_id: i64, name: &str) -> SymbolRow {
+    pub(crate) fn sample_symbol(file_id: i64, name: &str) -> SymbolRow {
         SymbolRow {
             file_id,
             kind: "function".to_string(),
@@ -2921,7 +2949,7 @@ mod tests {
         }
     }
 
-    fn sample_semantic_import(snapshot_id: i64) -> SemanticImport {
+    pub(crate) fn sample_semantic_import(snapshot_id: i64) -> SemanticImport {
         SemanticImport {
             snapshot_id,
             provider_name: "scip-import".to_string(),
@@ -4579,7 +4607,7 @@ mod tests {
         );
     }
 
-    fn scip_endpoint(uri: &str) -> EdgeEndpoint {
+    pub(crate) fn scip_endpoint(uri: &str) -> EdgeEndpoint {
         EdgeEndpoint::Scip {
             import_id: 1,
             symbol_uri: uri.to_string(),
@@ -4587,7 +4615,7 @@ mod tests {
         }
     }
 
-    fn syntax_endpoint(path: &str, byte_start: usize) -> EdgeEndpoint {
+    pub(crate) fn syntax_endpoint(path: &str, byte_start: usize) -> EdgeEndpoint {
         EdgeEndpoint::SyntaxDef {
             path: path.to_string(),
             byte_start,
@@ -4595,7 +4623,7 @@ mod tests {
         }
     }
 
-    fn stored_edge(
+    pub(crate) fn stored_edge(
         caller: Option<EdgeEndpoint>,
         callee: Option<EdgeEndpoint>,
         edge_kind: &str,
@@ -4797,6 +4825,110 @@ mod tests {
                 "limit {limit}"
             );
         }
+    }
+
+    #[test]
+    fn map_edges_excludes_imports_and_orders() {
+        let conn = open_memory().unwrap();
+        let mut candidate = stored_edge(
+            Some(scip_endpoint("seed")),
+            None,
+            "POTENTIAL_CALL",
+            "Heuristic",
+            None,
+        );
+        // Sorts before the proven rows by EDGE_ORDER, so only the proven-first
+        // rule can put it last.
+        candidate.caller_path = "a.py".to_string();
+        let proven_call = stored_edge(
+            Some(scip_endpoint("seed")),
+            Some(scip_endpoint("proven-call")),
+            "CALLS",
+            "Exact",
+            None,
+        );
+        let proven_reference = stored_edge(
+            Some(scip_endpoint("seed")),
+            Some(syntax_endpoint("ref.py", 40)),
+            "REFERENCES",
+            "Exact",
+            None,
+        );
+        let import = stored_edge(
+            Some(scip_endpoint("seed")),
+            Some(scip_endpoint("imports")),
+            "IMPORTS",
+            "Exact",
+            None,
+        );
+        for row in [&candidate, &proven_call, &proven_reference, &import] {
+            insert_edge(&conn, row).unwrap();
+        }
+        let rows = map_edges(&conn, 1, 10).unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|row| row.edge_kind.as_str()).collect();
+        assert_eq!(kinds.len(), 3, "IMPORTS is never read: {kinds:?}");
+        assert_eq!(kinds[2], "POTENTIAL_CALL", "proven rows first: {kinds:?}");
+        let mut proven_kinds = kinds[..2].to_vec();
+        proven_kinds.sort_unstable();
+        assert_eq!(proven_kinds, ["CALLS", "REFERENCES"]);
+        let capped = map_edges(&conn, 1, 2).unwrap();
+        let mut capped_kinds: Vec<&str> = capped.iter().map(|row| row.edge_kind.as_str()).collect();
+        capped_kinds.sort_unstable();
+        assert_eq!(capped_kinds, ["CALLS", "REFERENCES"]);
+    }
+
+    #[test]
+    fn proven_edge_count_counts_whole_snapshot() {
+        let conn = open_memory().unwrap();
+        let rows = [
+            stored_edge(
+                Some(scip_endpoint("seed")),
+                Some(scip_endpoint("a")),
+                "CALLS",
+                "Exact",
+                None,
+            ),
+            stored_edge(
+                Some(scip_endpoint("seed")),
+                Some(syntax_endpoint("r.py", 4)),
+                "REFERENCES",
+                "Exact",
+                None,
+            ),
+            stored_edge(
+                Some(scip_endpoint("seed")),
+                Some(scip_endpoint("b")),
+                "CALLS",
+                "Exact",
+                None,
+            ),
+            stored_edge(
+                Some(scip_endpoint("seed")),
+                Some(scip_endpoint("c")),
+                "CALLS",
+                "Heuristic",
+                None,
+            ),
+            stored_edge(
+                Some(scip_endpoint("seed")),
+                None,
+                "POTENTIAL_CALL",
+                "Heuristic",
+                None,
+            ),
+            stored_edge(
+                Some(scip_endpoint("seed")),
+                None,
+                "POTENTIAL_CALL",
+                "Heuristic",
+                None,
+            ),
+        ];
+        for row in &rows {
+            insert_edge(&conn, row).unwrap();
+        }
+        assert_eq!(proven_edge_count(&conn, 1).unwrap(), 3);
+        assert_eq!(proven_edge_count(&conn, 2).unwrap(), 0);
     }
 
     #[test]

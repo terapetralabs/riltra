@@ -109,6 +109,7 @@ pub enum ActionKind {
     ReadInstructions,
     ChooseDefinition,
     ConfigureClientManually,
+    SetupSemanticProvider,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,12 +176,7 @@ pub fn collect(home: &Path, repo: &str, root: &Path) -> Result<ProjectOverview, 
                 SnapshotState::UnsupportedSchema,
                 vec![format!("unsupported-schema:{v}")],
                 None,
-                NextAction {
-                    kind: ActionKind::RefreshIndex,
-                    reason: format!(
-                        "index schema v{v} is older than supported; migrate with `riltra index status --repo {repo}` after the user approves"
-                    ),
-                },
+                outdated_schema_action(repo, v),
             ),
             root,
         ),
@@ -190,12 +186,7 @@ pub fn collect(home: &Path, repo: &str, root: &Path) -> Result<ProjectOverview, 
                 SnapshotState::UnsupportedSchema,
                 vec![format!("unsupported-schema:{v}")],
                 None,
-                NextAction {
-                    kind: ActionKind::UseCompatibleBuild,
-                    reason: format!(
-                        "index schema v{v} is newer than supported; keep the store untouched and use a Riltra build that supports it; do not reindex"
-                    ),
-                },
+                ahead_schema_action(v),
             ),
             root,
         ),
@@ -389,6 +380,26 @@ fn build_index_action() -> NextAction {
     }
 }
 
+/// Shared with the area map: the action for an index older than this build.
+pub(crate) fn outdated_schema_action(repo: &str, v: u32) -> NextAction {
+    NextAction {
+        kind: ActionKind::RefreshIndex,
+        reason: format!(
+            "index schema v{v} is older than supported; migrate with `riltra index status --repo {repo}` after the user approves"
+        ),
+    }
+}
+
+/// Shared with the area map: the action for an index newer than this build.
+pub(crate) fn ahead_schema_action(v: u32) -> NextAction {
+    NextAction {
+        kind: ActionKind::UseCompatibleBuild,
+        reason: format!(
+            "index schema v{v} is newer than supported; keep the store untouched and use a Riltra build that supports it; do not reindex"
+        ),
+    }
+}
+
 fn empty(
     repo: &str,
     status: SnapshotState,
@@ -498,7 +509,7 @@ fn indexed_evidence(
     }
 }
 
-fn conventional_entry(path: &str) -> bool {
+pub(crate) fn conventional_entry(path: &str) -> bool {
     matches!(
         Path::new(path).file_name().and_then(|s| s.to_str()),
         Some(

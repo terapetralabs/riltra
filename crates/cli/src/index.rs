@@ -142,19 +142,39 @@ impl FileLock {
             .truncate(false)
             .open(path)
             .map_err(|e| format!("cannot lock index: {e}"))?;
-        match file.try_lock() {
-            Ok(()) => Ok(FileLock { _file: file }),
-            Err(std::fs::TryLockError::WouldBlock) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Err(format!("{busy_prefix} another riltra process holds {name}"))
+        let mut attempt = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(FileLock { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) if attempt < LOCK_RETRY_ATTEMPTS => {
+                    // A child spawned by another thread between fork and exec
+                    // holds a duplicate of a just-released flock fd (it closes
+                    // only at exec), so an immediate re-lock can see WouldBlock
+                    // against this process. A bounded retry absorbs that window;
+                    // it does not wait for a real holder, which is still refused.
+                    attempt += 1;
+                    std::thread::sleep(LOCK_RETRY_DELAY);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    return Err(format!("{busy_prefix} another riltra process holds {name}"));
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(format!("cannot lock index: {e}"));
+                }
             }
-            Err(std::fs::TryLockError::Error(e)) => Err(format!("cannot lock index: {e}")),
         }
     }
 }
+
+/// Extra `try_lock` attempts after `WouldBlock`, covering the fork-to-exec
+/// window of a concurrently spawned child (see `FileLock::try_acquire`).
+const LOCK_RETRY_ATTEMPTS: u32 = 10;
+/// Pause between `try_lock` attempts; worst-case added latency is about 100 ms.
+const LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
 
 fn prepare_staging(
     home: &Path,
@@ -4842,6 +4862,44 @@ mod tests {
         assert!(!dir.join("index").exists());
         let _lock = FileLock::try_acquire(&path, "index-busy:").unwrap();
         assert!(dir.join("index").is_dir());
+    }
+
+    #[test]
+    fn file_lock_reacquires_after_release_while_children_spawn() {
+        let dir = tmpdir("lock-reacquire");
+        let path = dir.join("r.db.lock");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = if crate::testutil::git_available() {
+            let stop = std::sync::Arc::clone(&stop);
+            Some(std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("git").arg("--version").output();
+                }
+            }))
+        } else {
+            None
+        };
+        let mut failure = None;
+        for i in 0..200 {
+            match FileLock::try_acquire(&path, "index-busy:") {
+                Ok(first) => drop(first),
+                Err(e) => {
+                    failure = Some(format!("iteration {i} first acquire: {e}"));
+                    break;
+                }
+            }
+            if let Err(e) = FileLock::try_acquire(&path, "index-busy:") {
+                failure = Some(format!("iteration {i} reacquire: {e}"));
+                break;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = spawner {
+            handle.join().unwrap();
+        }
+        if let Some(msg) = failure {
+            panic!("{msg}");
+        }
     }
 
     #[cfg(unix)]

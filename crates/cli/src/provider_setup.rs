@@ -145,10 +145,12 @@ pub fn families() -> &'static [Family] {
     &FAMILIES
 }
 
-/// Extensions tried for each executable location (never executed).
+/// Extensions tried for each executable location (never executed). Windows
+/// leaves out "" because npm also writes an extensionless sh shim, which is not
+/// runnable from PowerShell and would otherwise win over the `.cmd` shim.
 pub fn exec_exts() -> &'static [&'static str] {
     if cfg!(windows) {
-        &["", ".exe", ".cmd", ".bat"]
+        &[".exe", ".cmd", ".bat"]
     } else {
         &[""]
     }
@@ -394,10 +396,41 @@ mod tests {
     #[test]
     fn exec_exts_are_platform_specific() {
         if cfg!(windows) {
-            assert_eq!(exec_exts(), &["", ".exe", ".cmd", ".bat"][..]);
+            assert_eq!(exec_exts(), &[".exe", ".cmd", ".bat"][..]);
         } else {
             assert_eq!(exec_exts(), &[""][..]);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_producer_skips_extensionless_npm_shim_on_windows() {
+        let root = tmpdir("ps-producer-shim-local");
+        write(&root, "node_modules/.bin/scip-typescript", "#!/bin/sh\n");
+        write(
+            &root,
+            "node_modules/.bin/scip-typescript.cmd",
+            "@echo off\n",
+        );
+        let ts = family("typescript").producer.expect("producer");
+        assert_eq!(
+            find_producer(&root, ts, &[]),
+            Some(Hit::Local("scip-typescript.cmd".to_string()))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_producer_skips_extensionless_shim_on_path_on_windows() {
+        let root = tmpdir("ps-producer-shim-path");
+        let path_root = tmpdir("ps-producer-shim-path-dir");
+        write(&path_root, "scip-typescript", "#!/bin/sh\n");
+        let cmd = write(&path_root, "scip-typescript.cmd", "@echo off\n");
+        let ts = family("typescript").producer.expect("producer");
+        assert_eq!(
+            find_producer(&root, ts, std::slice::from_ref(&path_root)),
+            Some(Hit::Path(cmd))
+        );
     }
 
     #[test]

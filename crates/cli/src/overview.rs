@@ -99,7 +99,7 @@ pub struct NextAction {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // Task 3 wires the setup actions into CLI/MCP flows.
+#[allow(dead_code)] // RegisterProject and ConfigureClientManually have no producer yet.
 pub enum ActionKind {
     RegisterProject,
     BuildIndex,

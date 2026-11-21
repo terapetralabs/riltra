@@ -33,7 +33,6 @@ mod knowledge_store;
 mod knowledge_vector;
 mod lexical;
 mod lsp;
-#[allow(dead_code)] // Task 3 wires the CLI command and the MCP tool.
 mod map;
 mod mcp;
 mod overview;
@@ -76,7 +75,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic setup --repo <name> [--lsp-server <abs-path>]
   {NAME} callers --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} start [--path <directory>] [--name <name>] [--client codex|claude|opencode] [--json]\n  {NAME} overview --repo <name>\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} packet --repo <name> --anchors <json> [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n  {NAME} agent-block\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  watch        Rebuild the index after source changes; one JSON event per line\n  search       Search indexed symbols as JSON\n  query        Rank indexed symbols by the words of a text (lexical) as JSON\n  start        Guide project orientation and a selected-definition packet\n  overview     Summarize a registered project from bounded evidence as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  semantic setup Read-only provider setup report as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  packet Bounded context for selected code anchors\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n  agent-block Print the agent instruction block as Markdown text (not JSON)\n"
+  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} start [--path <directory>] [--name <name>] [--client codex|claude|opencode] [--json]\n  {NAME} overview --repo <name>\n  {NAME} map --repo <name> [--depth <n>] [--format json|markdown]\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} packet --repo <name> --anchors <json> [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n  {NAME} agent-block\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  watch        Rebuild the index after source changes; one JSON event per line\n  search       Search indexed symbols as JSON\n  query        Rank indexed symbols by the words of a text (lexical) as JSON\n  start        Guide project orientation and a selected-definition packet\n  overview     Summarize a registered project from bounded evidence as JSON\n  map          Area map with proven links and bounded static flows\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  semantic setup Read-only provider setup report as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  packet Bounded context for selected code anchors\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n  agent-block Print the agent instruction block as Markdown text (not JSON)\n"
     )
 }
 
@@ -256,6 +255,35 @@ fn cmd_overview(name: &str, out: &mut String, err: &mut String) -> i32 {
     match overview::render(&value) {
         Ok(json) => {
             *out = json + "\n";
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
+}
+
+fn cmd_map(name: &str, depth: usize, markdown: bool, out: &mut String, err: &mut String) -> i32 {
+    let (root, _) = match resolve_recorded_root(name, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    let value = match map::collect(&paths::config_dir(), name, Path::new(&root), depth) {
+        Ok(value) => value,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let text = if markdown {
+        Ok(map::render_markdown(&value))
+    } else {
+        map::render(&value).map(|json| json + "\n")
+    };
+    match text {
+        Ok(text) => {
+            *out = text;
             0
         }
         Err(e) => {
@@ -717,6 +745,11 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
         Command::RepoList => cmd_repo_list(out, err),
         Command::RepoStatus { repo } => cmd_repo_status(&repo, out, err),
         Command::Overview { repo } => cmd_overview(&repo, out, err),
+        Command::Map {
+            repo,
+            depth,
+            markdown,
+        } => cmd_map(&repo, depth, markdown, out, err),
         Command::Doctor { repo } => cmd_doctor(repo.as_deref(), out, err),
         Command::Scan {
             repo,

@@ -1621,12 +1621,312 @@ fn trim_one(map: &mut AreaMap) -> Option<&'static str> {
     None
 }
 
+/// The Markdown report (D8), CLI only. Every table cell is escaped and a `null`
+/// number reads `unknown`; the JSON document stays the contract.
+pub fn render_markdown(map: &AreaMap) -> String {
+    let withheld = map.graph_proof == Some("incompatible");
+    let blocks = [
+        header_lines(map),
+        areas_section(map),
+        links_section(map, withheld),
+        candidates_section(map, withheld),
+        flows_section(map, withheld),
+        actions_section(map),
+        omissions_section(map),
+        NOTE.to_string(),
+    ];
+    let mut text = blocks.join("\n\n");
+    text.push('\n');
+    text
+}
+
+fn header_lines(map: &AreaMap) -> String {
+    let snapshot = &map.snapshot;
+    let completeness = &map.completeness;
+    let reasons = list_or_none(snapshot.reasons.iter().cloned());
+    let imports = list_or_none(
+        map.import_verification
+            .by_verification
+            .iter()
+            .map(|count| format!("{} {}", count.verification, count.count)),
+    );
+    [
+        format!("# Area map: {}", one_line(&map.repo)),
+        format!(
+            "Snapshot: {} ({reasons}); imports: {} ({imports})",
+            text_of(&snapshot.status),
+            map.import_verification.total
+        ),
+        format!(
+            "Revision: snapshot {}, nonce {}, generation {}; graph proof: {}",
+            or_none(snapshot.id),
+            or_none(snapshot.nonce.as_deref()),
+            or_none(snapshot.generation),
+            map.graph_proof.unwrap_or("none")
+        ),
+        format!(
+            "Grouping: {}, depth {}. Areas are navigation hints, not architecture boundaries.",
+            map.grouping.basis, map.grouping.depth
+        ),
+        format!(
+            "Edges used: proven {}; candidate {}; counted only {}",
+            map.edges_used.proven.join(", "),
+            map.edges_used.candidate.join(", "),
+            map.edges_used.counted_only.join(", ")
+        ),
+        format!(
+            "Edges read: {} of {} (complete: {}); proven {} of {} (complete: {}); unattributed endpoints {}; ambiguous candidate names {}",
+            num(completeness.edges_read),
+            num(completeness.edges_total),
+            yes_no(completeness.edges_complete),
+            num(completeness.proven_read),
+            num(completeness.proven_total),
+            yes_no(completeness.proven_complete),
+            num(completeness.unattributed_endpoints),
+            num(completeness.ambiguous_candidate_names)
+        ),
+        format!("Bounds: {}", bounds_text(&map.bounds)),
+    ]
+    .join("\n")
+}
+
+fn areas_section(map: &AreaMap) -> String {
+    let mut lines = vec![
+        "## Areas".to_string(),
+        String::new(),
+        "| area | files | languages | definitions | entry points | hubs | proven in | proven out |"
+            .to_string(),
+        "| --- | --- | --- | --- | --- | --- | --- | --- |".to_string(),
+    ];
+    for area in &map.areas {
+        let points: Vec<String> = area
+            .entry_points
+            .iter()
+            .map(|point| cell(&format!("{}:{}", point.path, num(point.line))))
+            .collect();
+        let hubs: Vec<String> = area
+            .hubs
+            .iter()
+            .map(|hub| cell(&format!("{}:{}", hub.path, hub.line)))
+            .collect();
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            cell(&area.area),
+            area.files,
+            cell(&area.languages.join(", ")),
+            area.definitions,
+            points.join("<br>"),
+            hubs.join("<br>"),
+            num(area.proven_in),
+            num(area.proven_out)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn links_section(map: &AreaMap, withheld: bool) -> String {
+    let body = if withheld {
+        "Withheld: the stored graph has no current proof token; run riltra semantic import or riltra index --full.".to_string()
+    } else if map.links.is_empty() {
+        "No proven links in this snapshot.".to_string()
+    } else {
+        let mut lines = vec![
+            "| from | to | kind | count |".to_string(),
+            "| --- | --- | --- | --- |".to_string(),
+        ];
+        lines.extend(map.links.iter().map(|link| {
+            format!(
+                "| {} | {} | {} | {} |",
+                cell(&link.from),
+                cell(&link.to),
+                cell(&link.kind),
+                link.count
+            )
+        }));
+        lines.join("\n")
+    };
+    format!("## Proven links\n\n{body}")
+}
+
+fn candidates_section(map: &AreaMap, withheld: bool) -> String {
+    let body = if withheld {
+        "Withheld (graph proof incompatible).".to_string()
+    } else if map.candidate_links.is_empty() {
+        "None.".to_string()
+    } else {
+        let mut lines = vec![
+            "| from | to | name matches |".to_string(),
+            "| --- | --- | --- |".to_string(),
+        ];
+        lines.extend(map.candidate_links.iter().map(|link| {
+            format!(
+                "| {} | {} | {} |",
+                cell(&link.from),
+                cell(&link.to),
+                link.name_matches
+            )
+        }));
+        lines.join("\n")
+    };
+    format!("## Candidate links (name matches, not relations)\n\n{body}")
+}
+
+fn flows_section(map: &AreaMap, withheld: bool) -> String {
+    let body = if withheld {
+        "Withheld (graph proof incompatible).".to_string()
+    } else if map.flows.is_empty() {
+        "None.".to_string()
+    } else {
+        map.flows
+            .iter()
+            .map(flow_text)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    format!("## Flows (static paths, not proof of execution)\n\n{body}")
+}
+
+/// One flow (D6, D8): its heading, evidence line, area paths, definitions and trace.
+fn flow_text(flow: &Flow) -> String {
+    let body = &flow.body;
+    let name = flow.entry.name.as_deref().unwrap_or("unknown");
+    let mut lines = vec![
+        format!(
+            "### {}:{} {}",
+            one_line(&flow.entry.path),
+            flow.entry.line,
+            one_line(name)
+        ),
+        format!(
+            "Status: {}; verification: {}; freshness: {} ({}); traversal complete: {}",
+            body.status,
+            body.verification.as_deref().unwrap_or("none"),
+            body.freshness.as_deref().unwrap_or("none"),
+            list_or_none(body.freshness_reasons.iter().cloned()),
+            yes_no(Some(body.traversal_complete))
+        ),
+    ];
+    for path in &body.area_paths {
+        let areas: Vec<String> = path.areas.iter().map(|area| one_line(area)).collect();
+        lines.push(format!(
+            "- {} ({})",
+            areas.join(" → "),
+            one_line(&path.verification)
+        ));
+    }
+    if body.definitions.is_empty() {
+        lines.push("Definitions reached: none.".to_string());
+    } else {
+        lines.push("Definitions reached:".to_string());
+        for definition in &body.definitions {
+            lines.push(format!(
+                "- {}:{} {} (distance {})",
+                one_line(&definition.path),
+                definition.line,
+                one_line(definition.name.as_deref().unwrap_or("unknown")),
+                definition.distance
+            ));
+        }
+    }
+    lines.push(format!("Trace: `{}`", one_line(&flow.trace_command)));
+    lines.join("\n")
+}
+
+fn actions_section(map: &AreaMap) -> String {
+    if map.next_actions.is_empty() {
+        return "## Next actions\n\nNone.".to_string();
+    }
+    let lines: Vec<String> = map
+        .next_actions
+        .iter()
+        .map(|action| format!("- {}", one_line(&action.reason)))
+        .collect();
+    format!("## Next actions\n\n{}", lines.join("\n"))
+}
+
+fn omissions_section(map: &AreaMap) -> String {
+    if map.omissions.is_empty() {
+        return "## Omissions\n\nNone.".to_string();
+    }
+    let lines: Vec<String> = map
+        .omissions
+        .iter()
+        .map(|entry| {
+            format!(
+                "- {}: {} ({})",
+                entry.section,
+                num(entry.omitted_count),
+                entry.reason
+            )
+        })
+        .collect();
+    format!("## Omissions\n\n{}", lines.join("\n"))
+}
+
+/// Line breaks become spaces so a name cannot split a Markdown line.
+fn one_line(text: &str) -> String {
+    text.replace(['\r', '\n'], " ")
+}
+
+/// A table cell: one line, with `|` escaped.
+fn cell(text: &str) -> String {
+    one_line(text).replace('|', "\\|")
+}
+
+/// A count, or `unknown` when it is `null`.
+fn num<T: ToString>(value: Option<T>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |v| v.to_string())
+}
+
+/// A revision field, or `none` when it is `null`.
+fn or_none<T: ToString>(value: Option<T>) -> String {
+    value.map_or_else(|| "none".to_string(), |v| v.to_string())
+}
+
+fn yes_no(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
+}
+
+fn list_or_none(items: impl Iterator<Item = String>) -> String {
+    let items: Vec<String> = items.collect();
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
+/// A serialized unit value's text (for example the snapshot status).
+fn text_of<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `key value` pairs in struct order. Read from the struct's own JSON, so a new
+/// bound appears in the Markdown without a template change.
+fn bounds_text(bounds: &Bounds) -> String {
+    let json = serde_json::to_string(bounds).unwrap_or_default();
+    json.trim_matches(|c: char| c == '{' || c == '}')
+        .split(',')
+        .filter_map(|pair| pair.split_once(':'))
+        .map(|(key, value)| format!("{} {}", key.trim_matches('"'), value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         area_of, classify_trace_error, collect, collect_with, fit, flows_for, is_proven, render,
-        summarize_flow, trace_command, AreaEntry, AreaMap, EntryPoint, Flow, FlowAreaPath,
-        FlowBody, FlowDefinition, FlowEntry, Hub, Limits, Link, Omission, Omissions, FLOW_PATHS,
+        render_markdown, summarize_flow, trace_command, AreaEntry, AreaMap, CandidateLink,
+        EntryPoint, Flow, FlowAreaPath, FlowBody, FlowDefinition, FlowEntry, Hub, Limits, Link,
+        Omission, Omissions, FLOW_PATHS,
     };
     use crate::edges::tests as edge_fixtures;
     use crate::index;
@@ -3005,6 +3305,253 @@ mod tests {
         assert_eq!(
             omitted(&fitted.omissions, "flow_area_paths", "json_budget"),
             None
+        );
+    }
+
+    // ---- Task 3: the Markdown report (D8) ----
+
+    /// A fixed two-area map with one link, one candidate, one flow and one
+    /// omission, at snapshot 7, nonce `n-1` and the given generation.
+    fn fixed_map(generation: i64) -> AreaMap {
+        let mut map = empty_map();
+        map.repo = "demo".to_string();
+        map.snapshot.status = crate::overview::SnapshotState::Fresh;
+        map.snapshot.reasons.clear();
+        map.snapshot.id = Some(7);
+        map.snapshot.nonce = Some("n-1".to_string());
+        map.snapshot.generation = Some(generation);
+        map.graph_proof = Some("current");
+        map.completeness.edges_read = Some(4);
+        map.completeness.edges_total = Some(9);
+        map.completeness.edges_complete = Some(false);
+        map.completeness.proven_read = Some(2);
+        map.completeness.proven_total = Some(2);
+        map.completeness.proven_complete = Some(true);
+        map.completeness.unattributed_endpoints = Some(0);
+        map.completeness.ambiguous_candidate_names = Some(0);
+
+        let mut a = AreaEntry::new("crates/a");
+        a.files = 2;
+        a.languages = vec!["rust".to_string()];
+        a.definitions = 3;
+        a.entry_points = vec![EntryPoint {
+            path: "crates/a/main.rs".to_string(),
+            line: Some(1),
+            col: Some(1),
+            name: Some("main".to_string()),
+            basis: "main-definition",
+        }];
+        a.hubs = vec![Hub {
+            path: "crates/a/lib.rs".to_string(),
+            line: 4,
+            col: 1,
+            name: Some("helper".to_string()),
+            kind: "function".to_string(),
+            inbound_proven: 2,
+        }];
+        a.proven_in = Some(0);
+        a.proven_out = Some(1);
+        a.proven_internal = Some(2);
+        a.candidate_internal = Some(0);
+        a.unresolved_calls = Some(0);
+        a.imports = Some(0);
+        // Area b keeps its candidate, unresolved and import counters unknown.
+        let mut b = AreaEntry::new("crates/b");
+        b.files = 1;
+        b.languages = vec!["rust".to_string()];
+        b.definitions = 1;
+        b.proven_in = Some(1);
+        b.proven_out = Some(0);
+        b.proven_internal = Some(0);
+        map.areas = vec![a, b];
+
+        map.links = vec![Link {
+            from: "crates/a".to_string(),
+            to: "crates/b".to_string(),
+            kind: "CALLS".to_string(),
+            count: 1,
+        }];
+        map.candidate_links = vec![CandidateLink {
+            from: "crates/b".to_string(),
+            to: "crates/a".to_string(),
+            name_matches: 1,
+            basis: "candidate-name",
+        }];
+        map.flows = vec![Flow {
+            entry: FlowEntry {
+                path: "crates/a/main.rs".to_string(),
+                line: 1,
+                col: 1,
+                name: Some("main".to_string()),
+            },
+            body: FlowBody {
+                status: "ok",
+                verification: Some("Unverified".to_string()),
+                freshness: Some("fresh".to_string()),
+                freshness_reasons: Vec::new(),
+                completeness: None,
+                area_paths: vec![FlowAreaPath {
+                    areas: vec!["crates/a".to_string(), "crates/b".to_string()],
+                    verification: "Unverified".to_string(),
+                }],
+                definitions: vec![FlowDefinition {
+                    path: "crates/b/lib.rs".to_string(),
+                    line: 1,
+                    col: 1,
+                    name: Some("helper".to_string()),
+                    distance: 1,
+                }],
+                paths_returned: 1,
+                unproven_paths: 0,
+                traversal_complete: true,
+                cycle: false,
+                truncated: false,
+                unresolved: Vec::new(),
+            },
+            trace_command:
+                "riltra trace --repo demo --path crates/a/main.rs --line 1 --col 1 --depth 3"
+                    .to_string(),
+        }];
+        map.next_actions = vec![crate::overview::NextAction {
+            kind: crate::overview::ActionKind::ReviewFreshness,
+            reason: "the indexed snapshot is not confirmed fresh; areas and links may not match the source"
+                .to_string(),
+        }];
+        map.omissions = vec![Omission {
+            section: "edges",
+            reason: "item_limit",
+            omitted_count: Some(5),
+        }];
+        map
+    }
+
+    #[test]
+    fn markdown_layout_fixed() {
+        let expected = [
+            "# Area map: demo",
+            "Snapshot: fresh (none); imports: 0 (none)",
+            "Revision: snapshot 7, nonce n-1, generation 3; graph proof: current",
+            "Grouping: directory, depth 2. Areas are navigation hints, not architecture boundaries.",
+            "Edges used: proven CALLS, REFERENCES; candidate POTENTIAL_CALL; counted only IMPORTS",
+            "Edges read: 4 of 9 (complete: no); proven 2 of 2 (complete: yes); unattributed endpoints 0; ambiguous candidate names 0",
+            "Bounds: areas 50, entry_points_per_area 3, hubs_per_area 3, links 100, candidate_links 100, flows 3, flow_depth 3, flow_paths 1000, flow_time_ms 2000, flow_area_paths 10, flow_definitions 20, imports 20, edges_read 50000, max_bytes 262144",
+            "",
+            "## Areas",
+            "",
+            "| area | files | languages | definitions | entry points | hubs | proven in | proven out |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| crates/a | 2 | rust | 3 | crates/a/main.rs:1 | crates/a/lib.rs:4 | 0 | 1 |",
+            "| crates/b | 1 | rust | 1 |  |  | 1 | 0 |",
+            "",
+            "## Proven links",
+            "",
+            "| from | to | kind | count |",
+            "| --- | --- | --- | --- |",
+            "| crates/a | crates/b | CALLS | 1 |",
+            "",
+            "## Candidate links (name matches, not relations)",
+            "",
+            "| from | to | name matches |",
+            "| --- | --- | --- |",
+            "| crates/b | crates/a | 1 |",
+            "",
+            "## Flows (static paths, not proof of execution)",
+            "",
+            "### crates/a/main.rs:1 main",
+            "Status: ok; verification: Unverified; freshness: fresh (none); traversal complete: yes",
+            "- crates/a → crates/b (Unverified)",
+            "Definitions reached:",
+            "- crates/b/lib.rs:1 helper (distance 1)",
+            "Trace: `riltra trace --repo demo --path crates/a/main.rs --line 1 --col 1 --depth 3`",
+            "",
+            "## Next actions",
+            "",
+            "- the indexed snapshot is not confirmed fresh; areas and links may not match the source",
+            "",
+            "## Omissions",
+            "",
+            "- edges: 5 (item_limit)",
+            "",
+            "static paths are not proof of execution; candidate links are name matches, not relations",
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(render_markdown(&fixed_map(3)), expected);
+    }
+
+    #[test]
+    fn markdown_distinguishes_revisions() {
+        let three = render_markdown(&fixed_map(3));
+        let four = render_markdown(&fixed_map(4));
+        assert_eq!(three.lines().count(), four.lines().count());
+        let differing: Vec<(&str, &str)> = three
+            .lines()
+            .zip(four.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(differing.len(), 1, "{differing:?}");
+        assert!(differing[0].0.starts_with("Revision: "));
+        assert!(four.contains("Revision: snapshot 7, nonce n-1, generation 4"));
+    }
+
+    #[test]
+    fn markdown_escapes_cells() {
+        let mut map = empty_map();
+        let mut pipe = AreaEntry::new("we|rd dir/é");
+        pipe.files = 1;
+        let mut breaks = AreaEntry::new("x\r\ny");
+        breaks.files = 1;
+        map.areas = vec![pipe, breaks];
+        let text = render_markdown(&map);
+        assert!(text.contains("| we\\|rd dir/é | 1 |"), "{text}");
+        assert!(text.contains("| x  y | 1 |"), "{text}");
+        assert!(!text.contains("we|rd"), "{text}");
+        let json: Value = serde_json::from_str(&render(&map).unwrap()).unwrap();
+        assert_eq!(json["areas"][0]["area"], "we|rd dir/é");
+    }
+
+    #[test]
+    fn markdown_empty_sections() {
+        let text = render_markdown(&empty_map());
+        assert!(text.contains("No proven links in this snapshot."), "{text}");
+        assert!(
+            text.contains("## Candidate links (name matches, not relations)\n\nNone."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn markdown_withheld_graph() {
+        let f = graph_fixture("markdown-withheld");
+        let control = render_markdown(&collect(&f.home, "r", &f.home, 2).unwrap());
+        assert!(
+            control.contains("| crates/a | crates/b | CALLS | 1 |"),
+            "{control}"
+        );
+        assert!(!control.contains("Withheld"), "{control}");
+
+        store::open_live(&db_of(&f))
+            .unwrap()
+            .execute("DELETE FROM meta WHERE key = 'graph_proof'", [])
+            .unwrap();
+        let text = render_markdown(&collect(&f.home, "r", &f.home, 2).unwrap());
+        assert!(
+            text.contains("Withheld: the stored graph has no current proof token; run riltra semantic import or riltra index --full."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Withheld (graph proof incompatible)."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("No proven links in this snapshot."),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("| crates/a |")
+                    && line.ends_with("| unknown | unknown |")),
+            "{text}"
         );
     }
 }

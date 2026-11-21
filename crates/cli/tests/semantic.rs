@@ -1685,6 +1685,19 @@ fn setup_never_executes_found_programs() {
         .filter(|name| name.starts_with("ran-"))
         .collect();
     assert!(ran.is_empty(), "a program was executed: {ran:?}");
+
+    // Positive control: the same fake shape, run on purpose, must leave its marker,
+    // so the empty listing above means "not run" and not "marker never written".
+    fake_program(&bin, "control");
+    let mut control = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(bin.join("control.cmd"));
+        c
+    } else {
+        std::process::Command::new(bin.join("control"))
+    };
+    assert!(control.status().unwrap().success(), "control did not run");
+    assert!(bin.join("ran-control").exists(), "control marker missing");
 }
 
 #[test]

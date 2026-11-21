@@ -2989,7 +2989,7 @@ struct PathRow {
 }
 
 /// A path's dependent file: the caller file of its LAST edge.
-fn dependent_file(edges: &[store::EdgeRow]) -> String {
+pub(crate) fn dependent_file(edges: &[store::EdgeRow]) -> String {
     edges
         .last()
         .map_or_else(String::new, |e| e.caller_path.clone())
@@ -3278,6 +3278,90 @@ pub(crate) fn graph_query_tx_classified(
             )
         })
         .transpose()?;
+    graph_query_body(
+        tx,
+        name,
+        canon,
+        snapshot,
+        anchor,
+        destination,
+        request,
+        started,
+        impact,
+        candidates,
+    )
+}
+
+/// The snapshot-definition entry: the traversal starts from a definition the index
+/// already holds, so no position is resolved against the live source (which refuses
+/// the syntax fallback after any edit). Carries no destination; `request.source` is
+/// ignored.
+// shortcut: no non-test caller until the `checks` report (Task 2) uses it; remove the allow then.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) fn graph_query_from_anchor_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    canon: &Path,
+    snapshot: store::Snapshot,
+    anchor: EdgeAnchor,
+    request: &TraceRequest<'_>,
+    started: Instant,
+    impact: bool,
+    candidates: bool,
+) -> Result<TraceQueryOut, GraphQueryError> {
+    store::require_graph_proof(tx, snapshot.id)?;
+    graph_query_body(
+        tx, name, canon, snapshot, anchor, None, request, started, impact, candidates,
+    )
+}
+
+/// The anchor of one snapshot definition, built from its index row. It reads
+/// nothing, so it stays valid after the live file changed. Not a position query:
+/// `line1`/`col1` are 0 and must never be printed.
+// shortcut: no non-test caller until the `checks` report (Task 2) uses it; remove the allow then.
+#[allow(dead_code)]
+pub(crate) fn snapshot_def_anchor(
+    path: &str,
+    name: &str,
+    kind: &str,
+    byte_start: usize,
+    byte_end: usize,
+) -> EdgeAnchor {
+    EdgeAnchor {
+        kind: AnchorKind::SyntaxFallback,
+        path: path.to_string(),
+        line1: 0,
+        col1: 0,
+        symbol_uri: None,
+        import_id: None,
+        doc: None,
+        display: Some(name.to_string()),
+        candidate_display: Some(name.to_string()),
+        span_bytes: Some((byte_start, byte_end)),
+        precision: "Heuristic".to_string(),
+        uncertainty: Some(
+            "snapshot definition: resolved from the index, not from the live source".to_string(),
+        ),
+        data_member: kind == "field",
+    }
+}
+
+/// The traversal and answer once the source anchor (and any destination) is known.
+/// Shared by the position entry and the snapshot-definition entry; the caller has
+/// already required the graph proof.
+#[allow(clippy::too_many_arguments)]
+fn graph_query_body(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    canon: &Path,
+    snapshot: store::Snapshot,
+    anchor: EdgeAnchor,
+    destination: Option<EdgeAnchor>,
+    request: &TraceRequest<'_>,
+    started: Instant,
+    impact: bool,
+    candidates: bool,
+) -> Result<TraceQueryOut, GraphQueryError> {
     let start = anchor_endpoint(&anchor)
         .ok_or_else(|| GraphQueryError::Anchor("source has no identity".to_string()))?;
     let target = destination.as_ref().and_then(anchor_endpoint);
@@ -8001,5 +8085,212 @@ mod setup_state_tests {
         assert!(!state.reasons.is_empty());
         assert_eq!(state.rows.len(), 1);
         assert_eq!(state.rows[0].verification, "Stale");
+    }
+}
+
+#[cfg(test)]
+mod snapshot_anchor_tests {
+    use super::{
+        graph_query_from_anchor_tx, impact_query, snapshot_def_anchor, GraphQueryError, SpanQuery,
+        TraceQueryOut, TraceRequest, MAX_SEARCH_LIMIT,
+    };
+    use crate::edges::tests as edge_fixtures;
+    use crate::store;
+    use crate::store::tests as store_fixtures;
+    use crate::testutil::tmpdir;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    /// `r.py` defines `f` (bytes 0..21); `t.py` imports `f` and calls it by name only.
+    const R_SOURCE: &[u8] = b"def f():\n    return 1\n";
+    const T_SOURCE: &[u8] = b"from r import f\n\ndef g():\n    return f()\n";
+
+    struct Fixture {
+        home: PathBuf,
+        root: PathBuf,
+    }
+
+    /// One snapshot over a canonical root that holds both source files, with the
+    /// graph proof certified or not.
+    fn fixture(tag: &str, certified: bool) -> Fixture {
+        let home = tmpdir(tag);
+        let root = home.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::paths::canonical_root(&root).unwrap();
+        std::fs::write(root.join("r.py"), R_SOURCE).unwrap();
+        std::fs::write(root.join("t.py"), T_SOURCE).unwrap();
+        let db = store::db_path(&home, "r");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = store::open_live(&db).unwrap();
+        let sid = edge_fixtures::mk_snap(&conn);
+        conn.execute(
+            "UPDATE snapshots SET root = ?1 WHERE id = ?2",
+            rusqlite::params![root.to_string_lossy().into_owned(), sid],
+        )
+        .unwrap();
+        let r_file = store::insert_file(
+            &conn,
+            sid,
+            &store::FileRow {
+                path: "r.py".to_string(),
+                language: "python".to_string(),
+                bytes: R_SOURCE.len() as u64,
+                digest: store::content_digest(R_SOURCE),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        let t_file = store::insert_file(
+            &conn,
+            sid,
+            &store::FileRow {
+                path: "t.py".to_string(),
+                language: "python".to_string(),
+                bytes: T_SOURCE.len() as u64,
+                digest: store::content_digest(T_SOURCE),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        let mut definition = store_fixtures::sample_symbol(r_file, "f");
+        definition.byte_start = 0;
+        definition.byte_end = 21;
+        store::insert_symbol(&conn, sid, &definition).unwrap();
+        let mut call = store_fixtures::stored_edge(
+            Some(store_fixtures::syntax_endpoint("t.py", 0)),
+            None,
+            "POTENTIAL_CALL",
+            "Heuristic",
+            None,
+        );
+        call.snapshot_id = sid;
+        call.file_id = t_file;
+        call.caller_path = "t.py".to_string();
+        call.callee_name = "f".to_string();
+        call.provider = "syntax".to_string();
+        // The call `f()` at bytes 37..40 of `T_SOURCE`; the evidence must name the same span.
+        call.caller_span_bytes = (37, 40);
+        call.evidence = serde_json::json!({"path": "t.py", "span": [37, 40]}).to_string();
+        store::insert_edge(&conn, &call).unwrap();
+        store::insert_import(
+            &conn,
+            sid,
+            &store::ImportRow {
+                file_id: t_file,
+                text: Some("from r import f".to_string()),
+                start_line: 1,
+                start_col: 1,
+                end_line: 1,
+                end_col: 17,
+                byte_start: 0,
+                byte_end: 16,
+                provider: "syntax".to_string(),
+                grammar: "python:0.25.0".to_string(),
+                language: "python".to_string(),
+            },
+        )
+        .unwrap();
+        if certified {
+            store::mark_graph_proof(&conn, sid).unwrap();
+        }
+        Fixture { home, root }
+    }
+
+    fn request() -> TraceRequest<'static> {
+        TraceRequest {
+            source: SpanQuery {
+                rel: "r.py",
+                line1: 1,
+                col1: 1,
+                refs: false,
+            },
+            symbol: None,
+            destination: None,
+            depth: 3,
+            limit: MAX_SEARCH_LIMIT,
+            offset: 0,
+            summary: false,
+            include_tests: false,
+        }
+    }
+
+    /// The snapshot entry: the definition comes from the index, never the live source.
+    fn by_snapshot(f: &Fixture) -> Result<TraceQueryOut, String> {
+        let mut conn = store::open_live(&store::db_path(&f.home, "r")).unwrap();
+        let tx = conn.transaction().unwrap();
+        let snapshot = store::latest_snapshot(&tx).unwrap().unwrap();
+        let anchor = snapshot_def_anchor("r.py", "f", "function", 0, 21);
+        graph_query_from_anchor_tx(
+            &tx,
+            "r",
+            &f.root,
+            snapshot,
+            anchor,
+            &request(),
+            Instant::now(),
+            true,
+            true,
+        )
+        .map_err(GraphQueryError::into_message)
+    }
+
+    /// The position entry: the anchor is resolved from line and column.
+    fn by_position(f: &Fixture) -> Result<TraceQueryOut, String> {
+        impact_query(&f.home, "r", &f.root, &request())
+    }
+
+    /// Basis and (caller path, edge kind) of every path, in traversal order.
+    fn path_keys(out: &TraceQueryOut) -> Vec<(&'static str, Vec<(String, String)>)> {
+        out.paths
+            .iter()
+            .map(|p| {
+                (
+                    p.basis,
+                    p.edges
+                        .iter()
+                        .map(|e| (e.edge.caller_path.clone(), e.edge.edge_kind.clone()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_anchor_traverses_after_live_edit() {
+        let f = fixture("snap-anchor-edit", true);
+        // The live file changes after indexing: same positions, different body.
+        std::fs::write(f.root.join("r.py"), b"def f():\n    return 2\n").unwrap();
+        // Control: the position entry refuses the syntax fallback.
+        let refused = by_position(&f).err().expect("position entry must refuse");
+        assert!(
+            refused.contains("source-changed; reindex before syntax fallback"),
+            "{refused}"
+        );
+        let out = by_snapshot(&f).unwrap();
+        assert!(
+            out.paths.iter().any(|p| p.basis == "candidate-name"
+                && p.edges.iter().any(|e| e.edge.caller_path == "t.py")),
+            "expected a candidate-name path from t.py"
+        );
+        assert_ne!(out.freshness, "fresh");
+        assert_eq!(out.impact_verdict, Some("UNKNOWN"));
+    }
+
+    #[test]
+    fn snapshot_anchor_matches_position_anchor_when_fresh() {
+        let f = fixture("snap-anchor-fresh", true);
+        let by_position = by_position(&f).unwrap();
+        let by_snapshot = by_snapshot(&f).unwrap();
+        assert!(!path_keys(&by_snapshot).is_empty());
+        assert_eq!(path_keys(&by_snapshot), path_keys(&by_position));
+    }
+
+    #[test]
+    fn snapshot_anchor_requires_graph_proof() {
+        let f = fixture("snap-anchor-proof", false);
+        let refused = by_position(&f).err().expect("position entry must refuse");
+        assert!(refused.contains("graph-proof-incompatible"), "{refused}");
+        let refused = by_snapshot(&f).err().expect("snapshot entry must refuse");
+        assert!(refused.contains("graph-proof-incompatible"), "{refused}");
     }
 }

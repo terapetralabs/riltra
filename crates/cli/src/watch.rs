@@ -7,9 +7,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::git;
-use crate::index;
+use crate::index::{self, Freshness, IndexSummary};
 use crate::scan::{self, PlanAction};
 
 /// What a poll compares. `files` maps a repository-relative path to
@@ -97,6 +98,170 @@ pub fn signature(root: &Path, excluded: &Excluded) -> Result<Signature, String> 
         head,
         branch,
     })
+}
+
+/// Polling and debounce settings for `run`. Defaults: poll every 1000 ms, build
+/// after 500 ms of quiet, and build at the latest after 10000 ms of pending change.
+/// `max_builds` counts successful builds only (C10).
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub interval_ms: u64,
+    pub debounce_ms: u64,
+    pub max_wait_ms: u64,
+    pub max_builds: Option<u64>,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            interval_ms: 1000,
+            debounce_ms: 500,
+            max_wait_ms: 10_000,
+            max_builds: None,
+        }
+    }
+}
+
+/// One watch event before it is rendered as JSON. `run` never emits `Stopped`;
+/// the caller emits it when `run` returns an error.
+// `Built` carries the summary verbatim, as the contract states; an event is built once per
+// successful build, so the size gap between variants costs nothing that matters here.
+#[allow(clippy::large_enum_variant)]
+pub enum Event {
+    Started { status: String },
+    Built(IndexSummary),
+    Failed { reason: String },
+    Busy,
+    Stopped { reason: String },
+}
+
+/// Everything the loop reads from outside, so a test can script it.
+pub trait WatchDeps {
+    /// Monotonic milliseconds.
+    fn now_ms(&mut self) -> u64;
+    fn sleep(&mut self, ms: u64);
+    fn signature(&mut self) -> Result<Signature, String>;
+    fn build(&mut self) -> Result<IndexSummary, String>;
+    fn freshness(&mut self) -> Freshness;
+    fn should_stop(&mut self) -> bool;
+}
+
+/// The production deps: the real clock, the real filesystem and the real index.
+pub struct RealDeps {
+    home: PathBuf,
+    name: String,
+    root: PathBuf,
+    excluded: Excluded,
+    started: Instant,
+}
+
+impl RealDeps {
+    pub fn new(home: &Path, name: &str, root: &Path, excluded: Excluded) -> RealDeps {
+        RealDeps {
+            home: home.to_path_buf(),
+            name: name.to_string(),
+            root: root.to_path_buf(),
+            excluded,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl WatchDeps for RealDeps {
+    fn now_ms(&mut self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn sleep(&mut self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
+    fn signature(&mut self) -> Result<Signature, String> {
+        signature(&self.root, &self.excluded)
+    }
+
+    fn build(&mut self) -> Result<IndexSummary, String> {
+        index::build(&self.home, &self.name, &self.root, false)
+    }
+
+    fn freshness(&mut self) -> Freshness {
+        index::evaluate(&self.home, &self.name, &self.root)
+    }
+
+    fn should_stop(&mut self) -> bool {
+        false
+    }
+}
+
+/// The debounced watch loop. Returns `Err` only when a signature cannot be taken.
+pub fn run(
+    opts: &Options,
+    deps: &mut dyn WatchDeps,
+    emit: &mut dyn FnMut(&Event),
+) -> Result<(), String> {
+    let mut last = deps.signature()?;
+    let status = deps.freshness().status;
+    emit(&Event::Started {
+        status: status.clone(),
+    });
+    let mut pending = status != "fresh";
+    let start = deps.now_ms();
+    let mut quiet_since = start;
+    let mut first_pending = pending.then_some(start);
+    let mut failures: u32 = 0;
+    let mut builds: u64 = 0;
+    loop {
+        if deps.should_stop() || opts.max_builds == Some(builds) {
+            return Ok(());
+        }
+        // B7: the backoff doubles per consecutive failure, capped at 60 s, and never overflows.
+        let shift = failures.min(6);
+        deps.sleep(opts.interval_ms.saturating_mul(1u64 << shift).min(60_000));
+        let cur = deps.signature()?;
+        if cur != last {
+            let now = deps.now_ms();
+            let first = *first_pending.get_or_insert(now);
+            pending = true;
+            quiet_since = now;
+            last = cur.clone();
+            // C9: keep waiting for quiet until the ceiling is reached.
+            if now - first < opts.max_wait_ms {
+                continue;
+            }
+        }
+        if !pending {
+            continue;
+        }
+        let now = deps.now_ms();
+        let quiet = now - quiet_since >= opts.debounce_ms;
+        let ceiling = first_pending.is_some_and(|f| now - f >= opts.max_wait_ms);
+        if !(quiet || ceiling) {
+            continue;
+        }
+        let before = cur;
+        first_pending = None;
+        match deps.build() {
+            Ok(summary) => {
+                emit(&Event::Built(summary));
+                builds += 1;
+                failures = 0;
+                pending = false;
+            }
+            // C9: a busy retry waits a full debounce again; it never retries on every poll.
+            Err(e) if e.starts_with("index-busy:") => {
+                emit(&Event::Busy);
+                quiet_since = deps.now_ms();
+            }
+            // C5: a failed build waits for a new change before the next attempt.
+            Err(reason) => {
+                emit(&Event::Failed { reason });
+                failures += 1;
+                pending = false;
+            }
+        }
+        // A change that landed during the build differs from `before`, so the next poll sets pending.
+        last = before;
+    }
 }
 
 #[cfg(test)]
@@ -327,5 +492,324 @@ mod tests {
             git::head_branch_using(&root, &run),
             (None, Some("main".to_string()))
         );
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::{run, Event, Options, Signature, WatchDeps};
+    use crate::index::{Freshness, IndexSummary, PhaseMs};
+    use std::collections::{BTreeMap, VecDeque};
+
+    /// Scripted clock and signatures. The clock moves only in `sleep`.
+    struct Fake {
+        now: u64,
+        sleeps: Vec<u64>,
+        sigs: VecDeque<Result<String, String>>,
+        sig_default: String,
+        freshness_status: String,
+        builds: Vec<u64>,
+        build_results: VecDeque<Result<IndexSummary, String>>,
+        sig_on_build: Option<String>,
+        bump_on_build: bool,
+        stop_after_sleeps: usize,
+        stop_after_builds: usize,
+    }
+
+    impl Fake {
+        fn new(freshness: &str, start: &str) -> Fake {
+            Fake {
+                now: 0,
+                sleeps: Vec::new(),
+                sigs: VecDeque::new(),
+                sig_default: start.to_string(),
+                freshness_status: freshness.to_string(),
+                builds: Vec::new(),
+                build_results: VecDeque::new(),
+                sig_on_build: None,
+                bump_on_build: false,
+                stop_after_sleeps: 20,
+                stop_after_builds: usize::MAX,
+            }
+        }
+
+        /// Signature answers in order; once they run out, `sig_default`.
+        fn script(mut self, tags: &[&str]) -> Fake {
+            self.sigs = tags.iter().map(|t| Ok(t.to_string())).collect();
+            self
+        }
+    }
+
+    impl WatchDeps for Fake {
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+
+        fn sleep(&mut self, ms: u64) {
+            self.sleeps.push(ms);
+            self.now += ms;
+        }
+
+        fn signature(&mut self) -> Result<Signature, String> {
+            let next = self
+                .sigs
+                .pop_front()
+                .unwrap_or_else(|| Ok(self.sig_default.clone()));
+            next.map(|tag| Signature {
+                files: BTreeMap::new(),
+                config: tag,
+                head: None,
+                branch: None,
+            })
+        }
+
+        fn build(&mut self) -> Result<IndexSummary, String> {
+            self.builds.push(self.now);
+            if let Some(next) = self.sig_on_build.take() {
+                self.sig_default = next;
+            }
+            if self.bump_on_build {
+                self.sig_default = format!("v{}", self.builds.len());
+            }
+            self.build_results
+                .pop_front()
+                .unwrap_or_else(|| Ok(summary()))
+        }
+
+        fn freshness(&mut self) -> Freshness {
+            Freshness {
+                status: self.freshness_status.clone(),
+                reasons: Vec::new(),
+                snapshot: None,
+            }
+        }
+
+        fn should_stop(&mut self) -> bool {
+            self.sleeps.len() >= self.stop_after_sleeps
+                || self.builds.len() >= self.stop_after_builds
+        }
+    }
+
+    fn summary() -> IndexSummary {
+        IndexSummary {
+            snapshot_id: 1,
+            status_at_write: "fresh".to_string(),
+            pre_fingerprint: String::new(),
+            post_fingerprint: String::new(),
+            files_discovered: 0,
+            processed: 0,
+            definitions: 0,
+            imports: 0,
+            calls: 0,
+            errors: 0,
+            skipped_ignored: 0,
+            skipped_large: 0,
+            skipped_binary: 0,
+            skipped_symlink: 0,
+            skipped_escape: 0,
+            skipped_unreadable: 0,
+            unsupported_total: 0,
+            mode: "incremental".to_string(),
+            reused: 0,
+            reparsed: 0,
+            added: 0,
+            removed: 0,
+            fallback_reason: String::new(),
+            timings_ms: PhaseMs {
+                diff: 0,
+                ingest: 0,
+                verify: 0,
+                promote: 0,
+            },
+        }
+    }
+
+    fn busy() -> String {
+        "index-busy: lock held".to_string()
+    }
+
+    fn name(e: &Event) -> &'static str {
+        match e {
+            Event::Started { .. } => "started",
+            Event::Built(_) => "built",
+            Event::Failed { .. } => "failed",
+            Event::Busy => "busy",
+            Event::Stopped { .. } => "stopped",
+        }
+    }
+
+    fn drive(opts: &Options, fake: &mut Fake) -> (Result<(), String>, Vec<&'static str>) {
+        let mut names = Vec::new();
+        let result = run(opts, fake, &mut |e: &Event| names.push(name(e)));
+        (result, names)
+    }
+
+    #[test]
+    fn defaults_match_the_brief() {
+        let o = Options::default();
+        assert_eq!(
+            (o.interval_ms, o.debounce_ms, o.max_wait_ms, o.max_builds),
+            (1000, 500, 10_000, None)
+        );
+    }
+
+    #[test]
+    fn stale_at_start_builds_once() {
+        let mut fake = Fake::new("stale", "A");
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "built"]);
+        assert_eq!(fake.builds, vec![1000]);
+    }
+
+    #[test]
+    fn fresh_at_start_does_not_build() {
+        let mut fake = Fake::new("fresh", "A");
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started"]);
+        assert!(fake.builds.is_empty());
+    }
+
+    #[test]
+    fn change_during_startup_is_not_lost() {
+        // A is taken before the freshness check, B after it.
+        let mut fake = Fake::new("fresh", "B").script(&["A"]);
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "built"]);
+        assert_eq!(fake.builds, vec![2000]);
+    }
+
+    #[test]
+    fn burst_is_coalesced() {
+        // Changes on four polls (t=100..400), then quiet. The build waits 500 ms after the last change.
+        let mut fake = Fake::new("fresh", "E").script(&["A", "B", "C", "D"]);
+        let opts = Options {
+            interval_ms: 100,
+            ..Options::default()
+        };
+        let (result, names) = drive(&opts, &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "built"]);
+        assert_eq!(fake.builds, vec![900]);
+    }
+
+    #[test]
+    fn change_during_build_triggers_second_build() {
+        let mut fake = Fake::new("stale", "A");
+        fake.sig_on_build = Some("B".to_string());
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "built", "built"]);
+        assert_eq!(fake.builds, vec![1000, 3000]);
+    }
+
+    #[test]
+    fn no_rebuild_without_change_after_success() {
+        let mut fake = Fake::new("stale", "A");
+        fake.stop_after_sleeps = 20;
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "built"]);
+        assert_eq!(fake.builds.len(), 1);
+    }
+
+    #[test]
+    fn failed_build_waits_for_change_and_backs_off() {
+        let mut fake = Fake::new("stale", "C");
+        fake.sigs = ["A", "A", "A", "A", "A", "A", "A", "B", "B", "B", "C", "C"]
+            .iter()
+            .map(|t| Ok(t.to_string()))
+            .collect();
+        fake.build_results = VecDeque::from(vec![
+            Err("boom".to_string()),
+            Err("boom".to_string()),
+            Ok(summary()),
+        ]);
+        fake.stop_after_sleeps = 12;
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "failed", "failed", "built"]);
+        assert_eq!(
+            fake.sleeps,
+            vec![1000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 4000, 4000, 4000, 1000]
+        );
+        assert_eq!(fake.builds, vec![1000, 15000, 27000]);
+    }
+
+    #[test]
+    fn busy_stays_pending() {
+        let mut fake = Fake::new("stale", "A");
+        fake.build_results = VecDeque::from(vec![Err(busy()), Ok(summary())]);
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "busy", "built"]);
+        assert_eq!(fake.builds, vec![1000, 2000]);
+    }
+
+    #[test]
+    fn consecutive_busy_waits_debounce() {
+        let mut fake = Fake::new("stale", "A");
+        fake.build_results =
+            VecDeque::from(vec![Err(busy()), Err(busy()), Err(busy()), Ok(summary())]);
+        fake.stop_after_sleeps = 100;
+        let opts = Options {
+            interval_ms: 100,
+            debounce_ms: 500,
+            max_wait_ms: 2000,
+            max_builds: None,
+        };
+        let (result, names) = drive(&opts, &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "busy", "busy", "busy", "built"]);
+        assert_eq!(fake.builds, vec![500, 1000, 1500, 2000]);
+    }
+
+    #[test]
+    fn continuous_changes_build_after_max_wait() {
+        // The signature changes on every poll. The first change is at t=100.
+        let mut fake = Fake::new("fresh", "A");
+        fake.stop_after_sleeps = 100;
+        fake.sigs = std::iter::once(Ok("A".to_string()))
+            .chain((1..=60).map(|i| Ok(format!("c{i}"))))
+            .collect();
+        let opts = Options {
+            interval_ms: 100,
+            debounce_ms: 500,
+            max_wait_ms: 2000,
+            max_builds: Some(2),
+        };
+        let (result, names) = drive(&opts, &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(names, vec!["started", "built", "built"]);
+        assert_eq!(fake.builds, vec![2100, 4200]);
+    }
+
+    #[test]
+    fn backoff_never_overflows() {
+        let mut fake = Fake::new("stale", "A");
+        fake.bump_on_build = true;
+        fake.build_results = (0..100).map(|_| Err("boom".to_string())).collect();
+        fake.stop_after_builds = 100;
+        fake.stop_after_sleeps = usize::MAX;
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert!(result.is_ok());
+        assert_eq!(fake.builds.len(), 100);
+        assert_eq!(
+            names.iter().copied().filter(|n| *n == "failed").count(),
+            100
+        );
+        assert!(fake.sleeps.iter().all(|s| *s <= 60_000));
+        assert!(fake.sleeps.contains(&60_000));
+    }
+
+    #[test]
+    fn signature_error_stops_run() {
+        let mut fake = Fake::new("fresh", "A");
+        fake.sigs = VecDeque::from(vec![Ok("A".to_string()), Err("gone".to_string())]);
+        let (result, names) = drive(&Options::default(), &mut fake);
+        assert_eq!(result, Err("gone".to_string()));
+        assert_eq!(names, vec!["started"]);
     }
 }

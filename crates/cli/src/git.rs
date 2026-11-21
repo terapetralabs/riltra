@@ -129,8 +129,6 @@ fn identity_using(root: &Path, run: &dyn Fn(&Path, &[&str]) -> Option<String>) -
 
 /// HEAD commit and branch of the repository at `root`, through the same gate as
 /// `fingerprint`: `(None, None)` unless `root` is its own work tree.
-// shortcut: Task 3 reads this through watch::signature; drop this allow then.
-#[allow(dead_code)]
 pub fn head_branch_using(
     root: &Path,
     run: &dyn Fn(&Path, &[&str]) -> Option<String>,
@@ -140,8 +138,6 @@ pub fn head_branch_using(
 }
 
 /// The HEAD commit and branch read through the posture of `git_out`, as `fingerprint` reads them.
-// shortcut: Task 3 reads this through watch::signature; drop this allow then.
-#[allow(dead_code)]
 pub fn head_branch(root: &Path) -> (Option<String>, Option<String>) {
     head_branch_using(root, &git_out)
 }

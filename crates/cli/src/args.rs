@@ -1224,8 +1224,6 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
     }
 }
 
-/// Consume `--flag value` or `--flag=value` at `args[*i]`; `None` when the
-/// token is not that flag (index untouched) or the value is missing.
 /// A `watch` numeric flag: an integer in `min..=max`, otherwise usage (exit 2).
 fn watch_value(value: &str, min: u64, max: u64) -> Result<u64, String> {
     match value.parse::<u64>() {
@@ -1234,6 +1232,8 @@ fn watch_value(value: &str, min: u64, max: u64) -> Result<u64, String> {
     }
 }
 
+/// Consume `--flag value` or `--flag=value` at `args[*i]`; `None` when the
+/// token is not that flag (index untouched) or the value is missing.
 fn take_value(args: &[String], i: &mut usize, flag: &str) -> Option<String> {
     let token = args.get(*i)?;
     if let Some(rest) = token.strip_prefix(flag) {

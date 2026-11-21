@@ -1549,6 +1549,7 @@ fn append(path: &Path, text: &str) {
 
 /// The snapshot `(id, nonce)` reported by `riltra index status`. Every promoted
 /// build gets a new nonce; the id is per database and can repeat across builds.
+#[cfg(debug_assertions)]
 fn status_identity(home: &Path, name: &str) -> (String, String) {
     let (code, out, err) = run(home, &["index", "status", "--repo", name]);
     assert_eq!(code, 0, "index status failed: {err}");
@@ -1732,6 +1733,8 @@ fn watch_refuses_root_inside_home() {
     assert!(err.contains("watch-root-overlaps-home"), "{err}");
 }
 
+// Needs the debug-only RILTRA_TEST_HOLD_AFTER_STAGING_MS hook, so it runs only in debug builds.
+#[cfg(debug_assertions)]
 #[test]
 fn kill_during_build_keeps_previous_snapshot() {
     let ws = workspace("kill-build");

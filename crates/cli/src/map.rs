@@ -1131,7 +1131,7 @@ fn with_snapshot(
                 depth,
                 &base.definitions,
                 Shell::current(),
-            )
+            )?
         }
         None => (Vec::new(), Vec::new()),
     };
@@ -1467,7 +1467,7 @@ pub fn flows_for(
     area_depth: usize,
     definitions: &BTreeMap<SpanKey, Hub>,
     shell: Shell,
-) -> (Vec<Flow>, Vec<Omission>) {
+) -> Result<(Vec<Flow>, Vec<Omission>), String> {
     let mut mains: Vec<&EntryPoint> = entries
         .iter()
         .filter(|entry| entry.basis == MAIN_BASIS)
@@ -1497,8 +1497,9 @@ pub fn flows_for(
             summary: false,
             include_tests: false,
         };
-        let outcome = index::validated_trace_anchor(root, &request).and_then(|(canon, rel, _)| {
-            index::graph_query_tx(
+        let traced = match index::validated_trace_anchor(root, &request) {
+            Err(message) => Err(index::GraphQueryError::Anchor(message)),
+            Ok((canon, rel, _)) => index::graph_query_tx_classified(
                 tx,
                 repo,
                 &canon,
@@ -1509,13 +1510,15 @@ pub fn flows_for(
                 || {},
                 false,
                 false,
-            )
-        });
-        let (body, body_omissions) = summarize_flow(
-            outcome.as_ref().map_err(|message| message.as_str()),
-            area_depth,
-            definitions,
-        );
+            ),
+        };
+        let (body, body_omissions) = match traced {
+            Ok(out) => summarize_flow(Ok(&out), area_depth, definitions),
+            Err(error) => {
+                let message = classify_trace_error(error)?;
+                summarize_flow(Err(&message), area_depth, definitions)
+            }
+        };
         for omission in body_omissions {
             omissions.add(omission.section, omission.reason, omission.omitted_count);
         }
@@ -1530,7 +1533,19 @@ pub fn flows_for(
             trace_command: trace_command(shell, repo, &entry.path, line, col),
         });
     }
-    (flows, omissions.into_vec())
+    Ok((flows, omissions.into_vec()))
+}
+
+/// Maps one failed flow trace (D5). An anchor failure and the `time-budget`
+/// deadline are flow evidence and come back as the message `summarize_flow`
+/// reads. Any other storage failure is not flow evidence: it comes back as
+/// `Err`, so the report fails instead of reporting a successful partial map.
+fn classify_trace_error(error: index::GraphQueryError) -> Result<String, String> {
+    match error {
+        index::GraphQueryError::Anchor(message) => Ok(message),
+        index::GraphQueryError::Store(message) if message == "time-budget" => Ok(message),
+        index::GraphQueryError::Store(message) => Err(message),
+    }
 }
 
 /// Fits the report to the byte budget (D7): removes one item at a time, in D7
@@ -1609,9 +1624,9 @@ fn trim_one(map: &mut AreaMap) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        area_of, collect, collect_with, fit, flows_for, is_proven, render, summarize_flow,
-        trace_command, AreaEntry, AreaMap, EntryPoint, Flow, FlowAreaPath, FlowBody,
-        FlowDefinition, FlowEntry, Hub, Limits, Link, Omission, Omissions, FLOW_PATHS,
+        area_of, classify_trace_error, collect, collect_with, fit, flows_for, is_proven, render,
+        summarize_flow, trace_command, AreaEntry, AreaMap, EntryPoint, Flow, FlowAreaPath,
+        FlowBody, FlowDefinition, FlowEntry, Hub, Limits, Link, Omission, Omissions, FLOW_PATHS,
     };
     use crate::edges::tests as edge_fixtures;
     use crate::index;
@@ -2693,7 +2708,8 @@ mod tests {
             2,
             &BTreeMap::new(),
             Shell::PosixSh,
-        );
+        )
+        .unwrap();
         let paths: Vec<&str> = flows.iter().map(|flow| flow.entry.path.as_str()).collect();
         assert_eq!(paths, ["m0/main.py", "m1/main.py", "m2/main.py"]);
         assert_eq!(omitted(&omissions, "flows", "item_limit"), Some(Some(2)));
@@ -2738,7 +2754,8 @@ mod tests {
             2,
             &base.definitions,
             Shell::PosixSh,
-        );
+        )
+        .unwrap();
         let value = serde_json::to_value(&flows[0]).unwrap();
         assert_eq!(value["status"], "ok", "{value}");
         assert_eq!(
@@ -2748,6 +2765,31 @@ mod tests {
         assert_eq!(value["definitions"][0]["path"], "crates/b/lib.py");
         assert_eq!(value["definitions"][0]["name"], "target");
         assert_eq!(value["definitions"][0]["distance"], 1);
+    }
+
+    #[test]
+    fn flow_store_error_propagates() {
+        // An anchor failure is flow evidence, not an error (the control: a
+        // classifier that errors on everything cannot pass).
+        let message = classify_trace_error(index::GraphQueryError::Anchor(
+            "no anchor at 1:1".to_string(),
+        ))
+        .expect("an anchor failure is flow evidence");
+        let (body, _) = summarize_flow(Err(&message), 1, &BTreeMap::new());
+        assert_eq!(body.status, "trace-refused");
+
+        // The deadline is the fixed timeout body, also not an error.
+        let message =
+            classify_trace_error(index::GraphQueryError::Store("time-budget".to_string()))
+                .expect("the deadline is flow evidence");
+        let (body, _) = summarize_flow(Err(&message), 1, &BTreeMap::new());
+        assert_eq!(body.status, "time-budget");
+
+        // Any other storage failure is not flow evidence: it fails the report.
+        assert_eq!(
+            classify_trace_error(index::GraphQueryError::Store("disk I/O error".to_string())),
+            Err("disk I/O error".to_string())
+        );
     }
 
     #[test]

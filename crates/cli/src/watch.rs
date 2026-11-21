@@ -67,8 +67,11 @@ pub fn check_overlap(canon_root: &Path, canon_home: &Path) -> Result<(), String>
 }
 
 /// The signature of `root` as the next build would see it. Only files the walk
-/// would parse count (C6). A file that disappears between the walk and the stat
-/// is left out; the next poll reconciles it.
+/// would parse count (C6). Only a failed walk (for example, the root vanished)
+/// returns `Err`. A file that cannot be resolved or stat'ed for any reason, such
+/// as a vanished, locked or access-denied file, is left out, the same as the
+/// normal build's unreadable skip (scan.rs, index.rs ingest_file); the next poll
+/// reconciles it.
 pub fn signature(root: &Path, excluded: &Excluded) -> Result<Signature, String> {
     let (plan, _skips) = scan::plan_walk(root)?;
     let mut files = BTreeMap::new();
@@ -76,25 +79,23 @@ pub fn signature(root: &Path, excluded: &Excluded) -> Result<Signature, String> 
         if !matches!(planned.action, PlanAction::Parse(_)) {
             continue;
         }
-        let canon = match std::fs::canonicalize(&planned.full) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("cannot resolve {}: {e}", planned.rel)),
-        };
-        if excluded.covers(&canon) {
-            continue;
+        let entry = file_entry(
+            &planned.full,
+            excluded,
+            |p| std::fs::canonicalize(p),
+            |p| {
+                let meta = std::fs::symlink_metadata(p)?;
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                Ok((meta.len(), mtime))
+            },
+        );
+        if let Some(stamp) = entry {
+            files.insert(planned.rel, stamp);
         }
-        let meta = match std::fs::symlink_metadata(&planned.full) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("cannot stat {}: {e}", planned.rel)),
-        };
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos());
-        files.insert(planned.rel, (meta.len(), mtime));
     }
     let (head, branch) = git::head_branch(root);
     Ok(Signature {
@@ -103,6 +104,23 @@ pub fn signature(root: &Path, excluded: &Excluded) -> Result<Signature, String> 
         head,
         branch,
     })
+}
+
+/// The signature entry for one planned file, or `None` when the file is left out.
+/// `canonicalize` and `stat` are the filesystem calls, passed in so a test can
+/// inject a failure. Every error from them leaves the file out, as a vanished
+/// file is left out; the caller never fails on a per-file error.
+fn file_entry(
+    full: &Path,
+    excluded: &Excluded,
+    canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    stat: impl Fn(&Path) -> std::io::Result<(u64, u128)>,
+) -> Option<(u64, u128)> {
+    let canon = canonicalize(full).ok()?;
+    if excluded.covers(&canon) {
+        return None;
+    }
+    stat(full).ok()
 }
 
 /// Polling and debounce settings for `run`. Defaults: poll every 1000 ms, build
@@ -387,7 +405,7 @@ pub fn drive_events(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_overlap, signature, Excluded, Signature};
+    use super::{check_overlap, file_entry, signature, Excluded, Signature};
     use crate::git;
     use crate::testutil::{git_repo, tmpdir};
     use std::io::Write;
@@ -547,6 +565,35 @@ mod tests {
             .unwrap_err()
             .starts_with(refused));
         assert!(check_overlap(&canon_root, &canon_home).is_ok());
+    }
+
+    #[test]
+    fn per_file_errors_leave_the_file_out() {
+        let ex = outside_home("watch-entry");
+        let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let gone = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        let full = Path::new("a.rs");
+        // Locked, denied or otherwise unresolvable: left out, not fatal (the next poll reconciles).
+        assert_eq!(
+            file_entry(full, &ex, |_| Err(denied()), |_| Ok((1, 2))),
+            None
+        );
+        // Resolves, but its metadata cannot be read: left out too.
+        assert_eq!(
+            file_entry(full, &ex, |p| Ok(p.to_path_buf()), |_| Err(denied())),
+            None
+        );
+        // Vanished between the walk and the stat: left out, as before.
+        assert_eq!(file_entry(full, &ex, |_| Err(gone()), |_| Ok((1, 2))), None);
+        assert_eq!(
+            file_entry(full, &ex, |p| Ok(p.to_path_buf()), |_| Err(gone())),
+            None
+        );
+        // A readable file keeps its stamp.
+        assert_eq!(
+            file_entry(full, &ex, |p| Ok(p.to_path_buf()), |_| Ok((1, 2))),
+            Some((1, 2))
+        );
     }
 
     #[test]

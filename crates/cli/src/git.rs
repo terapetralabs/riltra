@@ -80,24 +80,31 @@ fn canonical_str(p: &Path) -> Option<String> {
         .map(|c| c.to_string_lossy().to_string())
 }
 
-/// Fingerprint the repository claimed at `root`. Never borrows a parent
-/// repository: without a `.git` entry the answer is absent even inside a
-/// larger work tree, and a directory `.git` only validates when the discovered
-/// toplevel is this root itself (corrupt metadata or parent bleed → invalid).
-pub fn fingerprint_using(root: &Path, run: &dyn Fn(&Path, &[&str]) -> Option<String>) -> GitInfo {
+/// Identity of the repository claimed at `root`, read through one gate shared by
+/// `fingerprint` and `head_branch`. HEAD and branch are read only after the gate
+/// passes; every gate failure leaves `toplevel`, `head` and `branch` empty.
+struct Identity {
+    present: bool,
+    toplevel: Option<String>,
+    head: Option<String>,
+    branch: Option<String>,
+}
+
+fn identity_using(root: &Path, run: &dyn Fn(&Path, &[&str]) -> Option<String>) -> Identity {
+    let unclaimed = |present| Identity {
+        present,
+        toplevel: None,
+        head: None,
+        branch: None,
+    };
     let claim = match std::fs::symlink_metadata(root.join(".git")) {
-        Err(_) => return absent(),
+        Err(_) => return unclaimed(false),
         Ok(m) if m.file_type().is_dir() => DotGit::Dir,
         Ok(_) => DotGit::Link,
     };
     let canon_root = match canonical_str(root) {
         Some(c) => c,
-        None => {
-            return GitInfo {
-                present: true,
-                ..absent()
-            }
-        }
+        None => return unclaimed(true),
     };
     let discovered =
         run(root, &["rev-parse", "--show-toplevel"]).and_then(|s| canonical_str(Path::new(&s)));
@@ -107,14 +114,51 @@ pub fn fingerprint_using(root: &Path, run: &dyn Fn(&Path, &[&str]) -> Option<Str
         _ => None,
     };
     let Some(toplevel) = toplevel else {
-        return GitInfo {
-            present: true,
-            ..absent()
-        };
+        return unclaimed(true);
     };
     let head = run(root, &["rev-parse", "HEAD"])
         .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()));
     let branch = run(root, &["branch", "--show-current"]).filter(|s| !s.is_empty());
+    Identity {
+        present: true,
+        toplevel: Some(toplevel),
+        head,
+        branch,
+    }
+}
+
+/// HEAD commit and branch of the repository at `root`, through the same gate as
+/// `fingerprint`: `(None, None)` unless `root` is its own work tree.
+// shortcut: Task 3 reads this through watch::signature; drop this allow then.
+#[allow(dead_code)]
+pub fn head_branch_using(
+    root: &Path,
+    run: &dyn Fn(&Path, &[&str]) -> Option<String>,
+) -> (Option<String>, Option<String>) {
+    let id = identity_using(root, run);
+    (id.head, id.branch)
+}
+
+/// The HEAD commit and branch read through the posture of `git_out`, as `fingerprint` reads them.
+// shortcut: Task 3 reads this through watch::signature; drop this allow then.
+#[allow(dead_code)]
+pub fn head_branch(root: &Path) -> (Option<String>, Option<String>) {
+    head_branch_using(root, &git_out)
+}
+
+/// Fingerprint the repository claimed at `root`. Never borrows a parent
+/// repository: without a `.git` entry the answer is absent even inside a
+/// larger work tree, and a directory `.git` only validates when the discovered
+/// toplevel is this root itself (corrupt metadata or parent bleed → invalid).
+pub fn fingerprint_using(root: &Path, run: &dyn Fn(&Path, &[&str]) -> Option<String>) -> GitInfo {
+    let id = identity_using(root, run);
+    let Some(toplevel) = id.toplevel else {
+        return GitInfo {
+            present: id.present,
+            ..absent()
+        };
+    };
+    let (head, branch) = (id.head, id.branch);
     let status = run(
         root,
         &["status", "--porcelain=v1", "--untracked-files=normal"],

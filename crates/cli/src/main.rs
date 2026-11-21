@@ -48,6 +48,9 @@ mod semantic;
 mod start;
 mod store;
 mod syntax;
+// shortcut: no caller until the watch loop (Task 3) and the command (Task 4) land; drop this allow then.
+#[allow(dead_code)]
+mod watch;
 
 #[cfg(test)]
 mod testutil;

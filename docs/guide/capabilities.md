@@ -420,7 +420,7 @@ MCP. Markdown is CLI only.
   freshness, freshness reasons and completeness, so a flow can be `ok` and `Stale`
   at once. A static path is not proof of execution. `trace_command` is a suggestion
   for you to run; riltra never runs it. A SCIP callee whose spans in one file are
-  ambiguous is not listed as a flow definition.
+  ambiguous is not listed as a flow definition or a hub.
 - **Time limit.** A flow whose trace reaches its 2,000 ms deadline reports
   `time-budget` with no partial content. Two runs on the same revision are
   byte-identical unless a deadline is reached in one run and not in the other; then

@@ -685,8 +685,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
 }
 
-/// `changes` flags. Every refusal here is a usage error (exit 2), including a
-/// scope/base mismatch and a ref that starts with `-`.
+/// `map` flags. Every refusal here is a usage error (exit 2).
 fn parse_map_args(args: &[String]) -> Result<Command, String> {
     let mut repo = None;
     let mut depth = None;
@@ -723,6 +722,8 @@ fn parse_map_args(args: &[String]) -> Result<Command, String> {
     })
 }
 
+/// `changes` flags. Every refusal here is a usage error (exit 2), including a
+/// scope/base mismatch and a ref that starts with `-`.
 fn parse_changes_args(args: &[String]) -> Result<Command, String> {
     let mut values = std::collections::BTreeMap::new();
     let mut i = 1;

@@ -3224,6 +3224,7 @@ mod tests {
     fn flow_trace_limit_covers_every_path() {
         assert_eq!(index::MAX_SEARCH_LIMIT, crate::edges::TRACE_MAX_PATHS);
         assert_eq!(FLOW_PATHS, index::MAX_SEARCH_LIMIT);
+        assert_eq!(super::FLOW_TIME_MS, crate::edges::TRACE_TIME_MS);
     }
 
     #[test]
@@ -3553,5 +3554,115 @@ mod tests {
                     && line.ends_with("| unknown | unknown |")),
             "{text}"
         );
+    }
+
+    /// Keys of the JSON objects that sit at `depth` (the top-level object is
+    /// depth 1), in document order. Strings are skipped, so a quoted value
+    /// never counts as a key.
+    fn keys_at_depth(json: &str, depth: usize) -> Vec<String> {
+        let b = json.as_bytes();
+        let mut keys = Vec::new();
+        let mut open = 0usize;
+        let mut i = 0;
+        while i < b.len() {
+            match b[i] {
+                b'"' => {
+                    let start = i + 1;
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    let mut j = i + 1;
+                    while j < b.len() && b[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if open == depth && j < b.len() && b[j] == b':' {
+                        keys.push(json[start..i].to_string());
+                    }
+                }
+                b'{' | b'[' => open += 1,
+                b'}' | b']' => open = open.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
+        }
+        keys
+    }
+
+    /// True when every expected key occurs in `actual` and their positions
+    /// strictly increase in the order given.
+    fn strictly_ordered(actual: &[String], expected: &[&str]) -> bool {
+        let mut last: Option<usize> = None;
+        for key in expected {
+            let Some(pos) = actual.iter().position(|a| a == key) else {
+                return false;
+            };
+            if last.is_some_and(|l| pos <= l) {
+                return false;
+            }
+            last = Some(pos);
+        }
+        true
+    }
+
+    #[test]
+    fn render_pins_d6_key_order() {
+        const TOP: [&str; 16] = [
+            "repo",
+            "snapshot",
+            "graph_proof",
+            "grouping",
+            "edges_used",
+            "bounds",
+            "import_verification",
+            "imports",
+            "areas",
+            "links",
+            "candidate_links",
+            "flows",
+            "completeness",
+            "next_actions",
+            "omissions",
+            "note",
+        ];
+        const FLOW: [&str; 15] = [
+            "entry",
+            "status",
+            "verification",
+            "freshness",
+            "freshness_reasons",
+            "completeness",
+            "area_paths",
+            "definitions",
+            "paths_returned",
+            "unproven_paths",
+            "traversal_complete",
+            "cycle",
+            "truncated",
+            "unresolved",
+            "trace_command",
+        ];
+        let map = fixed_map(3);
+        let json = render(&map).unwrap();
+        let top = keys_at_depth(&json, 1);
+        assert_eq!(top.len(), TOP.len(), "{json}");
+        assert!(strictly_ordered(&top, &TOP), "{top:?}");
+        // The flow is checked on its own serialization: its keys are the
+        // top-level keys of that object, so nested areas and links cannot mix in.
+        assert_eq!(map.flows.len(), 1);
+        let flow_json = serde_json::to_string(&map.flows[0]).unwrap();
+        let flow_keys = keys_at_depth(&flow_json, 1);
+        assert_eq!(flow_keys.len(), FLOW.len(), "{flow_json}");
+        assert!(strictly_ordered(&flow_keys, &FLOW), "{flow_keys:?}");
+        // Planted controls: a swapped expectation must fail the same helper.
+        let mut swapped_top = TOP;
+        swapped_top.swap(0, 1);
+        assert!(!strictly_ordered(&top, &swapped_top));
+        let mut swapped_flow = FLOW;
+        swapped_flow.swap(0, 1);
+        assert!(!strictly_ordered(&flow_keys, &swapped_flow));
     }
 }

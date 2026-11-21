@@ -671,3 +671,26 @@ fn index_status_rejects_progress_flag() {
     assert_eq!(code, 2);
     assert!(out.is_empty());
 }
+
+#[test]
+fn index_exits_3_while_the_writer_lock_is_held() {
+    let h = home("index-writer-busy");
+    let target = progress_repo(&h);
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    assert_eq!(run(&h, &["index", "--repo", "tiny"]).0, 0);
+    // Hold the writer lock from outside the process, as a live rebuild would.
+    let lock = h.join("index").join("tiny.db.lock");
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock)
+        .unwrap();
+    held.try_lock().expect("test takes the writer lock");
+    let (code, out, err) = run(&h, &["index", "--repo", "tiny"]);
+    assert_eq!(code, 3, "stderr: {err:?}");
+    assert!(out.is_empty(), "stdout: {out:?}");
+    assert!(err.contains("index-busy:"), "stderr: {err:?}");
+    drop(held);
+    assert_eq!(run(&h, &["index", "--repo", "tiny"]).0, 0);
+}

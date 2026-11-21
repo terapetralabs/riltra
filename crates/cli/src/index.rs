@@ -108,6 +108,54 @@ struct StagingMeta {
     base: store::PromoteBase,
 }
 
+/// Non-blocking exclusive lock on a sidecar file. Released when the value is
+/// dropped or the process exits. The lock file is never deleted: removing it
+/// races the next acquirer on Windows.
+#[derive(Debug)]
+pub struct FileLock {
+    _file: std::fs::File,
+}
+
+impl FileLock {
+    /// Takes the lock or fails at once; there is no waiting. Contention
+    /// reports `busy_prefix` followed by the lock file name.
+    pub fn try_acquire(path: &Path, busy_prefix: &str) -> Result<FileLock, String> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("cannot lock index: {e}"))?;
+            }
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+                return Err(format!(
+                    "cannot lock index: {} is not a regular file",
+                    path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot lock index: {e}")),
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| format!("cannot lock index: {e}"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(FileLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                Err(format!("{busy_prefix} another riltra process holds {name}"))
+            }
+            Err(std::fs::TryLockError::Error(e)) => Err(format!("cannot lock index: {e}")),
+        }
+    }
+}
+
 fn prepare_staging(
     home: &Path,
     name: &str,
@@ -120,9 +168,7 @@ fn prepare_staging(
             std::fs::create_dir_all(parent).map_err(|e| format!("cannot create index dir: {e}"))?;
         }
     }
-    if staging.exists() && std::fs::remove_file(&staging).is_err() {
-        return Err("stale staging file is locked by another build".to_string());
-    }
+    store::remove_staging(&staging)?;
     let canon_root = root
         .canonicalize()
         .map_err(|e| format!("cannot resolve root: {e}"))?;
@@ -208,7 +254,7 @@ fn promote_live(db: &Path, staging: &Path, base: &store::PromoteBase) -> Result<
     };
     store::promote_staging(&live, staging, base)?;
     drop(live);
-    let _ = std::fs::remove_file(staging);
+    let _ = store::remove_staging(staging);
     Ok(t_promote.elapsed().as_millis() as u64)
 }
 
@@ -292,6 +338,7 @@ fn carry_semantic(
 /// point and the test oracle for parity.
 #[allow(dead_code)]
 pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, String> {
+    let _writer = FileLock::try_acquire(&store::lock_path(home, name), "index-busy:")?;
     build_full_inner(home, name, root, "full", "none")
 }
 
@@ -710,7 +757,7 @@ fn build_incremental(
         // Live database unreadable mid-refresh with staging prepared: drop
         // everything and take the explicit full-rebuild recovery.
         drop(conn);
-        let _ = std::fs::remove_file(&staging);
+        let _ = store::remove_staging(&staging);
         return build_full_inner(home, name, root, "fallback-full", "db-unreadable");
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -730,7 +777,7 @@ fn build_incremental(
     if live_nonce.as_deref() != Some(old.nonce.as_str()) {
         drop(tx);
         drop(conn);
-        let _ = std::fs::remove_file(&staging);
+        let _ = store::remove_staging(&staging);
         return build_full_inner(home, name, root, "fallback-full", "revision-changed");
     }
     store::create_file_map(&tx)?;
@@ -912,6 +959,7 @@ pub fn semantic_import(
     scip_path: &Path,
     claimed: Option<&str>,
 ) -> Result<SemanticImportOutcome, String> {
+    let _writer = FileLock::try_acquire(&store::lock_path(home, name), "index-busy:")?;
     let canon = canonical_repo_root(root)?;
     let db = store::db_path(home, name);
     let conn = store::open_live(&db)?;
@@ -4097,6 +4145,7 @@ pub fn semantic_query_lsp(
 /// base, which then includes the import. A second advance errors out rather
 /// than looping.
 pub fn build(home: &Path, name: &str, root: &Path, full: bool) -> Result<IndexSummary, String> {
+    let _writer = FileLock::try_acquire(&store::lock_path(home, name), "index-busy:")?;
     match build_once(home, name, root, full) {
         Err(e) if e.contains("semantic-changed") => {
             fallback_full(home, name, root, "semantic-changed")
@@ -4737,8 +4786,8 @@ mod tests {
     use super::{
         build, build_full, config_fingerprint, cpp_include_literal, diff_files, evaluate,
         evaluate_tx, import_mentions_path, input_fingerprint, lsp_answer_verification,
-        lsp_fallback_reason, lsp_hit_from_fact, rust_crate_src_root, suffix_anchors,
-        unique_suffix_match,
+        lsp_fallback_reason, lsp_hit_from_fact, rust_crate_src_root, semantic_import,
+        suffix_anchors, unique_suffix_match, FileLock,
     };
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
@@ -4747,6 +4796,142 @@ mod tests {
         let dir = tmpdir(tag);
         std::fs::write(dir.join("a.py"), b"def f():\n    return g()\n").unwrap();
         dir
+    }
+
+    fn latest_snapshot_id(home: &std::path::Path) -> i64 {
+        let conn = store::open_live(&store::db_path(home, "r")).unwrap();
+        store::latest_snapshot(&conn).unwrap().expect("snapshot").id
+    }
+
+    /// The staging file and its two SQLite sidecars, in removal order.
+    fn staging_files(staging: &std::path::Path) -> [std::path::PathBuf; 3] {
+        let with = |suffix: &str| {
+            let mut name = staging.as_os_str().to_owned();
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        };
+        [staging.to_path_buf(), with("-wal"), with("-shm")]
+    }
+
+    #[test]
+    fn file_lock_is_exclusive() {
+        let dir = tmpdir("lock-exclusive");
+        let path = dir.join("r.db.lock");
+        let first = FileLock::try_acquire(&path, "index-busy:").unwrap();
+        let Err(err) = FileLock::try_acquire(&path, "index-busy:") else {
+            panic!("a second acquire must be refused while the first is held");
+        };
+        assert!(err.starts_with("index-busy:"), "{err}");
+        assert!(err.contains("r.db.lock"), "{err}");
+        drop(first);
+        FileLock::try_acquire(&path, "index-busy:").expect("released lock is acquirable");
+    }
+
+    #[test]
+    fn file_lock_creates_missing_parent() {
+        let dir = tmpdir("lock-parent");
+        let path = dir.join("index").join("r.db.lock");
+        assert!(!dir.join("index").exists());
+        let _lock = FileLock::try_acquire(&path, "index-busy:").unwrap();
+        assert!(dir.join("index").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_path_symlink_is_refused() {
+        let dir = tmpdir("lock-symlink");
+        std::fs::create_dir_all(dir.join("index")).unwrap();
+        let target = dir.join("elsewhere.txt");
+        std::fs::write(&target, b"x").unwrap();
+        let path = dir.join("index").join("r.db.lock");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(FileLock::try_acquire(&path, "index-busy:").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"x");
+    }
+
+    #[test]
+    fn build_refuses_while_lock_held() {
+        let Some(repo) = git_repo("idx-writer-busy", "main") else {
+            return;
+        };
+        let home = tmpdir("idx-writer-busy-home");
+        build(&home, "r", &repo, false).unwrap();
+        let s1 = latest_snapshot_id(&home);
+        let _held = FileLock::try_acquire(&store::lock_path(&home, "r"), "index-busy:").unwrap();
+        let Err(err) = build(&home, "r", &repo, false) else {
+            panic!("build must refuse while the writer lock is held");
+        };
+        assert!(err.starts_with("index-busy:"), "{err}");
+        assert_eq!(latest_snapshot_id(&home), s1);
+    }
+
+    #[test]
+    fn semantic_import_refuses_while_lock_held() {
+        let Some(repo) = git_repo("idx-import-busy", "main") else {
+            return;
+        };
+        let home = tmpdir("idx-import-busy-home");
+        build(&home, "r", &repo, false).unwrap();
+        let s1 = latest_snapshot_id(&home);
+        let _held = FileLock::try_acquire(&store::lock_path(&home, "r"), "index-busy:").unwrap();
+        let absent = home.join("absent.scip");
+        let Err(err) = semantic_import(&home, "r", &repo, &absent, None) else {
+            panic!("import must refuse while the writer lock is held");
+        };
+        assert!(err.starts_with("index-busy:"), "{err}");
+        assert_eq!(latest_snapshot_id(&home), s1);
+    }
+
+    #[test]
+    fn build_does_not_deadlock_on_own_lock() {
+        let Some(repo) = git_repo("idx-no-deadlock", "main") else {
+            return;
+        };
+        let home = tmpdir("idx-no-deadlock-home");
+        build(&home, "r", &repo, false).unwrap();
+        build(&home, "r", &repo, false).unwrap();
+        build(&home, "r", &repo, true).unwrap();
+        FileLock::try_acquire(&store::lock_path(&home, "r"), "index-busy:")
+            .expect("every build releases the writer lock on return");
+    }
+
+    #[test]
+    fn prepare_staging_removes_stale_sidecars() {
+        let Some(repo) = git_repo("idx-stale-sidecars", "main") else {
+            return;
+        };
+        let home = tmpdir("idx-stale-sidecars-home");
+        build(&home, "r", &repo, false).unwrap();
+        let staging = store::staging_path(&home, "r");
+        for path in staging_files(&staging) {
+            std::fs::write(&path, b"junk").unwrap();
+        }
+        build(&home, "r", &repo, false).expect("build succeeds over stale sidecars");
+        for path in staging_files(&staging) {
+            assert!(!path.exists(), "{} must be gone", path.display());
+        }
+        // A leftover -wal with no main staging file is cleaned too.
+        let [_, wal, _] = staging_files(&staging);
+        std::fs::write(&wal, b"junk").unwrap();
+        build(&home, "r", &repo, false).expect("build succeeds over a lone -wal");
+        assert!(!wal.exists(), "lone -wal must be removed");
+    }
+
+    #[test]
+    fn promote_removes_staging_sidecars() {
+        let Some(repo) = git_repo("idx-promote-sidecars", "main") else {
+            return;
+        };
+        let home = tmpdir("idx-promote-sidecars-home");
+        build(&home, "r", &repo, false).unwrap();
+        build(&home, "r", &repo, false).unwrap();
+        for path in staging_files(&store::staging_path(&home, "r")) {
+            assert!(
+                !path.exists(),
+                "{} must be gone after promote",
+                path.display()
+            );
+        }
     }
 
     #[test]

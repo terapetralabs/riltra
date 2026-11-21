@@ -446,7 +446,7 @@ impl Attribution<'_> {
         if let Some(hit) = self.cache.get(&key) {
             return Ok(hit.clone());
         }
-        let bridges = edges::owner_bridges(self.conn, self.sid, endpoint)?;
+        let bridges = edges::owner_bridges_strict(self.conn, self.sid, endpoint)?;
         let target = target_from_bridges(bridges.iter(), key.2.as_ref());
         self.cache.insert(key, target.clone());
         Ok(target)
@@ -2335,6 +2335,39 @@ mod tests {
         let w = report(&g, 2);
         assert_eq!(w["completeness"]["unattributed_endpoints"], 1);
         assert_eq!(w["links"], json!([]));
+    }
+
+    #[test]
+    fn map_scip_owner_lookup_error_propagates() {
+        // No `main` definition in this fixture, so no flow trace can surface
+        // the storage error by accident: only the map's own attribution can.
+        let f = scip_bridge_fixture("map-owner-error");
+
+        // Control: with the index intact the bridged callee is attributed.
+        let v = report(&f, 2);
+        let cross = json!({"from":"crates/a","to":"crates/b","kind":"CALLS","count":1});
+        assert!(
+            v["links"].as_array().unwrap().contains(&cross),
+            "bridged callee links to crates/b: {}",
+            v["links"]
+        );
+        assert_eq!(v["completeness"]["unattributed_endpoints"], 0);
+        assert_eq!(v["flows"], json!([]));
+
+        // Fault: the owner query names this index (INDEXED BY), so dropping it
+        // makes the owner lookup a storage error. The report must fail, not
+        // count the callee as an unattributed endpoint.
+        let second = rusqlite::Connection::open(db_of(&f)).unwrap();
+        second
+            .execute_batch("DROP INDEX idx_semfacts_span")
+            .unwrap();
+        drop(second);
+        let result = collect(&f.home, "r", &f.home, 2);
+        assert!(
+            result.is_err(),
+            "owner lookup failure must be an error, got {:?}",
+            result.map(|m| render(&m).unwrap())
+        );
     }
 
     #[test]

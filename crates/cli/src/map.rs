@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Area map of one indexed snapshot (stage 5, task 1): directory areas, entry
-//! points, hubs, proven links between areas and name-match candidates, all read
-//! from one database revision. Flows arrive in a later task; `flows` is `[]`.
+//! Area map of one indexed snapshot (stage 5): directory areas, entry points,
+//! hubs, proven links between areas, name-match candidates and bounded static
+//! flows, all read from one database revision, then fitted to the byte budget.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::edges;
 use crate::overview::{self, ActionKind, NextAction, SnapshotState};
+use crate::provider_setup::Shell;
 use crate::store::{self, EdgeEndpoint, EdgeRow, SymbolRow};
 use crate::{index, paths, provider_setup};
 
@@ -61,8 +62,7 @@ pub struct AreaMap {
     pub areas: Vec<AreaEntry>,
     pub links: Vec<Link>,
     pub candidate_links: Vec<CandidateLink>,
-    /// Flow entries come from the flow task; this task always leaves them empty.
-    pub flows: Vec<Value>,
+    pub flows: Vec<Flow>,
     pub completeness: Completeness,
     pub next_actions: Vec<NextAction>,
     pub omissions: Vec<Omission>,
@@ -235,6 +235,65 @@ pub struct Omission {
     pub omitted_count: Option<usize>,
 }
 
+/// One static flow from a `main` definition (D5, D6). Evidence fields are the
+/// trace's own, unchanged; the flow's `status` never replaces them.
+#[derive(Debug, Clone, Serialize)]
+pub struct Flow {
+    pub entry: FlowEntry,
+    #[serde(flatten)]
+    pub body: FlowBody,
+    pub trace_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowEntry {
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub name: Option<String>,
+}
+
+/// The flow fields from `status` to `unresolved` (D6), in report order.
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowBody {
+    pub status: &'static str,
+    pub verification: Option<String>,
+    pub freshness: Option<String>,
+    pub freshness_reasons: Vec<String>,
+    pub completeness: Option<FlowCompleteness>,
+    pub area_paths: Vec<FlowAreaPath>,
+    pub definitions: Vec<FlowDefinition>,
+    pub paths_returned: usize,
+    pub unproven_paths: usize,
+    pub traversal_complete: bool,
+    pub cycle: bool,
+    pub truncated: bool,
+    pub unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowCompleteness {
+    pub status: String,
+    pub covered: usize,
+    pub total: usize,
+    pub unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowAreaPath {
+    pub areas: Vec<String>,
+    pub verification: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowDefinition {
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub name: Option<String>,
+    pub distance: usize,
+}
+
 /// Directory area of one file (D1): the first `depth` components of its
 /// parent directory, joined by `/`; `.` for a file at the root.
 pub fn area_of(path: &str, depth: usize) -> String {
@@ -309,11 +368,13 @@ pub fn collect_with(
             let state = index::semantic_status_tx(&tx, repo, &canon)?;
             let report = match state.snapshot.clone() {
                 None => without_snapshot(repo, depth, limits, &base, &state),
-                Some(snapshot) => with_snapshot(&tx, repo, depth, limits, &base, state, snapshot)?,
+                Some(snapshot) => {
+                    with_snapshot(&tx, repo, root, depth, limits, &base, state, snapshot)?
+                }
             };
             tx.commit()
                 .map_err(|e| format!("cannot end index read: {e}"))?;
-            Ok(report)
+            fit(report)
         }
     }
 }
@@ -386,42 +447,51 @@ impl Attribution<'_> {
             return Ok(hit.clone());
         }
         let bridges = edges::owner_bridges(self.conn, self.sid, endpoint)?;
-        let mut spans: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
-        for bridge in &bridges {
-            if let EdgeEndpoint::SyntaxDef {
-                path,
-                byte_start,
-                byte_end,
-            } = &bridge.syntax
-            {
-                spans
-                    .entry(path.clone())
-                    .or_default()
-                    .insert((*byte_start, *byte_end));
-            }
-        }
-        let bridged = if spans.len() == 1 {
-            spans.into_iter().next()
-        } else {
-            None
-        };
-        let target = match (bridged, &key.2) {
-            (Some((path, found)), _) => Some(Target {
-                path,
-                span: if found.len() == 1 {
-                    found.into_iter().next()
-                } else {
-                    None
-                },
-            }),
-            (None, Some(doc)) => Some(Target {
-                path: doc.clone(),
-                span: None,
-            }),
-            (None, None) => None,
-        };
+        let target = target_from_bridges(bridges.iter(), key.2.as_ref());
         self.cache.insert(key, target.clone());
         Ok(target)
+    }
+}
+
+/// D2 steps 3 to 5: a SCIP callee's file, from its bridges when they name one
+/// file, else from its document; the span only when one symbol is known.
+fn target_from_bridges<'a>(
+    bridges: impl Iterator<Item = &'a edges::OwnerBridge>,
+    doc: Option<&String>,
+) -> Option<Target> {
+    let mut spans: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
+    for bridge in bridges {
+        if let EdgeEndpoint::SyntaxDef {
+            path,
+            byte_start,
+            byte_end,
+        } = &bridge.syntax
+        {
+            spans
+                .entry(path.clone())
+                .or_default()
+                .insert((*byte_start, *byte_end));
+        }
+    }
+    let bridged = if spans.len() == 1 {
+        spans.into_iter().next()
+    } else {
+        None
+    };
+    match (bridged, doc) {
+        (Some((path, found)), _) => Some(Target {
+            path,
+            span: if found.len() == 1 {
+                found.into_iter().next()
+            } else {
+                None
+            },
+        }),
+        (None, Some(doc)) => Some(Target {
+            path: doc.clone(),
+            span: None,
+        }),
+        (None, None) => None,
     }
 }
 
@@ -440,10 +510,19 @@ fn bump(
 }
 
 /// Omission entries keyed by (section, reason). A sum with an unknown count is unknown.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Omissions(BTreeMap<(&'static str, &'static str), Option<usize>>);
 
 impl Omissions {
+    fn from_vec(entries: Vec<Omission>) -> Omissions {
+        Omissions(
+            entries
+                .into_iter()
+                .map(|entry| ((entry.section, entry.reason), entry.omitted_count))
+                .collect(),
+        )
+    }
+
     fn add(&mut self, section: &'static str, reason: &'static str, count: Option<usize>) {
         let slot = self.0.entry((section, reason)).or_insert(Some(0));
         *slot = match (*slot, count) {
@@ -978,9 +1057,11 @@ fn finish_candidates(
 }
 
 /// Every snapshot-derived section, from one pinned revision.
+#[allow(clippy::too_many_arguments)]
 fn with_snapshot(
     tx: &rusqlite::Transaction<'_>,
     repo: &str,
+    root: &Path,
     depth: usize,
     limits: Limits,
     revision: &store::PromoteBase,
@@ -1037,6 +1118,26 @@ fn with_snapshot(
         }
         None => (Vec::new(), Vec::new(), Completeness::unmeasured()),
     };
+    // Flows run on the same transaction and only over a current graph (D0, D0a).
+    // Their entries are every `main` in the snapshot, before the area cap.
+    let (flows, flow_omissions) = match &graph {
+        Some(_) => {
+            let entries: Vec<EntryPoint> = base.entry_points.values().flatten().cloned().collect();
+            flows_for(
+                tx,
+                repo,
+                root,
+                &entries,
+                depth,
+                &base.definitions,
+                Shell::current(),
+            )
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    for omission in flow_omissions {
+        omissions.add(omission.section, omission.reason, omission.omitted_count);
+    }
     let areas = finish_areas(base.areas, base.entry_points, hubs, &mut omissions);
     let imports = import_entries(&state.rows, &mut omissions);
 
@@ -1077,6 +1178,12 @@ fn with_snapshot(
             reason: "one or more semantic imports are Stale; relations from them may not match the source".to_string(),
         });
     }
+    if flows.iter().any(|flow| flow.body.status == "time-budget") {
+        next_actions.push(NextAction {
+            kind: ActionKind::ReviewFreshness,
+            reason: "a flow stopped at its time limit; run its trace_command for a separate, bounded trace".to_string(),
+        });
+    }
     if let Some(g) = &graph {
         let has_language = files.iter().any(|file| !file.language.is_empty());
         if has_language && g.proven_total == 0 {
@@ -1095,6 +1202,12 @@ fn with_snapshot(
                     "the snapshot holds more proven relations than one report reads ({} of {}); links and hubs are partial",
                     g.proven_read, g.proven_total
                 ),
+            });
+        }
+        if flows.iter().any(|flow| flow.body.status == "ok") {
+            next_actions.push(NextAction {
+                kind: ActionKind::ChooseDefinition,
+                reason: "run a flow's trace_command for per-hop evidence".to_string(),
             });
         }
     }
@@ -1117,7 +1230,7 @@ fn with_snapshot(
         areas,
         links,
         candidate_links,
-        flows: Vec::new(),
+        flows,
         completeness,
         next_actions,
         omissions: omissions.into_vec(),
@@ -1125,14 +1238,389 @@ fn with_snapshot(
     })
 }
 
+/// The fixed body of a flow whose trace hit its deadline (D5). Nothing from the
+/// trace output is copied, because every field depends on how far it got.
+fn timed_out_flow() -> (FlowBody, Vec<Omission>) {
+    (
+        FlowBody {
+            status: "time-budget",
+            verification: None,
+            freshness: None,
+            freshness_reasons: Vec::new(),
+            completeness: None,
+            area_paths: Vec::new(),
+            definitions: Vec::new(),
+            paths_returned: 0,
+            unproven_paths: 0,
+            traversal_complete: false,
+            cycle: false,
+            truncated: true,
+            unresolved: vec!["time-budget".to_string()],
+        },
+        vec![Omission {
+            section: "flow_paths",
+            reason: "traversal_stopped",
+            omitted_count: None,
+        }],
+    )
+}
+
+/// A flow whose trace could not run (D5): the message is the only evidence kept.
+fn refused_flow(message: &str) -> FlowBody {
+    FlowBody {
+        status: "trace-refused",
+        verification: None,
+        freshness: None,
+        freshness_reasons: Vec::new(),
+        completeness: None,
+        area_paths: Vec::new(),
+        definitions: Vec::new(),
+        paths_returned: 0,
+        unproven_paths: 0,
+        traversal_complete: false,
+        cycle: false,
+        truncated: false,
+        unresolved: vec![message.to_string()],
+    }
+}
+
+/// Sort key for the weakest verification first (D5): Stale, then Unverified,
+/// then anything else; ties are broken by name so the choice is deterministic.
+fn weakness(verification: &str) -> (u8, String) {
+    let rank = match verification {
+        "Stale" => 0,
+        "Unverified" => 1,
+        _ => 2,
+    };
+    (rank, verification.to_string())
+}
+
+/// The callee of one hop as a file and optional span (D2), from the trace's
+/// own bridges. `None` when the callee is unattributed or absent.
+fn hop_target(edge: &EdgeRow, bridges: &[edges::OwnerBridge]) -> Option<Target> {
+    let endpoint = edge.callee.as_ref()?;
+    match endpoint {
+        EdgeEndpoint::SyntaxDef {
+            path,
+            byte_start,
+            byte_end,
+        } => Some(Target {
+            path: path.clone(),
+            span: Some((*byte_start, *byte_end)),
+        }),
+        EdgeEndpoint::Scip { doc, .. } => target_from_bridges(
+            bridges.iter().filter(|bridge| bridge.semantic == *endpoint),
+            doc.as_ref(),
+        ),
+    }
+}
+
+/// The flow body for one trace result (D5). A pure function of the trace output
+/// (`Err` included) and the definitions map, so every rule is unit-tested
+/// without a traversal.
+pub fn summarize_flow(
+    result: Result<&index::TraceQueryOut, &str>,
+    area_depth: usize,
+    definitions: &BTreeMap<SpanKey, Hub>,
+) -> (FlowBody, Vec<Omission>) {
+    let out = match result {
+        Err("time-budget") => return timed_out_flow(),
+        Err(message) => return (refused_flow(message), Vec::new()),
+        Ok(out) => out,
+    };
+    if out.unresolved.iter().any(|reason| reason == "time-budget") {
+        return timed_out_flow();
+    }
+
+    let mut omissions = Omissions::default();
+    let mut proven = 0usize;
+    let mut unproven = 0usize;
+    let mut areas: BTreeMap<Vec<String>, String> = BTreeMap::new();
+    // Definition key to the smallest 1-based hop index at which it is reached.
+    let mut reached: BTreeMap<SpanKey, usize> = BTreeMap::new();
+    for path in &out.paths {
+        let targets: Vec<Option<Target>> = path
+            .edges
+            .iter()
+            .map(|hit| hop_target(&hit.edge, &out.bridges))
+            .collect();
+        let proven_path = !path.edges.is_empty()
+            && path
+                .edges
+                .iter()
+                .zip(&targets)
+                .all(|(hit, target)| is_proven(&hit.edge) && target.is_some());
+        if !proven_path {
+            unproven += 1;
+            continue;
+        }
+        proven += 1;
+
+        let mut sequence = vec![area_of(&path.edges[0].edge.caller_path, area_depth)];
+        for target in targets.iter().flatten() {
+            let area = area_of(&target.path, area_depth);
+            if sequence.last() != Some(&area) {
+                sequence.push(area);
+            }
+        }
+        let slot = areas
+            .entry(sequence)
+            .or_insert_with(|| path.verification.clone());
+        if weakness(&path.verification) < weakness(slot.as_str()) {
+            *slot = path.verification.clone();
+        }
+
+        for (position, target) in targets.iter().enumerate() {
+            if let Some(Target {
+                path,
+                span: Some((start, end)),
+            }) = target
+            {
+                let key = (path.clone(), *start, *end);
+                if definitions.contains_key(&key) {
+                    let hop = position + 1;
+                    let smallest = reached.entry(key).or_insert(hop);
+                    *smallest = (*smallest).min(hop);
+                }
+            }
+        }
+    }
+
+    let mut definition_list: Vec<FlowDefinition> = reached
+        .into_iter()
+        .filter_map(|(key, distance)| {
+            definitions.get(&key).map(|hub| FlowDefinition {
+                path: hub.path.clone(),
+                line: hub.line,
+                col: hub.col,
+                name: hub.name.clone(),
+                distance,
+            })
+        })
+        .collect();
+    definition_list.sort_by(|a, b| {
+        (a.distance, &a.path, a.line, a.col).cmp(&(b.distance, &b.path, b.line, b.col))
+    });
+    omissions.add_count(
+        "flow_definitions",
+        "item_limit",
+        definition_list.len().saturating_sub(FLOW_DEFINITIONS),
+    );
+    definition_list.truncate(FLOW_DEFINITIONS);
+
+    let mut area_paths: Vec<FlowAreaPath> = areas
+        .into_iter()
+        .map(|(areas, verification)| FlowAreaPath {
+            areas,
+            verification,
+        })
+        .collect();
+    omissions.add_count(
+        "flow_area_paths",
+        "item_limit",
+        area_paths.len().saturating_sub(FLOW_AREA_PATHS),
+    );
+    area_paths.truncate(FLOW_AREA_PATHS);
+
+    if !out.total_exact {
+        omissions.add("flow_paths", "traversal_stopped", None);
+    }
+    let body = FlowBody {
+        status: if proven > 0 { "ok" } else { "no-proven-paths" },
+        verification: Some(out.verification.clone()),
+        freshness: Some(out.freshness.clone()),
+        freshness_reasons: out.freshness_reasons.clone(),
+        completeness: Some(FlowCompleteness {
+            status: out.completeness.status.clone(),
+            covered: out.completeness.covered,
+            total: out.completeness.total,
+            unresolved: out.completeness.unresolved.clone(),
+        }),
+        area_paths,
+        definitions: definition_list,
+        paths_returned: out.paths.len(),
+        unproven_paths: unproven,
+        traversal_complete: out.total_exact,
+        cycle: out.cycle,
+        truncated: out.truncated,
+        unresolved: out.unresolved.clone(),
+    };
+    (body, omissions.into_vec())
+}
+
+/// The suggested command for one flow. Riltra never runs it.
+fn trace_command(shell: Shell, repo: &str, path: &str, line: u32, col: u32) -> String {
+    format!(
+        "riltra trace --repo {} --path {} --line {line} --col {col} --depth {FLOW_DEPTH}",
+        provider_setup::quote(shell, repo),
+        provider_setup::quote(shell, path)
+    )
+}
+
+/// Static flows from the `main` entry points (D5), read on the caller's
+/// transaction: at most `MAX_FLOWS` in D4 order, the rest counted in `flows`.
+pub fn flows_for(
+    tx: &rusqlite::Transaction<'_>,
+    repo: &str,
+    root: &Path,
+    entries: &[EntryPoint],
+    area_depth: usize,
+    definitions: &BTreeMap<SpanKey, Hub>,
+    shell: Shell,
+) -> (Vec<Flow>, Vec<Omission>) {
+    let mut mains: Vec<&EntryPoint> = entries
+        .iter()
+        .filter(|entry| entry.basis == MAIN_BASIS)
+        .collect();
+    mains.sort_by(|a, b| {
+        (basis_rank(a.basis), &a.path, a.line).cmp(&(basis_rank(b.basis), &b.path, b.line))
+    });
+    let mut omissions = Omissions::default();
+    omissions.add_count("flows", "item_limit", mains.len().saturating_sub(MAX_FLOWS));
+    let mut flows = Vec::new();
+    for entry in mains.into_iter().take(MAX_FLOWS) {
+        let (Some(line), Some(col)) = (entry.line, entry.col) else {
+            continue;
+        };
+        let request = index::TraceRequest {
+            source: index::SpanQuery {
+                rel: &entry.path,
+                line1: line,
+                col1: col,
+                refs: false,
+            },
+            symbol: None,
+            destination: None,
+            depth: FLOW_DEPTH,
+            limit: index::MAX_SEARCH_LIMIT,
+            offset: 0,
+            summary: false,
+            include_tests: false,
+        };
+        let outcome = index::validated_trace_anchor(root, &request).and_then(|(canon, rel, _)| {
+            index::graph_query_tx(
+                tx,
+                repo,
+                &canon,
+                &rel,
+                None,
+                &request,
+                Instant::now(),
+                || {},
+                false,
+                false,
+            )
+        });
+        let (body, body_omissions) = summarize_flow(
+            outcome.as_ref().map_err(|message| message.as_str()),
+            area_depth,
+            definitions,
+        );
+        for omission in body_omissions {
+            omissions.add(omission.section, omission.reason, omission.omitted_count);
+        }
+        flows.push(Flow {
+            entry: FlowEntry {
+                path: entry.path.clone(),
+                line,
+                col,
+                name: entry.name.clone(),
+            },
+            body,
+            trace_command: trace_command(shell, repo, &entry.path, line, col),
+        });
+    }
+    (flows, omissions.into_vec())
+}
+
+/// Fits the report to the byte budget (D7): removes one item at a time, in D7
+/// order, and records each removal as `json_budget` under its section.
+pub fn fit(mut map: AreaMap) -> Result<AreaMap, String> {
+    let mut omissions = Omissions::from_vec(std::mem::take(&mut map.omissions));
+    loop {
+        map.omissions = omissions.clone().into_vec();
+        if render(&map)?.len() <= MAX_REPORT_BYTES {
+            return Ok(map);
+        }
+        let Some(section) = trim_one(&mut map) else {
+            return Err("area map exceeds the response budget".to_string());
+        };
+        omissions.add(section, "json_budget", Some(1));
+    }
+}
+
+/// Removes one item from the first non-empty source in D7 order and names the
+/// section it came from; `None` when every trimmable list is empty.
+fn trim_one(map: &mut AreaMap) -> Option<&'static str> {
+    if map.candidate_links.pop().is_some() {
+        return Some("candidate_links");
+    }
+    if let Some(flow) = map
+        .flows
+        .iter_mut()
+        .rev()
+        .find(|flow| !flow.body.definitions.is_empty())
+    {
+        flow.body.definitions.pop();
+        return Some("flow_definitions");
+    }
+    if let Some(flow) = map
+        .flows
+        .iter_mut()
+        .rev()
+        .find(|flow| !flow.body.area_paths.is_empty())
+    {
+        flow.body.area_paths.pop();
+        return Some("flow_area_paths");
+    }
+    if map.links.pop().is_some() {
+        return Some("links");
+    }
+    if let Some(area) = map
+        .areas
+        .iter_mut()
+        .rev()
+        .find(|area| !area.hubs.is_empty())
+    {
+        area.hubs.pop();
+        return Some("hubs");
+    }
+    if let Some(area) = map
+        .areas
+        .iter_mut()
+        .rev()
+        .find(|area| !area.entry_points.is_empty())
+    {
+        area.entry_points.pop();
+        return Some("entry_points");
+    }
+    if map.imports.pop().is_some() {
+        return Some("imports");
+    }
+    if map.areas.pop().is_some() {
+        return Some("areas");
+    }
+    if map.flows.pop().is_some() {
+        return Some("flows");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{area_of, collect, collect_with, is_proven, render, Limits};
+    use super::{
+        area_of, collect, collect_with, fit, flows_for, is_proven, render, summarize_flow,
+        trace_command, AreaEntry, AreaMap, EntryPoint, Flow, FlowAreaPath, FlowBody,
+        FlowDefinition, FlowEntry, Hub, Limits, Link, Omission, Omissions, FLOW_PATHS,
+    };
     use crate::edges::tests as edge_fixtures;
+    use crate::index;
+    use crate::provider_setup::Shell;
     use crate::store::tests as store_fixtures;
     use crate::store::{self, EdgeEndpoint, EdgeRow, FileRow};
     use crate::testutil::tmpdir;
     use serde_json::{json, Value};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     struct Fixture {
@@ -1437,13 +1925,13 @@ mod tests {
         assert_eq!(area(&v, "crates/b")["proven_in"], 1);
     }
 
-    #[test]
-    fn map_scip_callee_attributed_by_bridge() {
+    /// A certified graph whose cross-file callee is attributed through a SCIP bridge.
+    fn scip_bridge_fixture(tag: &str) -> Fixture {
         let caller_src: &[u8] = b"def caller():\n    return target()\n";
         let lib_src: &[u8] = b"def target():\n    return 1\n";
         let caller_digest = store::content_digest(caller_src);
         let lib_digest = store::content_digest(lib_src);
-        let f = fixture("map-bridge");
+        let f = fixture(tag);
         edge_fixtures::ingest_py(&f.conn, f.sid, "crates/a/main.py", caller_src);
         edge_fixtures::ingest_py(&f.conn, f.sid, "crates/b/lib.py", lib_src);
         let import = edge_fixtures::mk_import_full(
@@ -1501,6 +1989,12 @@ mod tests {
         let stats = crate::edges::upsert_semantic_edges(&f.conn, f.sid, import).unwrap();
         assert_eq!(stats.calls, 1);
         certify(&f);
+        f
+    }
+
+    #[test]
+    fn map_scip_callee_attributed_by_bridge() {
+        let f = scip_bridge_fixture("map-bridge");
         let v = report(&f, 2);
         let cross = json!({"from":"crates/a","to":"crates/b","kind":"CALLS","count":1});
         assert!(
@@ -1865,5 +2359,610 @@ mod tests {
         unresolved.unresolved = Some("dynamic".to_string());
         assert!(!is_proven(&unresolved));
         assert!(!is_proven(&candidate(&f, "a.py", "x")));
+    }
+
+    // ---- Task 2: static flows and the byte budget ----
+
+    /// Snapshot of a fresh fixture, for building `TraceQueryOut` values.
+    fn snapshot_for(tag: &str) -> store::Snapshot {
+        let f = fixture(tag);
+        store::latest_snapshot(&f.conn).unwrap().unwrap()
+    }
+
+    fn syn(path: &str, byte_start: usize) -> EdgeEndpoint {
+        EdgeEndpoint::SyntaxDef {
+            path: path.to_string(),
+            byte_start,
+            byte_end: byte_start + 5,
+        }
+    }
+
+    /// One trace hop from `caller`, with the callee and kind the test needs.
+    fn hop(
+        caller: &str,
+        callee: Option<EdgeEndpoint>,
+        kind: &str,
+        precision: &str,
+    ) -> index::EdgeHitOut {
+        let mut edge = store_fixtures::stored_edge(
+            Some(store_fixtures::syntax_endpoint(caller, 0)),
+            callee,
+            kind,
+            precision,
+            None,
+        );
+        edge.caller_path = caller.to_string();
+        index::EdgeHitOut {
+            edge,
+            verification: "Unverified".to_string(),
+            evidence: index::EdgeEvidence {
+                digest: String::new(),
+                callee_span: None,
+                terminal_span: None,
+                reference_span: None,
+                imports: Vec::new(),
+            },
+            candidate: None,
+        }
+    }
+
+    /// A proven hop: `CALLS`, `Exact`, callee a syntax definition in `callee`.
+    fn proven_hop(caller: &str, callee: &str, byte_start: usize) -> index::EdgeHitOut {
+        hop(caller, Some(syn(callee, byte_start)), "CALLS", "Exact")
+    }
+
+    /// A syntax-only name call: no callee, never proven.
+    fn name_hop(caller: &str) -> index::EdgeHitOut {
+        hop(caller, None, "POTENTIAL_CALL", "Heuristic")
+    }
+
+    fn trace_path(edges: Vec<index::EdgeHitOut>, verification: &str) -> index::TracePathOut {
+        index::TracePathOut {
+            edges,
+            cycle: false,
+            truncated: false,
+            unresolved: Vec::new(),
+            verification: verification.to_string(),
+            basis: "",
+        }
+    }
+
+    fn anchor() -> index::EdgeAnchor {
+        index::EdgeAnchor {
+            kind: index::AnchorKind::Semantic,
+            path: "main.py".to_string(),
+            line1: 1,
+            col1: 1,
+            symbol_uri: None,
+            import_id: None,
+            doc: None,
+            display: None,
+            candidate_display: None,
+            span_bytes: None,
+            precision: "Exact".to_string(),
+            uncertainty: None,
+            data_member: false,
+        }
+    }
+
+    /// A `TraceQueryOut` built directly, complete and fresh unless a test changes it.
+    fn trace_out(paths: Vec<index::TracePathOut>) -> index::TraceQueryOut {
+        let total = paths.len();
+        index::TraceQueryOut {
+            impact_verdict: None,
+            candidates: None,
+            summary: None,
+            repo: "r".to_string(),
+            snapshot: snapshot_for("flow-trace-out"),
+            revision: String::new(),
+            anchor: anchor(),
+            destination: None,
+            freshness: "fresh".to_string(),
+            freshness_reasons: Vec::new(),
+            verification: "Unverified".to_string(),
+            completeness: index::CompletenessOut {
+                status: "complete".to_string(),
+                covered: total,
+                total,
+                denominator: BTreeMap::new(),
+                unresolved: Vec::new(),
+            },
+            total_exact: true,
+            paths,
+            bridges: Vec::new(),
+            nodes: 0,
+            edge_visits: 0,
+            cycle: false,
+            truncated: false,
+            unresolved: Vec::new(),
+            depth: 3,
+            limit: 1000,
+            offset: 0,
+            next_offset: None,
+        }
+    }
+
+    /// `count` distinct one-hop proven paths, each with its own callee area.
+    fn proven_paths(count: usize) -> Vec<index::TracePathOut> {
+        (0..count)
+            .map(|i| {
+                trace_path(
+                    vec![proven_hop("a/x.py", &format!("b{i:02}/y.py"), 0)],
+                    "Unverified",
+                )
+            })
+            .collect()
+    }
+
+    /// The `omitted_count` of one omission entry, if present.
+    fn omitted(omissions: &[Omission], section: &str, reason: &str) -> Option<Option<usize>> {
+        omissions
+            .iter()
+            .find(|o| o.section == section && o.reason == reason)
+            .map(|o| o.omitted_count)
+    }
+
+    fn main_entry(path: &str) -> EntryPoint {
+        EntryPoint {
+            path: path.to_string(),
+            line: Some(1),
+            col: Some(1),
+            name: Some("main".to_string()),
+            basis: "main-definition",
+        }
+    }
+
+    /// A report with no index: every section empty, ready for a test to fill.
+    fn empty_map() -> AreaMap {
+        collect(&tmpdir("fit-base"), "r", &tmpdir("fit-root"), 2).unwrap()
+    }
+
+    fn sample_flow(name: &str, definitions: Vec<FlowDefinition>) -> Flow {
+        Flow {
+            entry: FlowEntry {
+                path: format!("{name}/main.rs"),
+                line: 1,
+                col: 1,
+                name: Some("main".to_string()),
+            },
+            body: FlowBody {
+                status: "ok",
+                verification: Some("Unverified".to_string()),
+                freshness: Some("fresh".to_string()),
+                freshness_reasons: Vec::new(),
+                completeness: None,
+                area_paths: vec![FlowAreaPath {
+                    areas: vec!["a".to_string(), "b".to_string()],
+                    verification: "Unverified".to_string(),
+                }],
+                definitions,
+                paths_returned: 1,
+                unproven_paths: 0,
+                traversal_complete: true,
+                cycle: false,
+                truncated: false,
+                unresolved: Vec::new(),
+            },
+            trace_command: "riltra trace --repo r".to_string(),
+        }
+    }
+
+    #[test]
+    fn summarize_keeps_only_proven_paths() {
+        let out = trace_out(vec![
+            trace_path(
+                vec![
+                    proven_hop("a/x.py", "b/y.py", 0),
+                    proven_hop("b/y.py", "c/z.py", 0),
+                ],
+                "Unverified",
+            ),
+            trace_path(
+                vec![proven_hop("a/x.py", "b/y.py", 0), name_hop("b/y.py")],
+                "Unverified",
+            ),
+        ]);
+        let (body, omissions) = summarize_flow(Ok(&out), 1, &BTreeMap::new());
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["status"], "ok");
+        assert_eq!(
+            value["area_paths"],
+            json!([{"areas":["a","b","c"],"verification":"Unverified"}])
+        );
+        assert_eq!(value["unproven_paths"], 1);
+        assert!(omissions.is_empty());
+    }
+
+    #[test]
+    fn summarize_dedups_consecutive_areas_and_sorts() {
+        let out = trace_out(vec![
+            trace_path(
+                vec![
+                    proven_hop("a/x.py", "a/y.py", 0),
+                    proven_hop("a/y.py", "b/z.py", 0),
+                ],
+                "Unverified",
+            ),
+            trace_path(vec![proven_hop("a/x.py", "c/q.py", 0)], "Unverified"),
+        ]);
+        let (body, _) = summarize_flow(Ok(&out), 1, &BTreeMap::new());
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(
+            value["area_paths"],
+            json!([
+                {"areas":["a","b"],"verification":"Unverified"},
+                {"areas":["a","c"],"verification":"Unverified"}
+            ])
+        );
+    }
+
+    #[test]
+    fn summarize_caps_paths_and_definitions() {
+        // One chain through 25 definitions: 25 definitions and one area path.
+        let mut definitions = BTreeMap::new();
+        let mut chain = Vec::new();
+        let mut previous = "m/x.py".to_string();
+        for i in 0..25 {
+            let file = format!("d{i:02}/f.py");
+            chain.push(proven_hop(&previous, &file, 0));
+            definitions.insert(
+                (file.clone(), 0, 5),
+                Hub {
+                    path: file.clone(),
+                    line: i as u32 + 1,
+                    col: 1,
+                    name: Some("f".to_string()),
+                    kind: "function".to_string(),
+                    inbound_proven: 0,
+                },
+            );
+            previous = file;
+        }
+        // Fourteen more distinct area paths, so 15 in all.
+        let mut paths = vec![trace_path(chain, "Unverified")];
+        for i in 0..14 {
+            paths.push(trace_path(
+                vec![proven_hop("m/x.py", &format!("e{i:02}/g.py"), 0)],
+                "Unverified",
+            ));
+        }
+        let out = trace_out(paths);
+        let (body, omissions) = summarize_flow(Ok(&out), 1, &definitions);
+        assert_eq!(body.area_paths.len(), 10);
+        assert_eq!(body.definitions.len(), 20);
+        assert_eq!(
+            omitted(&omissions, "flow_area_paths", "item_limit"),
+            Some(Some(5))
+        );
+        assert_eq!(
+            omitted(&omissions, "flow_definitions", "item_limit"),
+            Some(Some(5))
+        );
+    }
+
+    #[test]
+    fn flow_cycle_is_reported() {
+        let mut out = trace_out(vec![trace_path(
+            vec![proven_hop("a/x.py", "b/y.py", 0)],
+            "Unverified",
+        )]);
+        out.cycle = true;
+        let (body, _) = summarize_flow(Ok(&out), 1, &BTreeMap::new());
+        assert!(body.cycle);
+    }
+
+    #[test]
+    fn flow_without_proven_edges() {
+        let out = trace_out(vec![trace_path(vec![name_hop("a/x.py")], "Unverified")]);
+        let (body, _) = summarize_flow(Ok(&out), 1, &BTreeMap::new());
+        assert_eq!(body.status, "no-proven-paths");
+        assert_eq!(body.unproven_paths, 1);
+        assert!(body.area_paths.is_empty());
+    }
+
+    #[test]
+    fn flow_trace_command_is_quoted() {
+        assert_eq!(
+            trace_command(Shell::PosixSh, "r", "my dir/main.rs", 1, 4),
+            "riltra trace --repo r --path 'my dir/main.rs' --line 1 --col 4 --depth 3"
+        );
+    }
+
+    #[test]
+    fn flows_cap_at_three_main_entries() {
+        let mut f = fixture("flow-cap");
+        certify(&f);
+        let mut entries: Vec<EntryPoint> = (0..5)
+            .rev()
+            .map(|i| main_entry(&format!("m{i}/main.py")))
+            .collect();
+        entries.push(EntryPoint {
+            path: "web/index.js".to_string(),
+            line: None,
+            col: None,
+            name: None,
+            basis: "conventional-path",
+        });
+        let home = f.home.clone();
+        let tx = f.conn.transaction().unwrap();
+        let (flows, omissions) = flows_for(
+            &tx,
+            "r",
+            &home,
+            &entries,
+            2,
+            &BTreeMap::new(),
+            Shell::PosixSh,
+        );
+        let paths: Vec<&str> = flows.iter().map(|flow| flow.entry.path.as_str()).collect();
+        assert_eq!(paths, ["m0/main.py", "m1/main.py", "m2/main.py"]);
+        assert_eq!(omitted(&omissions, "flows", "item_limit"), Some(Some(2)));
+    }
+
+    #[test]
+    fn flow_follows_bridged_callee() {
+        let mut f = scip_bridge_fixture("flow-bridge");
+        // The trace reads the anchor's source from the repository root, so the
+        // same bytes the fixture indexed must exist on disk there too.
+        std::fs::create_dir_all(f.home.join("crates/a")).unwrap();
+        std::fs::create_dir_all(f.home.join("crates/b")).unwrap();
+        std::fs::write(
+            f.home.join("crates/a/main.py"),
+            b"def caller():\n    return target()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            f.home.join("crates/b/lib.py"),
+            b"def target():\n    return 1\n",
+        )
+        .unwrap();
+        let entry = EntryPoint {
+            path: "crates/a/main.py".to_string(),
+            line: Some(1),
+            col: Some(5),
+            name: Some("caller".to_string()),
+            basis: "main-definition",
+        };
+        let home = f.home.clone();
+        let tx = f.conn.transaction().unwrap();
+        let sid = store::latest_snapshot(&tx).unwrap().unwrap().id;
+        let files = store::files_of(&tx, sid).unwrap();
+        let file_ids = store::file_id_map(&tx, sid).unwrap();
+        let symbols = store::symbols_for(&tx, sid).unwrap();
+        let base = super::build_base(2, &files, &file_ids, &symbols);
+        let (flows, _) = flows_for(
+            &tx,
+            "r",
+            &home,
+            &[entry],
+            2,
+            &base.definitions,
+            Shell::PosixSh,
+        );
+        let value = serde_json::to_value(&flows[0]).unwrap();
+        assert_eq!(value["status"], "ok", "{value}");
+        assert_eq!(
+            value["area_paths"][0]["areas"],
+            json!(["crates/a", "crates/b"])
+        );
+        assert_eq!(value["definitions"][0]["path"], "crates/b/lib.py");
+        assert_eq!(value["definitions"][0]["name"], "target");
+        assert_eq!(value["definitions"][0]["distance"], 1);
+    }
+
+    #[test]
+    fn flow_keeps_trace_evidence() {
+        let mut out = trace_out(vec![trace_path(
+            vec![proven_hop("a/x.py", "b/y.py", 0)],
+            "Stale",
+        )]);
+        out.verification = "Stale".to_string();
+        out.freshness = "stale".to_string();
+        out.freshness_reasons = vec!["source-changed".to_string(), "head-moved".to_string()];
+        out.completeness = index::CompletenessOut {
+            status: "partial".to_string(),
+            covered: 1,
+            total: 2,
+            denominator: BTreeMap::new(),
+            unresolved: vec!["unresolved-target".to_string()],
+        };
+        let (body, _) = summarize_flow(Ok(&out), 1, &BTreeMap::new());
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["verification"], "Stale");
+        assert_eq!(value["freshness"], "stale");
+        assert_eq!(
+            value["freshness_reasons"],
+            json!(["source-changed", "head-moved"])
+        );
+        assert_eq!(
+            value["completeness"],
+            json!({"status":"partial","covered":1,"total":2,"unresolved":["unresolved-target"]})
+        );
+        assert_eq!(
+            value["area_paths"],
+            json!([{"areas":["a","b"],"verification":"Stale"}])
+        );
+    }
+
+    #[test]
+    fn area_path_keeps_weakest_verification() {
+        let unverified_first = trace_out(vec![
+            trace_path(vec![proven_hop("a/x.py", "b/y.py", 0)], "Unverified"),
+            trace_path(vec![proven_hop("a/x.py", "b/y.py", 0)], "Stale"),
+        ]);
+        let stale_first = trace_out(vec![
+            trace_path(vec![proven_hop("a/x.py", "b/y.py", 0)], "Stale"),
+            trace_path(vec![proven_hop("a/x.py", "b/y.py", 0)], "Unverified"),
+        ]);
+        for out in [&unverified_first, &stale_first] {
+            let (body, _) = summarize_flow(Ok(out), 1, &BTreeMap::new());
+            let value = serde_json::to_value(&body).unwrap();
+            assert_eq!(
+                value["area_paths"],
+                json!([{"areas":["a","b"],"verification":"Stale"}])
+            );
+        }
+    }
+
+    #[test]
+    fn flow_traversal_stopped_is_unknown() {
+        let mut out = trace_out(vec![trace_path(
+            vec![proven_hop("a/x.py", "b/y.py", 0)],
+            "Unverified",
+        )]);
+        out.total_exact = false;
+        let (body, omissions) = summarize_flow(Ok(&out), 1, &BTreeMap::new());
+        assert!(!body.traversal_complete);
+        assert_eq!(
+            omitted(&omissions, "flow_paths", "traversal_stopped"),
+            Some(None)
+        );
+
+        // An unknown count stays unknown in either order of summation.
+        let mut exact_first = Omissions::default();
+        exact_first.add("flow_paths", "traversal_stopped", Some(2));
+        exact_first.add("flow_paths", "traversal_stopped", None);
+        let mut unknown_first = Omissions::default();
+        unknown_first.add("flow_paths", "traversal_stopped", None);
+        unknown_first.add("flow_paths", "traversal_stopped", Some(2));
+        assert_eq!(exact_first.into_vec()[0].omitted_count, None);
+        assert_eq!(unknown_first.into_vec()[0].omitted_count, None);
+    }
+
+    /// Serialized (body, omissions) of one flow summary.
+    fn flow_json(result: Result<&index::TraceQueryOut, &str>) -> String {
+        let (body, omissions) = summarize_flow(result, 1, &BTreeMap::new());
+        serde_json::to_string(&(body, omissions)).unwrap()
+    }
+
+    #[test]
+    fn flow_timeout_policy() {
+        let mut after_five = trace_out(proven_paths(5));
+        after_five.unresolved = vec!["time-budget".to_string()];
+        after_five.cycle = false;
+        let mut after_twenty = trace_out(proven_paths(20));
+        after_twenty.unresolved = vec!["time-budget".to_string()];
+        after_twenty.cycle = true;
+
+        let timed_out = flow_json(Err("time-budget"));
+        assert_eq!(timed_out, flow_json(Ok(&after_five)));
+        assert_eq!(timed_out, flow_json(Ok(&after_twenty)));
+        assert_eq!(
+            serde_json::from_str::<Value>(&timed_out).unwrap(),
+            json!([
+                {
+                    "status": "time-budget",
+                    "verification": null,
+                    "freshness": null,
+                    "freshness_reasons": [],
+                    "completeness": null,
+                    "area_paths": [],
+                    "definitions": [],
+                    "paths_returned": 0,
+                    "unproven_paths": 0,
+                    "traversal_complete": false,
+                    "cycle": false,
+                    "truncated": true,
+                    "unresolved": ["time-budget"]
+                },
+                [{"section":"flow_paths","reason":"traversal_stopped","omitted_count":null}]
+            ])
+        );
+
+        // Control: the same traces without the time-budget marker are not equal to it.
+        let plain_five = trace_out(proven_paths(5));
+        let mut plain_twenty = trace_out(proven_paths(20));
+        plain_twenty.cycle = true;
+        assert_ne!(flow_json(Ok(&plain_five)), timed_out);
+        assert_ne!(flow_json(Ok(&plain_five)), flow_json(Ok(&plain_twenty)));
+    }
+
+    #[test]
+    fn flow_trace_limit_covers_every_path() {
+        assert_eq!(index::MAX_SEARCH_LIMIT, crate::edges::TRACE_MAX_PATHS);
+        assert_eq!(FLOW_PATHS, index::MAX_SEARCH_LIMIT);
+    }
+
+    #[test]
+    fn fit_drops_areas_until_under_budget() {
+        let mut map = empty_map();
+        map.areas = (0..50)
+            .map(|i| AreaEntry::new(&format!("{i:02}{}", "p".repeat(6000))))
+            .collect();
+        let fitted = fit(map).unwrap();
+        assert!(render(&fitted).unwrap().len() <= 262_144);
+        let kept = fitted.areas.len();
+        assert!(kept > 0 && kept < 50);
+        // Removal is from the end, so the first areas survive.
+        assert_eq!(fitted.areas[0].area, format!("00{}", "p".repeat(6000)));
+        assert_eq!(
+            omitted(&fitted.omissions, "areas", "json_budget"),
+            Some(Some(50 - kept))
+        );
+    }
+
+    #[test]
+    fn fit_trims_links_before_areas() {
+        let mut map = empty_map();
+        map.links = (0..100)
+            .map(|i| Link {
+                from: format!("{i:03}{}", "a".repeat(3000)),
+                to: "t".to_string(),
+                kind: "CALLS".to_string(),
+                count: 1,
+            })
+            .collect();
+        map.areas = (0..5)
+            .map(|i| AreaEntry::new(&format!("small{i}")))
+            .collect();
+        let fitted = fit(map).unwrap();
+        assert!(render(&fitted).unwrap().len() <= 262_144);
+        assert!(fitted.links.len() < 100);
+        assert_eq!(
+            omitted(&fitted.omissions, "links", "json_budget"),
+            Some(Some(100 - fitted.links.len()))
+        );
+        assert_eq!(fitted.areas.len(), 5);
+    }
+
+    #[test]
+    fn fit_trims_flow_definitions_first() {
+        let long = "d".repeat(5000);
+        let mut map = empty_map();
+        map.flows = (0..3)
+            .map(|i| {
+                let definitions = (0..20)
+                    .map(|j| FlowDefinition {
+                        path: format!("{long}{i}{j:02}.rs"),
+                        line: 1,
+                        col: 1,
+                        name: None,
+                        distance: 1,
+                    })
+                    .collect();
+                sample_flow(&format!("main{i}"), definitions)
+            })
+            .collect();
+        let fitted = fit(map).unwrap();
+        assert!(render(&fitted).unwrap().len() <= 262_144);
+        // The last flow gives up definitions first; the earlier flows keep all theirs.
+        assert_eq!(fitted.flows[0].body.definitions.len(), 20);
+        assert_eq!(fitted.flows[1].body.definitions.len(), 20);
+        let remaining = fitted.flows[2].body.definitions.len();
+        assert!(remaining < 20);
+        assert_eq!(
+            omitted(&fitted.omissions, "flow_definitions", "json_budget"),
+            Some(Some(60 - (40 + remaining)))
+        );
+        // Area paths and links are untouched while definitions alone suffice.
+        for flow in &fitted.flows {
+            assert_eq!(flow.body.area_paths.len(), 1);
+        }
+        assert!(fitted.links.is_empty());
+        assert_eq!(
+            omitted(&fitted.omissions, "flow_area_paths", "json_budget"),
+            None
+        );
     }
 }

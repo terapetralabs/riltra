@@ -318,6 +318,41 @@ pub(crate) fn repo_status_json(
     )
 }
 
+/// One index-build summary: the `riltra index` document, and the `index` member of
+/// each `built` watch event. No trailing newline; callers add their own.
+pub(crate) fn index_summary_json(name: &str, root: &str, summary: &index::IndexSummary) -> String {
+    format!(
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"status_at_write\":\"{}\",\"mode\":\"{}\",\"reused\":{},\"reparsed\":{},\"added\":{},\"removed\":{},\"fallback_reason\":\"{}\",\"timings_ms\":{{\"diff\":{},\"ingest\":{},\"verify\":{},\"promote\":{}}},\"files\":{{\"discovered\":{},\"processed\":{},\"definitions\":{},\"imports\":{},\"calls\":{},\"errors\":{},\"skipped_ignored\":{},\"skipped_large\":{},\"skipped_binary\":{},\"skipped_symlink\":{},\"skipped_escape\":{},\"skipped_unreadable\":{},\"unsupported\":{}}}}}",
+        json::escape(name),
+        json::escape(root),
+        summary.snapshot_id,
+        summary.status_at_write,
+        summary.mode,
+        summary.reused,
+        summary.reparsed,
+        summary.added,
+        summary.removed,
+        summary.fallback_reason,
+        summary.timings_ms.diff,
+        summary.timings_ms.ingest,
+        summary.timings_ms.verify,
+        summary.timings_ms.promote,
+        summary.files_discovered,
+        summary.processed,
+        summary.definitions,
+        summary.imports,
+        summary.calls,
+        summary.errors,
+        summary.skipped_ignored,
+        summary.skipped_large,
+        summary.skipped_binary,
+        summary.skipped_symlink,
+        summary.skipped_escape,
+        summary.skipped_unreadable,
+        summary.unsupported_total
+    )
+}
+
 /// One `index status` document. The CLI fills `freshness` through its
 /// migrating open; MCP fills it through the read-only path (`open_read` +
 /// `evaluate_tx`). `reasons` are quoted raw, exactly the historical bytes.

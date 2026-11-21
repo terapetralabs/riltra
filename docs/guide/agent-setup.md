@@ -56,6 +56,8 @@ riltra index status --repo <name>
 
 Use `<name>` as the `repo` argument of every tool. Re-run `riltra index --repo <name>` after significant changes; `index status` and the freshness labels in answers tell you when the index no longer matches the source. If you set `RILTRA_HOME` in your terminal, give your MCP client the same value, or it will look somewhere else.
 
+`riltra watch` is an opt-in CLI process that rebuilds the code index after source changes; see the [capabilities guide](capabilities.md#automatic-index-updates-opt-in). An agent may suggest `riltra watch`, but it must not start it without the user's approval. MCP reads published snapshots only.
+
 For optional semantic knowledge search, build the derived vector index from
 the CLI with `riltra knowledge vector build --repo <name> --model-dir <model-dir>`.
 The MCP client must also receive `RILTRA_MODEL_DIR` pointing at the provisioned

@@ -3,9 +3,13 @@
 //! concurrency, and isolation — all through the real binary with isolated
 //! `RILTRA_HOME` directories, so every spawn is a true reopen.
 
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1390,4 +1394,411 @@ fn incremental_recovers_corrupt_live_as_fallback() {
     let (code, out, err) = run(&h, &["search", "--repo", "r", "--symbol", "Worker"]);
     assert_eq!(code, 0, "search after recovery failed: {err}");
     assert!(out.contains("\"total\":1"), "got: {out}");
+}
+
+// ---- `riltra watch` ----
+
+const WAIT: Duration = Duration::from_secs(60);
+
+/// A running `riltra watch`. Stdout lines arrive over a channel from a reader
+/// thread; stderr is drained on its own thread so a full pipe cannot block the
+/// child. Dropping the handle kills and reaps the child.
+struct WatchChild {
+    child: Child,
+    lines: Receiver<String>,
+    seen: Vec<String>,
+    stderr: Option<JoinHandle<String>>,
+}
+
+impl WatchChild {
+    fn spawn(home: &Path, args: &[&str], env: &[(&str, &str)]) -> WatchChild {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_riltra"));
+        cmd.args(args)
+            .env("RILTRA_HOME", home)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd.spawn().expect("spawn riltra watch");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+        let stderr = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr_pipe.read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
+        });
+        WatchChild {
+            child,
+            lines,
+            seen: Vec::new(),
+            stderr: Some(stderr),
+        }
+    }
+
+    /// The first stdout line that contains `needle`. On timeout the child is
+    /// killed and the test panics with every line received so far.
+    fn wait_line(&mut self, needle: &str, timeout: Duration) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) => {
+                    self.seen.push(line.clone());
+                    if line.contains(needle) {
+                        return line;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.kill();
+                    panic!(
+                        "no stdout line containing {needle:?} within {timeout:?}; lines so far:\n{}",
+                        self.seen.join("\n")
+                    );
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.kill();
+                    let stderr = self
+                        .stderr
+                        .take()
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or_default();
+                    panic!(
+                        "riltra watch exited before a line containing {needle:?}; lines so far:\n{}\nstderr:\n{stderr}",
+                        self.seen.join("\n")
+                    );
+                }
+            }
+        }
+    }
+
+    /// Waits for the child to exit and returns its code and stderr. On timeout
+    /// the child is killed and the test fails. Stdout lines still in the pipe
+    /// are collected into `seen` for `count`.
+    fn wait_exit(&mut self, timeout: Duration) -> (i32, String) {
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = self.child.try_wait().expect("poll riltra watch") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                self.kill();
+                panic!(
+                    "riltra watch did not exit within {timeout:?}; lines so far:\n{}",
+                    self.seen.join("\n")
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(5)) {
+            self.seen.push(line);
+        }
+        let stderr = self
+            .stderr
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        (status.code().unwrap_or(-1), stderr)
+    }
+
+    /// Stdout lines received so far that contain `needle`.
+    fn count(&self, needle: &str) -> usize {
+        self.seen
+            .iter()
+            .filter(|line| line.contains(needle))
+            .count()
+    }
+
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for WatchChild {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// A fresh directory outside every Riltra home, for repositories under test.
+fn workspace(tag: &str) -> PathBuf {
+    home(&format!("ws-{tag}"))
+}
+
+fn write_rust(repo: &Path, text: &str) {
+    let dir = repo.join("src");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib.rs"), text).unwrap();
+}
+
+/// Appends `text` to `path`, changing its length and mtime.
+fn append(path: &Path, text: &str) {
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(text.as_bytes()).unwrap();
+}
+
+/// The snapshot `(id, nonce)` reported by `riltra index status`. Every promoted
+/// build gets a new nonce; the id is per database and can repeat across builds.
+#[cfg(debug_assertions)]
+fn status_identity(home: &Path, name: &str) -> (String, String) {
+    let (code, out, err) = run(home, &["index", "status", "--repo", name]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    let key = "\"nonce\":\"";
+    let pos = out.find(key).expect("snapshot carries a nonce");
+    let nonce: String = out[pos + key.len()..]
+        .chars()
+        .take_while(|c| *c != '"')
+        .collect();
+    (envelope_snapshot(&out), nonce)
+}
+
+#[test]
+fn watch_starts_on_unindexed_repo() {
+    let ws = workspace("unindexed");
+    let h = home("watch-unindexed");
+    let repo = mkrepo(&ws, "repo");
+    write_rust(&repo, "fn first() {}\n");
+    let (code, _, err) = run(
+        &h,
+        &["init", "--repo", repo.to_str().unwrap(), "--name", "r"],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    let mut watch = WatchChild::spawn(&h, &["watch", "--repo", "r", "--max-builds", "1"], &[]);
+    let started = watch.wait_line("\"event\":\"started\"", WAIT);
+    assert!(started.contains("\"status\":\"unknown\""), "{started}");
+    watch.wait_line("\"event\":\"built\"", WAIT);
+    let (code, err) = watch.wait_exit(WAIT);
+    assert_eq!(code, 0, "watch failed: {err}");
+}
+
+#[test]
+fn watch_indexes_new_definition() {
+    let ws = workspace("new-definition");
+    let h = home("watch-new-definition");
+    let Some(repo) = git_repo(&ws, "repo", "main") else {
+        return;
+    };
+    write_rust(&repo, "fn initial_marker() {}\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", "add source"]);
+    init_and_index(&h, &repo, "r");
+    let mut watch = WatchChild::spawn(
+        &h,
+        &[
+            "watch",
+            "--repo",
+            "r",
+            "--interval-ms",
+            "100",
+            "--debounce-ms",
+            "200",
+            "--max-builds",
+            "1",
+        ],
+        &[],
+    );
+    // Fresh at start, so the startup build cannot use up --max-builds.
+    let started = watch.wait_line("\"event\":\"started\"", WAIT);
+    assert!(started.contains("\"status\":\"fresh\""), "{started}");
+    append(&repo.join("src").join("lib.rs"), "fn watched_marker() {}\n");
+    let (code, err) = watch.wait_exit(WAIT);
+    assert_eq!(code, 0, "watch failed: {err}");
+    assert_eq!(watch.count("\"event\":\"built\""), 1, "{:?}", watch.seen);
+    let (code, out, err) = run(&h, &["search", "--repo", "r", "--symbol", "watched_marker"]);
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("watched_marker"), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"dirty\""), "worktree is dirty: {out}");
+}
+
+#[test]
+fn watch_rebuilds_after_commit_without_new_files() {
+    let ws = workspace("commit-only");
+    let h = home("watch-commit-only");
+    let Some(repo) = git_repo(&ws, "repo", "main") else {
+        return;
+    };
+    init_and_index(&h, &repo, "r");
+    let mut watch = WatchChild::spawn(
+        &h,
+        &[
+            "watch",
+            "--repo",
+            "r",
+            "--interval-ms",
+            "100",
+            "--debounce-ms",
+            "200",
+            "--max-builds",
+            "1",
+        ],
+        &[],
+    );
+    watch.wait_line("\"event\":\"started\"", WAIT);
+    git(&repo, &["commit", "--allow-empty", "-m", "x"]);
+    let (code, err) = watch.wait_exit(WAIT);
+    assert_eq!(code, 0, "watch failed: {err}");
+    assert_eq!(watch.count("\"event\":\"built\""), 1, "{:?}", watch.seen);
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"fresh\""), "got: {out}");
+}
+
+#[test]
+fn second_watch_is_refused() {
+    let ws = workspace("second-watch");
+    let h = home("watch-second");
+    let repo = mkrepo(&ws, "repo");
+    write_rust(&repo, "fn held() {}\n");
+    init_and_index(&h, &repo, "r");
+    let mut first = WatchChild::spawn(&h, &["watch", "--repo", "r"], &[]);
+    first.wait_line("\"event\":\"started\"", WAIT);
+    let mut second = WatchChild::spawn(&h, &["watch", "--repo", "r"], &[]);
+    let (code, err) = second.wait_exit(WAIT);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("watch-busy"), "{err}");
+}
+
+#[test]
+fn index_reports_busy_while_writer_lock_held() {
+    let ws = workspace("writer-busy");
+    let h = home("watch-writer-busy");
+    let repo = mkrepo(&ws, "repo");
+    write_rust(&repo, "fn before() {}\n");
+    init_and_index(&h, &repo, "r");
+    let lock_path = h.join("index").join("r.db.lock");
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    held.try_lock().expect("test takes the writer lock");
+    let (code, _, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("index-busy"), "{err}");
+
+    let mut watch = WatchChild::spawn(
+        &h,
+        &[
+            "watch",
+            "--repo",
+            "r",
+            "--interval-ms",
+            "100",
+            "--debounce-ms",
+            "200",
+            "--max-builds",
+            "1",
+        ],
+        &[],
+    );
+    watch.wait_line("\"event\":\"started\"", WAIT);
+    append(
+        &repo.join("src").join("lib.rs"),
+        "fn edited_while_locked() {}\n",
+    );
+    watch.wait_line("\"event\":\"busy\"", WAIT);
+    held.unlock().expect("release the writer lock");
+    watch.wait_line("\"event\":\"built\"", WAIT);
+    let (code, err) = watch.wait_exit(WAIT);
+    assert_eq!(code, 0, "watch failed: {err}");
+}
+
+#[test]
+fn watch_refuses_root_inside_home() {
+    let ws = workspace("inside-home");
+    // The home is the workspace itself, so the registered repository sits inside it.
+    let repo = mkrepo(&ws, "repo");
+    write_rust(&repo, "fn inside() {}\n");
+    let (code, _, err) = run(
+        &ws,
+        &["init", "--repo", repo.to_str().unwrap(), "--name", "r"],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    let mut watch = WatchChild::spawn(&ws, &["watch", "--repo", "r"], &[]);
+    let (code, err) = watch.wait_exit(WAIT);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("watch-root-overlaps-home"), "{err}");
+}
+
+// Needs the debug-only RILTRA_TEST_HOLD_AFTER_STAGING_MS hook, so it runs only in debug builds.
+#[cfg(debug_assertions)]
+#[test]
+fn kill_during_build_keeps_previous_snapshot() {
+    let ws = workspace("kill-build");
+    let h = home("watch-kill-build");
+    let repo = mkrepo(&ws, "repo");
+    write_rust(&repo, "fn existing_marker() {}\n");
+    init_and_index(&h, &repo, "r");
+    let s1 = status_identity(&h, "r");
+    let (code, out, err) = run(
+        &h,
+        &["search", "--repo", "r", "--symbol", "existing_marker"],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("existing_marker"), "got: {out}");
+
+    let mut watch = WatchChild::spawn(
+        &h,
+        &[
+            "watch",
+            "--repo",
+            "r",
+            "--interval-ms",
+            "100",
+            "--debounce-ms",
+            "200",
+        ],
+        &[("RILTRA_TEST_HOLD_AFTER_STAGING_MS", "30000")],
+    );
+    watch.wait_line("\"event\":\"started\"", WAIT);
+    append(
+        &repo.join("src").join("lib.rs"),
+        "fn edited_during_hold() {}\n",
+    );
+    // The staging database appears once the rebuild has started, so the kill
+    // lands mid-build.
+    let staging = h.join("index").join("r.db.staging");
+    let deadline = Instant::now() + WAIT;
+    while !staging.exists() {
+        assert!(Instant::now() < deadline, "rebuild never staged a database");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    watch.kill();
+
+    assert_eq!(
+        status_identity(&h, "r"),
+        s1,
+        "previous snapshot must stay live"
+    );
+    let (code, out, err) = run(
+        &h,
+        &["search", "--repo", "r", "--symbol", "existing_marker"],
+    );
+    assert_eq!(code, 0, "search after kill failed: {err}");
+    assert!(out.contains("existing_marker"), "got: {out}");
+
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "recovery index failed: {err}");
+    let recovered = status_identity(&h, "r");
+    assert_ne!(
+        recovered.1, s1.1,
+        "the recovery build must promote a new snapshot: {out}"
+    );
+    for suffix in ["", "-wal", "-shm"] {
+        let leftover = h.join("index").join(format!("r.db.staging{suffix}"));
+        assert!(!leftover.exists(), "{} survived", leftover.display());
+    }
 }

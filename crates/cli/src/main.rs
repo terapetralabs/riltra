@@ -48,6 +48,7 @@ mod semantic;
 mod start;
 mod store;
 mod syntax;
+mod watch;
 
 #[cfg(test)]
 mod testutil;
@@ -65,13 +66,13 @@ pub(crate) const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]\n  {NAME} query --repo <name> --text <text> [--limit <n>] [--expand]
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} watch --repo <name> [--interval-ms <n>] [--debounce-ms <n>] [--max-wait-ms <n>] [--max-builds <n>]\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]\n  {NAME} query --repo <name> --text <text> [--limit <n>] [--expand]
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} start [--path <directory>] [--name <name>] [--client codex|claude|opencode] [--json]\n  {NAME} overview --repo <name>\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} packet --repo <name> --anchors <json> [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n  {NAME} agent-block\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  query        Rank indexed symbols by the words of a text (lexical) as JSON\n  start        Guide project orientation and a selected-definition packet\n  overview     Summarize a registered project from bounded evidence as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  packet Bounded context for selected code anchors\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n  agent-block Print the agent instruction block as Markdown text (not JSON)\n"
+  {NAME} trace --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} start [--path <directory>] [--name <name>] [--client codex|claude|opencode] [--json]\n  {NAME} overview --repo <name>\n  {NAME} impact --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> (--path <rel> --line <n> --col <n> | --target <text> [--in <rel>] [--kind <kind>]) [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} packet --repo <name> --anchors <json> [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} changes --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--semantic] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} knowledge vector build --repo <name> --model-dir <path>\n  {NAME} knowledge vector status --repo <name>\n  {NAME} knowledge vector clear --repo <name>\n  {NAME} mcp\n  {NAME} agent-block\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  watch        Rebuild the index after source changes; one JSON event per line\n  search       Search indexed symbols as JSON\n  query        Rank indexed symbols by the words of a text (lexical) as JSON\n  start        Guide project orientation and a selected-definition packet\n  overview     Summarize a registered project from bounded evidence as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  packet Bounded context for selected code anchors\n  changes Structure of a git change: definitions touched, with caller counts\n  mcp Serve the MCP stdio interface\n  agent-block Print the agent instruction block as Markdown text (not JSON)\n"
     )
 }
 
@@ -268,36 +269,7 @@ fn cmd_index(name: &str, full: bool, out: &mut String, err: &mut String) -> i32 
     };
     match index::build(&home, name, Path::new(&root), full) {
         Ok(summary) => {
-            *out = format!(
-                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"status_at_write\":\"{}\",\"mode\":\"{}\",\"reused\":{},\"reparsed\":{},\"added\":{},\"removed\":{},\"fallback_reason\":\"{}\",\"timings_ms\":{{\"diff\":{},\"ingest\":{},\"verify\":{},\"promote\":{}}},\"files\":{{\"discovered\":{},\"processed\":{},\"definitions\":{},\"imports\":{},\"calls\":{},\"errors\":{},\"skipped_ignored\":{},\"skipped_large\":{},\"skipped_binary\":{},\"skipped_symlink\":{},\"skipped_escape\":{},\"skipped_unreadable\":{},\"unsupported\":{}}}}}",
-                json::escape(name),
-                json::escape(&root),
-                summary.snapshot_id,
-                summary.status_at_write,
-                summary.mode,
-                summary.reused,
-                summary.reparsed,
-                summary.added,
-                summary.removed,
-                summary.fallback_reason,
-                summary.timings_ms.diff,
-                summary.timings_ms.ingest,
-                summary.timings_ms.verify,
-                summary.timings_ms.promote,
-                summary.files_discovered,
-                summary.processed,
-                summary.definitions,
-                summary.imports,
-                summary.calls,
-                summary.errors,
-                summary.skipped_ignored,
-                summary.skipped_large,
-                summary.skipped_binary,
-                summary.skipped_symlink,
-                summary.skipped_escape,
-                summary.skipped_unreadable,
-                summary.unsupported_total
-            ) + "\n";
+            *out = response::index_summary_json(name, &root, &summary) + "\n";
             0
         }
         Err(e) => {
@@ -332,6 +304,39 @@ fn cmd_index_status(name: &str, out: &mut String, err: &mut String) -> i32 {
         .unwrap_or(false);
     *out = response::index_status_json(name, &recorded, &freshness, fts) + "\n";
     0
+}
+
+/// `riltra watch`: rebuilds the index after source changes (opt-in, CLI only).
+/// Events go straight to stdout, one line each; diagnostics go to `err`.
+fn cmd_watch(repo: &str, opts: &watch::Options, err: &mut String) -> i32 {
+    let home = paths::config_dir();
+    let (root, _) = match resolve_recorded_root(repo, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    let canon_home = match home.canonicalize() {
+        Ok(canon) => canon,
+        Err(e) => {
+            err.push_str(&format!("error: cannot resolve the Riltra home: {e}\n"));
+            return 3;
+        }
+    };
+    if let Err(e) = watch::check_overlap(Path::new(&root), &canon_home) {
+        err.push_str(&format!("error: {e}\n"));
+        return 3;
+    }
+    // C2: held for the whole life of this process, so a second watcher is refused before polling.
+    let _watcher =
+        match index::FileLock::try_acquire(&store::watch_lock_path(&home, repo), "watch-busy:") {
+            Ok(lock) => lock,
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        };
+    let excluded = watch::Excluded::new(&canon_home);
+    let mut deps = watch::RealDeps::new(&home, repo, Path::new(&root), excluded);
+    watch::drive_events(opts, &mut deps, repo, &root, &mut std::io::stdout(), err)
 }
 
 fn parse_count(value: Option<&str>, fallback: usize, arg: &str) -> Result<usize, String> {
@@ -723,6 +728,21 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             progress,
         } => with_progress("index", progress, || cmd_index(&repo, full, out, err)),
         Command::IndexStatus { repo } => cmd_index_status(&repo, out, err),
+        Command::Watch {
+            repo,
+            interval_ms,
+            debounce_ms,
+            max_wait_ms,
+            max_builds,
+        } => {
+            let opts = watch::Options {
+                interval_ms,
+                debounce_ms,
+                max_wait_ms,
+                max_builds,
+            };
+            cmd_watch(&repo, &opts, err)
+        }
         Command::Search {
             repo,
             symbol,

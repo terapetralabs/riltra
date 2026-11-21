@@ -63,6 +63,41 @@ automatically. Knowledge records are revisioned, and explicit bindings point
 to one record revision. A binding records a relationship, not whether the
 record itself is true.
 
+## Automatic index updates (opt-in)
+
+`riltra watch --repo <name> [--interval-ms <n>] [--debounce-ms <n>] [--max-wait-ms <n>] [--max-builds <n>]` rebuilds the code index after source changes. It is opt-in and CLI only: there is no MCP tool for it, and nothing starts it automatically.
+
+- It polls the repository. `--interval-ms` sets the poll interval (default `1000`, allowed `100` to `60000`). `--debounce-ms` sets how long changes must stay quiet before a build (default `500`, allowed `0` to `60000`).
+- It rebuilds only the code index, through the same incremental index that `riltra index` runs. It never runs project builds, LSP servers, SCIP imports or semantic providers.
+
+Locks:
+
+- One watcher runs per index. A second `riltra watch` for the same repository exits `3` with `watch-busy:`. A running watcher does not block `riltra index`.
+- One rebuild or import writer runs per index at a time. A contending write reports `index-busy:` and exits `3`; it does not wait. Schema migrations are serialized by SQLite, not by this lock, so the guarantee is one rebuild or import writer per index, not one SQLite writer.
+- A root equal to or inside `RILTRA_HOME` is refused with `watch-root-overlaps-home:` and exit `3`.
+
+What triggers a rebuild:
+
+- a file is added, deleted or renamed, or a file changes length or modification time;
+- an ignore or config change, such as an edit to `.riltraignore`;
+- a git HEAD or branch change, even when no file changed.
+
+Limits:
+
+- An edit that keeps the same length and lands inside one filesystem mtime tick can be missed until the next change, a HEAD or branch change, or a manual `riltra index`.
+- Each poll walks the repository, so its cost grows with the size of the repository.
+- Freshness stays `stale` while the worktree is dirty, even right after a rebuild.
+- After a failed build, watch waits for a new change before it builds again, and it polls more slowly (up to `60000` ms between polls).
+- Ignored files and unsupported files do not trigger a rebuild, so the unsupported-file counts in the index summary can lag until the next rebuild.
+
+CLI behaviour:
+
+- `--max-builds <n>` (1 or more) stops after `n` successful builds and exits `0`. Failed builds do not count.
+- `--max-wait-ms <n>` (`1000` to `600000`) caps how long continuous changes can delay a build. When it is not given, the cap is the larger of `10000` and the debounce. A value below `--debounce-ms` is a usage error (exit `2`).
+- A repository that was never indexed, or whose index is stale, is built right after start.
+- Each event is one single-line JSON object on stdout: `started`, `built`, `failed`, `busy` or `stopped`. A `busy` event means the writer lock was held; the change stays pending and is retried after another debounce period. Diagnostics go to stderr.
+- Exit codes: `0` when `--max-builds` is reached, `2` for usage errors, `3` for a repository, data or storage error. If an event cannot be written (for example, stdout is closed), watch exits `3`.
+
 ## Selected-anchor packets
 
 `packet` combines results for one to five anchors that you choose after search
@@ -385,6 +420,10 @@ and client configuration. For the core and provider security details, read the
 - `search --occurrences` is an exact-name census, not proof that a symbol is
   bound or unused.
 - macOS CI covers the x64 runner pool; macOS ARM64 is not covered.
+- `riltra watch` polls the source; it does not use OS file events. An edit that
+  keeps the same length and lands inside one mtime tick can be missed until the
+  next change, a HEAD or branch change, or a manual `riltra index`. See
+  [automatic index updates](#automatic-index-updates-opt-in).
 
 ## Compatibility
 

@@ -66,6 +66,50 @@ pub fn staging_path(home: &Path, repo: &str) -> PathBuf {
     path
 }
 
+/// Writer lock for index rebuilds and SCIP imports (one writer per index).
+pub fn lock_path(home: &Path, repo: &str) -> PathBuf {
+    home.join("index").join(format!("{repo}.db.lock"))
+}
+
+/// Watcher lock, held for the whole life of one `riltra watch` process.
+pub fn watch_lock_path(home: &Path, repo: &str) -> PathBuf {
+    home.join("index").join(format!("{repo}.watch.lock"))
+}
+
+/// Removes a staging database and its SQLite sidecars: `-wal`, then `-shm`,
+/// then the file itself. A missing file is fine; any other failure is retried
+/// three times, 50 ms apart, and then reported as a locked staging file.
+pub fn remove_staging(staging: &Path) -> Result<(), String> {
+    let with_suffix = |suffix: &str| {
+        let mut name = staging.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    for path in [
+        with_suffix("-wal"),
+        with_suffix("-shm"),
+        staging.to_path_buf(),
+    ] {
+        remove_with_retry(&path)?;
+    }
+    Ok(())
+}
+
+fn remove_with_retry(path: &Path) -> Result<(), String> {
+    let mut retries = 0;
+    loop {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) if retries < 3 => {
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return Err("stale staging file is locked by another build".to_string()),
+        }
+    }
+}
+
 fn open_inner(path: Option<&Path>) -> Result<Connection, String> {
     let conn = match path {
         Some(p) => Connection::open(p).map_err(|e| format!("cannot open database: {e}"))?,

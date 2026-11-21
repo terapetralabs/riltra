@@ -1566,3 +1566,265 @@ fn cli_lsp_live_query_gated() {
         "the diagnostic explains it: {out}"
     );
 }
+
+/// `riltra` with `RILTRA_LSP_SERVER` cleared first, then the given variables.
+fn run_env(home: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_riltra"));
+    cmd.args(args)
+        .env("RILTRA_HOME", home)
+        .env_remove("RILTRA_LSP_SERVER");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().expect("spawn riltra");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// `SystemRoot` is passed on Windows so the binary still starts when PATH
+/// holds only the fake directory; elsewhere it is an empty, unused variable.
+fn system_root() -> String {
+    std::env::var("SystemRoot").unwrap_or_default()
+}
+
+/// A stand-in producer that records that it ran. The test never runs it; the
+/// marker `ran-<stem>` would appear only if riltra executed it.
+#[cfg(unix)]
+fn fake_program(dir: &Path, stem: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let marker = dir.join(format!("ran-{stem}"));
+    let body = format!("#!/bin/sh\necho ran > '{}'\n", marker.to_string_lossy());
+    let path = dir.join(stem);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(windows)]
+fn fake_program(dir: &Path, stem: &str) {
+    let marker = dir.join(format!("ran-{stem}"));
+    let body = format!(
+        "@echo off\r\necho ran> \"{}\"\r\n",
+        marker.to_string_lossy()
+    );
+    std::fs::write(dir.join(format!("{stem}.cmd")), body).unwrap();
+}
+
+/// Every regular file under `dir` with its bytes. `-wal` and `-shm` sidecars
+/// are left out, because D8 allows them beside an existing index.
+fn snapshot_files(dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            snapshot_files(&path, out);
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !(name.ends_with("-wal") || name.ends_with("-shm")) {
+            let bytes = std::fs::read(&path).unwrap();
+            out.insert(path, bytes);
+        }
+    }
+}
+
+/// The `imports` array text of a setup report.
+fn imports_section(json: &str) -> &str {
+    let open = "\"imports\":[";
+    let start = json.find(open).expect("imports key") + open.len();
+    let end = json[start..].find("],\"next\"").expect("next key") + start;
+    &json[start..end]
+}
+
+fn plain_rust_repo(home: &Path) {
+    repo_with(
+        home,
+        "r",
+        &[
+            ("src/lib.rs", "pub fn f() {}\n"),
+            ("Cargo.toml", "[package]\nname = \"r\"\n"),
+        ],
+    );
+    let (code, _, err) = run(home, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+}
+
+#[test]
+fn setup_never_executes_found_programs() {
+    let h = home("setup-noexec");
+    plain_rust_repo(&h);
+    let bin = h.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for stem in ["rust-analyzer", "scip-typescript", "git"] {
+        fake_program(&bin, stem);
+    }
+    let lsp = bin.join(if cfg!(windows) {
+        "rust-analyzer.cmd"
+    } else {
+        "rust-analyzer"
+    });
+    let lsp = lsp.to_string_lossy().into_owned();
+    let path = bin.to_string_lossy().into_owned();
+    let sysroot = system_root();
+    let (code, out, err) = run_env(
+        &h,
+        &["semantic", "setup", "--repo", "r", "--lsp-server", &lsp],
+        &[("PATH", &path), ("SystemRoot", &sysroot)],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"state\":\"found\""), "{out}");
+    assert!(
+        out.contains("\"source\":\"--lsp-server\",\"state\":\"configured\""),
+        "{out}"
+    );
+    let ran: Vec<String> = std::fs::read_dir(&bin)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ran-"))
+        .collect();
+    assert!(ran.is_empty(), "a program was executed: {ran:?}");
+}
+
+#[test]
+fn setup_leaves_index_and_registry_bytes_unchanged() {
+    let h = home("setup-bytes");
+    plain_rust_repo(&h);
+    let mut before = std::collections::BTreeMap::new();
+    snapshot_files(&h, &mut before);
+    let (code, _, err) = run(&h, &["semantic", "setup", "--repo", "r"]);
+    assert_eq!(code, 0, "{err}");
+    let mut after = std::collections::BTreeMap::new();
+    snapshot_files(&h, &mut after);
+    assert!(!before.is_empty(), "the snapshot saw no files");
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "setup changed the set of files"
+    );
+    assert!(before == after, "setup changed file bytes");
+}
+
+#[test]
+fn setup_git_repo_reports_fresh() {
+    let git_present = Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !git_present {
+        eprintln!("skip: git is not available");
+        return;
+    }
+    let h = home("setup-git");
+    let dir = h.join("g");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    let (code, _, err) = run(
+        &h,
+        &["init", "--repo", &dir.to_string_lossy(), "--name", "g"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(&h, &["index", "--repo", "g"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&h, &["semantic", "setup", "--repo", "g"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"freshness\":\"fresh\""), "{out}");
+}
+
+#[test]
+fn setup_reads_env_server() {
+    let h = home("setup-env");
+    repo_with(&h, "r", &[("src/lib.rs", "pub fn f() {}\n")]);
+    let (code, out, err) = run_env(
+        &h,
+        &["semantic", "setup", "--repo", "r"],
+        &[("RILTRA_LSP_SERVER", "rust-analyzer")],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("\"source\":\"RILTRA_LSP_SERVER\",\"state\":\"not-absolute\""),
+        "{out}"
+    );
+}
+
+#[test]
+fn setup_unknown_repo_exits_3() {
+    let h = home("setup-unknown");
+    let (code, out, err) = run(&h, &["semantic", "setup", "--repo", "nope"]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("unknown repository"), "{err}");
+}
+
+#[test]
+fn setup_usage_errors_exit_2() {
+    let h = home("setup-usage");
+    let (code, _, _) = run(&h, &["semantic", "setup", "--repo", "r", "--lsp-server="]);
+    assert_eq!(code, 2);
+    let (code, _, _) = run(&h, &["semantic", "setup"]);
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn setup_never_turns_refs_into_calls() {
+    let h = home("setup-refs");
+    // The mock answers references at 0-based lines 4 and 7, so the file needs
+    // at least eight lines (the same fixture as cli_lsp_live_query_gated).
+    let repodir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "main.rs",
+            "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\nfn helper() {}\nfn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n",
+        )],
+    );
+    do_index(&h);
+    let mock = mock_lsp::mock_lsp_bin().to_string_lossy().into_owned();
+    let root = repodir.to_string_lossy().replace('\\', "/");
+    let (code, before, err) = run(&h, &["semantic", "setup", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, refs, err) = run_env(
+        &h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "main.rs",
+            "--line",
+            "2",
+            "--col",
+            "5",
+            "--refs",
+            "--lsp-server",
+            &mock,
+        ],
+        &[("RILTRA_MOCK_LSP", "success"), ("RILTRA_MOCK_ROOT", &root)],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        refs.contains("\"references\":[{"),
+        "references were returned: {refs}"
+    );
+    let (code, callers, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "main.rs", "--line", "2", "--col", "5",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !callers.contains("CALLS"),
+        "references became calls: {callers}"
+    );
+    let (code, after, err) = run(&h, &["semantic", "setup", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(imports_section(&before), imports_section(&after));
+}

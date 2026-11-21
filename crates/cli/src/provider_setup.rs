@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::index::{SemanticStatusRow, SetupIndex};
+use crate::json;
 use crate::paths::{find_executable_in, is_regular_file};
 use crate::scan::{plan_walk, PlanAction};
 use crate::syntax::language_name;
@@ -254,9 +256,406 @@ pub fn detect(root: &Path) -> Result<Detection, String> {
     })
 }
 
+/// Shell that rendered commands are written for (D9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    PosixSh,
+    PowerShell,
+}
+
+impl Shell {
+    /// `powershell` on Windows, `posix-sh` everywhere else.
+    pub fn current() -> Shell {
+        if cfg!(windows) {
+            Shell::PowerShell
+        } else {
+            Shell::PosixSh
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Shell::PosixSh => "posix-sh",
+            Shell::PowerShell => "powershell",
+        }
+    }
+}
+
+/// Quote one argument for `shell` (D9). Flags are literal tokens and never
+/// pass through here.
+pub fn quote(shell: Shell, arg: &str) -> String {
+    match shell {
+        Shell::PosixSh => {
+            let bare = !arg.is_empty()
+                && arg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+            if bare {
+                arg.to_string()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        }
+        Shell::PowerShell => {
+            let bare = !arg.is_empty()
+                && !arg.starts_with('-')
+                && arg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c));
+            if bare {
+                arg.to_string()
+            } else {
+                format!("'{}'", arg.replace('\'', "''"))
+            }
+        }
+    }
+}
+
+/// The program token of a command (D9): `bare` for `riltra` and PATH hits, and
+/// the `node_modules/.bin` form for a local hit.
+pub fn render_program(shell: Shell, hit: Option<&Hit>, bare: &str) -> String {
+    match (shell, hit) {
+        (Shell::PosixSh, Some(Hit::Local(file))) => format!("./node_modules/.bin/{file}"),
+        (Shell::PowerShell, Some(Hit::Local(file))) => {
+            format!("& '.\\node_modules\\.bin\\{file}'")
+        }
+        _ => bare.to_string(),
+    }
+}
+
+/// One guided producer after lookup. Nothing here runs the producer.
+struct Guided {
+    producer: &'static Producer,
+    found: bool,
+    /// Absolute path of the file that was found.
+    path: Option<PathBuf>,
+    needs_met: bool,
+    /// The command for the arguments that apply, `None` when no command is offered.
+    command: Option<String>,
+}
+
+fn guided(root: &Path, shell: Shell, producer: &'static Producer, path_dirs: &[PathBuf]) -> Guided {
+    let hit = find_producer(root, producer, path_dirs);
+    let needs_met = is_regular_file(&root.join(producer.needs));
+    let args = if needs_met {
+        Some(producer.args_met)
+    } else {
+        producer.args_unmet
+    };
+    let path = hit.as_ref().map(|found| match found {
+        Hit::Local(file) => root.join("node_modules").join(".bin").join(file),
+        Hit::Path(path) => path.clone(),
+    });
+    let command = match (hit.as_ref(), args) {
+        (Some(found), Some(args)) => {
+            let mut command = render_program(shell, Some(found), producer.name);
+            for arg in args {
+                command.push(' ');
+                command.push_str(arg);
+            }
+            Some(command)
+        }
+        _ => None,
+    };
+    Guided {
+        producer,
+        found: hit.is_some(),
+        path,
+        needs_met,
+        command,
+    }
+}
+
+/// One `next` entry: a fixed step text and an optional command.
+struct Step {
+    text: String,
+    command: Option<String>,
+}
+
+impl Step {
+    fn plain(text: String) -> Step {
+        Step {
+            text,
+            command: None,
+        }
+    }
+
+    fn with(text: &str, command: &str) -> Step {
+        Step {
+            text: text.to_string(),
+            command: Some(command.to_string()),
+        }
+    }
+}
+
+/// Index fields of the report, flattened from `SetupIndex`.
+struct IndexView<'a> {
+    status: &'static str,
+    snapshot: Option<i64>,
+    freshness: Option<&'a str>,
+    reasons: &'a [String],
+    rows: &'a [SemanticStatusRow],
+}
+
+/// Imports listed in the report; later ones are counted in a step.
+const MAX_IMPORTS: usize = 20;
+
+/// JSON string or `null`.
+fn json_opt(value: Option<&str>) -> String {
+    match value {
+        Some(v) => format!("\"{}\"", json::escape(v)),
+        None => "null".to_string(),
+    }
+}
+
+fn producer_json(g: &Guided) -> String {
+    let path = g.path.as_ref().map(|p| p.to_string_lossy().into_owned());
+    format!(
+        "{{\"name\":\"{}\",\"state\":\"{}\",\"path\":{},\"needs\":\"{}\",\"needs_met\":{},\"command\":{}}}",
+        g.producer.name,
+        if g.found { "found" } else { "not-found" },
+        json_opt(path.as_deref()),
+        g.producer.needs,
+        g.needs_met,
+        json_opt(g.command.as_deref()),
+    )
+}
+
+/// The D4 setup report as one line of JSON, with the D5 next steps. Pure
+/// apart from file-existence checks; nothing is executed.
+pub fn report(
+    repo: &str,
+    root: &Path,
+    detection: &Detection,
+    index: &SetupIndex,
+    lsp: (Option<&str>, &'static str),
+    path_dirs: &[PathBuf],
+    shell: Shell,
+) -> String {
+    let riltra = render_program(shell, None, "riltra");
+    let repo_arg = quote(shell, repo);
+    let index_cmd = format!("{riltra} index --repo {repo_arg}");
+    let import_cmd = format!(
+        "{riltra} semantic import --repo {repo_arg} --scip {}",
+        quote(shell, "index.scip")
+    );
+
+    let view = match index {
+        SetupIndex::NoIndex => IndexView {
+            status: "no-index",
+            snapshot: None,
+            freshness: None,
+            reasons: &[],
+            rows: &[],
+        },
+        SetupIndex::SchemaOutdated(_) => IndexView {
+            status: "schema_outdated",
+            snapshot: None,
+            freshness: None,
+            reasons: &[],
+            rows: &[],
+        },
+        SetupIndex::SchemaAhead(_) => IndexView {
+            status: "schema_ahead",
+            snapshot: None,
+            freshness: None,
+            reasons: &[],
+            rows: &[],
+        },
+        SetupIndex::Ready(state) => IndexView {
+            status: "ready",
+            snapshot: state.snapshot.as_ref().map(|s| s.id),
+            freshness: state.freshness.as_deref(),
+            reasons: &state.reasons,
+            rows: &state.rows,
+        },
+    };
+
+    // Families present: any of their languages has a parsed file (D1 order).
+    let present: Vec<&'static Family> = families()
+        .iter()
+        .filter(|f| {
+            f.languages
+                .iter()
+                .any(|lang| detection.languages.contains_key(lang))
+        })
+        .collect();
+    let guided_by_family: Vec<Option<Guided>> = present
+        .iter()
+        .map(|f| f.producer.map(|p| guided(root, shell, p, path_dirs)))
+        .collect();
+    let lsp_state = |family: &Family| classify_lsp(lsp.0, family);
+    let state_of = |name: &str| {
+        present
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| lsp_state(f))
+    };
+
+    // D5 next steps, in rule order.
+    let mut steps: Vec<Step> = Vec::new();
+    match index {
+        SetupIndex::NoIndex | SetupIndex::SchemaOutdated(_) => {
+            steps.push(Step::with("build the code index", &index_cmd))
+        }
+        SetupIndex::SchemaAhead(_) => steps.push(Step::plain(
+            "this index was written by a newer riltra; upgrade riltra".to_string(),
+        )),
+        SetupIndex::Ready(state) if state.freshness.as_deref() != Some("fresh") => steps.push(
+            Step::with("rebuild the code index so imports can match it", &index_cmd),
+        ),
+        SetupIndex::Ready(_) => {}
+    }
+    let scan_complete = detection.unreadable_dirs == 0 && detection.escaped_dirs == 0;
+    if !scan_complete {
+        steps.push(Step::plain(
+            "some directories could not be read or point outside the repository; languages and manifests may be incomplete".to_string(),
+        ));
+    }
+    for guided_entry in guided_by_family.iter().flatten() {
+        let producer = guided_entry.producer.name;
+        let unverified = view
+            .rows
+            .iter()
+            .any(|r| r.provider_name == producer && r.verification == "Unverified");
+        if unverified {
+            continue;
+        }
+        if !guided_entry.found {
+            steps.push(Step::plain(format!(
+                "install {producer} yourself; riltra does not install providers"
+            )));
+        } else if let Some(command) = &guided_entry.command {
+            steps.push(Step {
+                text: format!("produce a SCIP index with {producer}"),
+                command: Some(command.clone()),
+            });
+            steps.push(Step {
+                text: "import the SCIP index".to_string(),
+                command: Some(import_cmd.clone()),
+            });
+        } else {
+            steps.push(Step::plain(format!(
+                "{producer} scip needs a {} at the repository root",
+                guided_entry.producer.needs
+            )));
+        }
+    }
+    for row in view.rows.iter().filter(|r| r.verification == "Stale") {
+        steps.push(Step::plain(format!(
+            "re-run {} and import again; import {} no longer matches the source",
+            row.provider_name, row.import_id
+        )));
+    }
+    if state_of("rust") == Some("not-configured") {
+        steps.push(Step::plain(
+            "optional: set RILTRA_LSP_SERVER to the absolute path of rust-analyzer for riltra_code_semantic".to_string(),
+        ));
+    }
+    if state_of("typescript") == Some("launch-incompatible") {
+        steps.push(Step::plain(
+            "typescript-language-server needs --stdio, which riltra does not pass; use the SCIP path for TypeScript".to_string(),
+        ));
+    }
+    if view.rows.len() > MAX_IMPORTS {
+        steps.push(Step::plain(format!(
+            "{} more imports are not listed here; the semantic status report lists every import",
+            view.rows.len() - MAX_IMPORTS
+        )));
+    }
+
+    let languages: Vec<String> = detection
+        .languages
+        .iter()
+        .map(|(name, files)| {
+            format!(
+                "{{\"language\":\"{}\",\"files\":{files}}}",
+                json::escape(name)
+            )
+        })
+        .collect();
+    let manifests: Vec<String> = detection
+        .manifests
+        .iter()
+        .map(|m| format!("\"{}\"", json::escape(m)))
+        .collect();
+    let providers: Vec<String> = present
+        .iter()
+        .zip(guided_by_family.iter())
+        .map(|(family, guided_entry)| {
+            let producer = match guided_entry {
+                Some(g) => producer_json(g),
+                None => "null".to_string(),
+            };
+            format!(
+                "{{\"family\":\"{}\",\"capabilities\":{{\"scip_import\":\"{}\",\"lsp\":\"{}\"}},\"producer\":{producer},\"lsp\":{{\"source\":\"{}\",\"state\":\"{}\",\"expected\":{}}}}}",
+                family.name,
+                family.scip_import,
+                family.lsp,
+                lsp.1,
+                lsp_state(family),
+                json_opt(family.expected_server),
+            )
+        })
+        .collect();
+    let imports: Vec<String> = view
+        .rows
+        .iter()
+        .take(MAX_IMPORTS)
+        .map(|r| {
+            format!(
+                "{{\"import\":{},\"provider\":\"{}\",\"provider_version\":\"{}\",\"verification\":\"{}\"}}",
+                r.import_id,
+                json::escape(&r.provider_name),
+                json::escape(&r.provider_version),
+                json::escape(&r.verification),
+            )
+        })
+        .collect();
+    let next: Vec<String> = steps
+        .iter()
+        .map(|s| {
+            format!(
+                "{{\"step\":\"{}\",\"command\":{}}}",
+                json::escape(&s.text),
+                json_opt(s.command.as_deref()),
+            )
+        })
+        .collect();
+    let reasons: Vec<String> = view
+        .reasons
+        .iter()
+        .map(|r| format!("\"{}\"", json::escape(r)))
+        .collect();
+    let snapshot = match view.snapshot {
+        Some(id) => id.to_string(),
+        None => "null".to_string(),
+    };
+    format!(
+        "{{\"repo\":\"{}\",\"shell\":\"{}\",\"index\":{{\"status\":\"{}\",\"snapshot\":{},\"freshness\":{},\"reasons\":[{}]}},\"scan\":{{\"complete\":{},\"unreadable_dirs\":{},\"escaped_dirs\":{}}},\"languages\":[{}],\"manifests\":{{\"items\":[{}],\"omitted\":{}}},\"providers\":[{}],\"imports\":[{}],\"next\":[{}],\"note\":\"riltra read files, the index, git metadata and PATH only; it installed nothing and ran no provider\"}}",
+        json::escape(repo),
+        shell.label(),
+        view.status,
+        snapshot,
+        json_opt(view.freshness),
+        reasons.join(","),
+        scan_complete,
+        detection.unreadable_dirs,
+        detection.escaped_dirs,
+        languages.join(","),
+        manifests.join(","),
+        detection.manifests_omitted,
+        providers.join(","),
+        imports.join(","),
+        next.join(","),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::{SemanticState, SemanticStatusRow, SetupIndex};
+    use crate::json;
     use crate::syntax::Language;
     use crate::testutil::tmpdir;
 
@@ -633,5 +1032,431 @@ mod tests {
             d.unreadable_dirs
         );
         assert!(!d.languages.contains_key("rust"));
+    }
+
+    /// Executable file name for `stem` on this platform's lookup extensions.
+    fn exe(stem: &str) -> String {
+        if cfg!(windows) {
+            format!("{stem}.cmd")
+        } else {
+            stem.to_string()
+        }
+    }
+
+    fn detection(langs: &[(&'static str, usize)], manifests: &[&str]) -> Detection {
+        Detection {
+            languages: langs.iter().copied().collect(),
+            manifests: manifests.iter().map(|m| m.to_string()).collect(),
+            manifests_omitted: 0,
+            unreadable_dirs: 0,
+            escaped_dirs: 0,
+        }
+    }
+
+    fn ready(freshness: &str, rows: Vec<SemanticStatusRow>) -> SetupIndex {
+        SetupIndex::Ready(SemanticState {
+            snapshot: None,
+            freshness: Some(freshness.to_string()),
+            reasons: Vec::new(),
+            rows,
+        })
+    }
+
+    fn import_row(id: i64, provider: &str, verification: &str) -> SemanticStatusRow {
+        SemanticStatusRow {
+            import_id: id,
+            provider_name: provider.to_string(),
+            provider_version: "1.0.0".to_string(),
+            capability: "scip-import".to_string(),
+            verification: verification.to_string(),
+            artifact_id: "artifact".to_string(),
+            claimed_source_digest: "digest".to_string(),
+            content_match: true,
+            revision_match: true,
+            limitation: "limited".to_string(),
+        }
+    }
+
+    /// The text between `"next":[` and `],"note"`, exactly as written.
+    fn next_part(json: &str) -> &str {
+        let open = "\"next\":[";
+        let start = json.find(open).expect("next key") + open.len();
+        let end = json[start..].find("],\"note\"").expect("note key") + start;
+        &json[start..end]
+    }
+
+    const LSP_OPTIONAL: &str = "{\"step\":\"optional: set RILTRA_LSP_SERVER to the absolute path of rust-analyzer for riltra_code_semantic\",\"command\":null}";
+
+    #[test]
+    fn render_quote_posix_sh_follows_d9() {
+        assert_eq!(quote(Shell::PosixSh, "r"), "r");
+        assert_eq!(quote(Shell::PosixSh, "index.scip"), "index.scip");
+        assert_eq!(quote(Shell::PosixSh, "."), ".");
+        assert_eq!(quote(Shell::PosixSh, "-x"), "-x");
+        assert_eq!(quote(Shell::PosixSh, ""), "''");
+        assert_eq!(quote(Shell::PosixSh, "my repo;x"), "'my repo;x'");
+        assert_eq!(quote(Shell::PosixSh, "it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn render_quote_powershell_follows_d9() {
+        assert_eq!(quote(Shell::PowerShell, "r"), "r");
+        assert_eq!(quote(Shell::PowerShell, "index.scip"), "index.scip");
+        assert_eq!(quote(Shell::PowerShell, "."), ".");
+        assert_eq!(quote(Shell::PowerShell, "-x"), "'-x'");
+        assert_eq!(quote(Shell::PowerShell, ""), "''");
+        assert_eq!(quote(Shell::PowerShell, "my repo;x"), "'my repo;x'");
+        assert_eq!(quote(Shell::PowerShell, "it's"), "'it''s'");
+    }
+
+    #[test]
+    fn render_program_follows_d9() {
+        let path_hit = Hit::Path(PathBuf::from("/usr/bin/rust-analyzer"));
+        let local_plain = Hit::Local("scip-typescript".to_string());
+        let local_cmd = Hit::Local("scip-typescript.cmd".to_string());
+        assert_eq!(render_program(Shell::PosixSh, None, "riltra"), "riltra");
+        assert_eq!(render_program(Shell::PowerShell, None, "riltra"), "riltra");
+        assert_eq!(
+            render_program(Shell::PosixSh, Some(&path_hit), "rust-analyzer"),
+            "rust-analyzer"
+        );
+        assert_eq!(
+            render_program(Shell::PowerShell, Some(&path_hit), "rust-analyzer"),
+            "rust-analyzer"
+        );
+        assert_eq!(
+            render_program(Shell::PosixSh, Some(&local_plain), "scip-typescript"),
+            "./node_modules/.bin/scip-typescript"
+        );
+        assert_eq!(
+            render_program(Shell::PowerShell, Some(&local_cmd), "scip-typescript"),
+            "& '.\\node_modules\\.bin\\scip-typescript.cmd'"
+        );
+    }
+
+    #[test]
+    fn shell_labels_match_d4() {
+        assert_eq!(Shell::PosixSh.label(), "posix-sh");
+        assert_eq!(Shell::PowerShell.label(), "powershell");
+    }
+
+    #[test]
+    fn report_shape_no_index() {
+        let root = tmpdir("ps-report-shape");
+        write(&root, "Cargo.toml", "[package]\n");
+        let det = detection(&[("rust", 1)], &["Cargo.toml"]);
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &SetupIndex::NoIndex,
+            (None, "none"),
+            &[],
+            Shell::PosixSh,
+        );
+        let expected = concat!(
+            "{\"repo\":\"r\",\"shell\":\"posix-sh\",",
+            "\"index\":{\"status\":\"no-index\",\"snapshot\":null,\"freshness\":null,\"reasons\":[]},",
+            "\"scan\":{\"complete\":true,\"unreadable_dirs\":0,\"escaped_dirs\":0},",
+            "\"languages\":[{\"language\":\"rust\",\"files\":1}],",
+            "\"manifests\":{\"items\":[\"Cargo.toml\"],\"omitted\":0},",
+            "\"providers\":[{\"family\":\"rust\",\"capabilities\":{\"scip_import\":\"verified-fixture\",\"lsp\":\"contract-only\"},",
+            "\"producer\":{\"name\":\"rust-analyzer\",\"state\":\"not-found\",\"path\":null,\"needs\":\"Cargo.toml\",\"needs_met\":true,\"command\":null},",
+            "\"lsp\":{\"source\":\"none\",\"state\":\"not-configured\",\"expected\":\"rust-analyzer\"}}],",
+            "\"imports\":[],",
+            "\"next\":[",
+            "{\"step\":\"build the code index\",\"command\":\"riltra index --repo r\"},",
+            "{\"step\":\"install rust-analyzer yourself; riltra does not install providers\",\"command\":null},",
+            "{\"step\":\"optional: set RILTRA_LSP_SERVER to the absolute path of rust-analyzer for riltra_code_semantic\",\"command\":null}",
+            "],",
+            "\"note\":\"riltra read files, the index, git metadata and PATH only; it installed nothing and ran no provider\"}"
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn report_found_producer_steps() {
+        let root = tmpdir("ps-report-found");
+        write(&root, "Cargo.toml", "[package]\n");
+        let path_dir = tmpdir("ps-report-found-path");
+        write(&path_dir, &exe("rust-analyzer"), "x");
+        let det = detection(&[("rust", 1)], &["Cargo.toml"]);
+        let dirs = [path_dir];
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &ready("fresh", Vec::new()),
+            (None, "none"),
+            &dirs,
+            Shell::PosixSh,
+        );
+        assert!(out.contains("\"state\":\"found\""), "{out}");
+        assert!(
+            out.contains(
+                "\"index\":{\"status\":\"ready\",\"snapshot\":null,\"freshness\":\"fresh\",\"reasons\":[]}"
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            next_part(&out),
+            format!(
+                "{}{}{}",
+                "{\"step\":\"produce a SCIP index with rust-analyzer\",\"command\":\"rust-analyzer scip .\"},",
+                "{\"step\":\"import the SCIP index\",\"command\":\"riltra semantic import --repo r --scip index.scip\"},",
+                LSP_OPTIONAL
+            )
+        );
+    }
+
+    #[test]
+    fn report_unverified_import_skips_producer_steps() {
+        let root = tmpdir("ps-report-unverified");
+        write(&root, "Cargo.toml", "[package]\n");
+        let path_dir = tmpdir("ps-report-unverified-path");
+        write(&path_dir, &exe("rust-analyzer"), "x");
+        let det = detection(&[("rust", 1)], &["Cargo.toml"]);
+        let rows = vec![import_row(4, "rust-analyzer", "Unverified")];
+        let dirs = [path_dir];
+        let found = report(
+            "r",
+            &root,
+            &det,
+            &ready("fresh", rows),
+            (None, "none"),
+            &dirs,
+            Shell::PosixSh,
+        );
+        assert_eq!(next_part(&found), LSP_OPTIONAL);
+        let rows = vec![import_row(4, "rust-analyzer", "Unverified")];
+        let missing = report(
+            "r",
+            &root,
+            &det,
+            &ready("fresh", rows),
+            (None, "none"),
+            &[],
+            Shell::PosixSh,
+        );
+        assert_eq!(next_part(&missing), LSP_OPTIONAL);
+    }
+
+    #[test]
+    fn report_stale_import_step() {
+        let root = tmpdir("ps-report-stale");
+        write(&root, "Cargo.toml", "[package]\n");
+        let path_dir = tmpdir("ps-report-stale-path");
+        write(&path_dir, &exe("rust-analyzer"), "x");
+        let det = detection(&[("rust", 1)], &["Cargo.toml"]);
+        let rows = vec![import_row(9, "rust-analyzer", "Stale")];
+        let dirs = [path_dir];
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &ready("fresh", rows),
+            (None, "none"),
+            &dirs,
+            Shell::PosixSh,
+        );
+        assert_eq!(
+            next_part(&out),
+            format!(
+                "{}{}{}{}",
+                "{\"step\":\"produce a SCIP index with rust-analyzer\",\"command\":\"rust-analyzer scip .\"},",
+                "{\"step\":\"import the SCIP index\",\"command\":\"riltra semantic import --repo r --scip index.scip\"},",
+                "{\"step\":\"re-run rust-analyzer and import again; import 9 no longer matches the source\",\"command\":null},",
+                LSP_OPTIONAL
+            )
+        );
+    }
+
+    #[test]
+    fn report_ts_without_tsconfig() {
+        let root = tmpdir("ps-report-ts");
+        let path_dir = tmpdir("ps-report-ts-path");
+        write(&path_dir, &exe("scip-typescript"), "x");
+        let det = detection(&[("typescript", 1)], &[]);
+        let dirs = [path_dir];
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &ready("fresh", Vec::new()),
+            (None, "none"),
+            &dirs,
+            Shell::PosixSh,
+        );
+        assert!(
+            out.contains("\"producer\":{\"name\":\"scip-typescript\",\"state\":\"found\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("\"needs\":\"tsconfig.json\",\"needs_met\":false,\"command\":\"scip-typescript index --infer-tsconfig\""),
+            "{out}"
+        );
+        assert_eq!(
+            next_part(&out),
+            concat!(
+                "{\"step\":\"produce a SCIP index with scip-typescript\",\"command\":\"scip-typescript index --infer-tsconfig\"},",
+                "{\"step\":\"import the SCIP index\",\"command\":\"riltra semantic import --repo r --scip index.scip\"}"
+            )
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn report_local_producer_command_posix_sh() {
+        let root = tmpdir("ps-report-local-posix");
+        write(&root, "node_modules/.bin/scip-typescript", "x");
+        let det = detection(&[("typescript", 1)], &[]);
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &ready("fresh", Vec::new()),
+            (None, "none"),
+            &[],
+            Shell::PosixSh,
+        );
+        let cmd = "./node_modules/.bin/scip-typescript index --infer-tsconfig";
+        assert!(out.contains("\"state\":\"found\""), "{out}");
+        assert!(out.contains(&format!("\"command\":\"{cmd}\"}}")), "{out}");
+        assert!(
+            out.contains(&format!(
+                "\"step\":\"produce a SCIP index with scip-typescript\",\"command\":\"{cmd}\""
+            )),
+            "{out}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn report_local_producer_command_powershell() {
+        let root = tmpdir("ps-report-local-ps");
+        write(&root, "node_modules/.bin/scip-typescript.cmd", "x");
+        write(&root, "tsconfig.json", "{}\n");
+        let det = detection(&[("typescript", 1)], &["tsconfig.json"]);
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &ready("fresh", Vec::new()),
+            (None, "none"),
+            &[],
+            Shell::PowerShell,
+        );
+        let cmd = "& '.\\node_modules\\.bin\\scip-typescript.cmd' index";
+        assert!(
+            out.contains(&format!("\"command\":\"{}\"}}", json::escape(cmd))),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "\"step\":\"produce a SCIP index with scip-typescript\",\"command\":\"{}\"",
+                json::escape(cmd)
+            )),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn report_quotes_repo_name() {
+        let root = tmpdir("ps-report-quote");
+        write(&root, "Cargo.toml", "[package]\n");
+        let path_dir = tmpdir("ps-report-quote-path");
+        write(&path_dir, &exe("rust-analyzer"), "x");
+        let det = detection(&[("rust", 1)], &["Cargo.toml"]);
+        let dirs = [path_dir];
+        let out = report(
+            "my repo;x",
+            &root,
+            &det,
+            &SetupIndex::NoIndex,
+            (None, "none"),
+            &dirs,
+            Shell::PosixSh,
+        );
+        assert!(out.contains("\"repo\":\"my repo;x\""), "{out}");
+        assert_eq!(
+            next_part(&out),
+            format!(
+                "{}{}{}{}",
+                "{\"step\":\"build the code index\",\"command\":\"riltra index --repo 'my repo;x'\"},",
+                "{\"step\":\"produce a SCIP index with rust-analyzer\",\"command\":\"rust-analyzer scip .\"},",
+                "{\"step\":\"import the SCIP index\",\"command\":\"riltra semantic import --repo 'my repo;x' --scip index.scip\"},",
+                LSP_OPTIONAL
+            )
+        );
+    }
+
+    #[test]
+    fn report_partial_scan_step() {
+        let root = tmpdir("ps-report-partial");
+        let det = Detection {
+            languages: BTreeMap::new(),
+            manifests: Vec::new(),
+            manifests_omitted: 0,
+            unreadable_dirs: 2,
+            escaped_dirs: 0,
+        };
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &SetupIndex::NoIndex,
+            (None, "none"),
+            &[],
+            Shell::PosixSh,
+        );
+        assert!(
+            out.contains("\"scan\":{\"complete\":false,\"unreadable_dirs\":2,\"escaped_dirs\":0}"),
+            "{out}"
+        );
+        assert_eq!(
+            next_part(&out),
+            concat!(
+                "{\"step\":\"build the code index\",\"command\":\"riltra index --repo r\"},",
+                "{\"step\":\"some directories could not be read or point outside the repository; languages and manifests may be incomplete\",\"command\":null}"
+            )
+        );
+    }
+
+    #[test]
+    fn report_mixed_and_empty() {
+        let root = tmpdir("ps-report-mixed");
+        let det = detection(&[("python", 1), ("rust", 1), ("typescript", 1)], &[]);
+        let out = report(
+            "r",
+            &root,
+            &det,
+            &SetupIndex::NoIndex,
+            (None, "none"),
+            &[],
+            Shell::PosixSh,
+        );
+        let ts = out.find("\"family\":\"typescript\"").expect("typescript");
+        let rs = out.find("\"family\":\"rust\"").expect("rust");
+        let py = out.find("\"family\":\"python\"").expect("python");
+        assert!(ts < rs && rs < py, "{out}");
+        assert!(
+            out.contains(
+                "\"family\":\"python\",\"capabilities\":{\"scip_import\":\"contract-only\",\"lsp\":\"contract-only\"},\"producer\":null"
+            ),
+            "{out}"
+        );
+
+        let empty = detection(&[], &[]);
+        let out = report(
+            "r",
+            &root,
+            &empty,
+            &SetupIndex::NoIndex,
+            (None, "none"),
+            &[],
+            Shell::PosixSh,
+        );
+        assert!(out.contains("\"languages\":[]"), "{out}");
+        assert!(out.contains("\"providers\":[]"), "{out}");
     }
 }

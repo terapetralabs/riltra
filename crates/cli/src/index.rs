@@ -1049,8 +1049,6 @@ pub fn semantic_import(
 }
 
 /// Read-only semantic state of one repository's live snapshot.
-// shortcut: no caller until `riltra semantic setup` (next task); drop this allow with that caller.
-#[allow(dead_code)]
 pub struct SemanticState {
     pub snapshot: Option<store::Snapshot>,
     /// Snapshot-wide source verdict (`fresh` or `stale`); `None` without a snapshot.
@@ -1061,12 +1059,14 @@ pub struct SemanticState {
 }
 
 /// What the provider setup flow can see of the index, without writing to it.
-// shortcut: no caller until `riltra semantic setup` (next task); drop this allow with that caller.
 // The Ready variant is large by design: the brief fixes its payload type.
-#[allow(dead_code, clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant)]
 pub enum SetupIndex {
     NoIndex,
+    // The version is kept for the index tests; the D4 report prints no schema version.
+    #[allow(dead_code)]
     SchemaOutdated(u32),
+    #[allow(dead_code)]
     SchemaAhead(u32),
     Ready(SemanticState),
 }
@@ -1102,7 +1102,6 @@ pub fn semantic_status(
 /// Read-only semantic state for the provider setup flow. Opens the database
 /// with `open_read`: a missing, outdated or newer database is reported, never
 /// created or migrated.
-#[allow(dead_code)] // shortcut: see SetupIndex; drop with its first caller.
 pub fn semantic_setup_state(home: &Path, name: &str, root: &Path) -> Result<SetupIndex, String> {
     let canon = canonical_repo_root(root)?;
     let db = store::db_path(home, name);

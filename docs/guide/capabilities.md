@@ -382,6 +382,76 @@ written.
 
 The output is the structure of a change, not an impact verdict.
 
+## Area map (read-only)
+
+`riltra map --repo <name> [--depth 1..4] [--format json|markdown]` and the MCP
+tool `riltra_project_map` (input `repo`, optional `depth`, default 2) print one
+area map of an indexed snapshot: directory areas with their entry points and
+hubs, proven links between areas, separate name-match candidates, and up to three
+bounded static flows from `main`. The JSON document is the same from the CLI and
+MCP. Markdown is CLI only.
+
+- **Reads and writes.** One report reads one database revision: the first read
+  pins it, and a rebuild or semantic import that commits during the report is not
+  mixed in. The report names that revision with `snapshot.nonce` and
+  `snapshot.generation`, so two reports can be told apart. The map reads the code
+  index through the read-only path and the git freshness check the index already
+  runs. It creates and migrates nothing. A missing index answers `no-index`, and an
+  older or newer schema is reported without migration. A storage read error makes
+  `map` exit 3 (MCP `store_error`). SQLite can create `-wal` and `-shm` sidecars
+  beside an existing index, as the other read tools do; `registry.json` and the
+  database file are not changed. No network call, provider or project tool runs.
+- **Areas.** A file belongs to the area made from the first `depth` components of
+  its parent directory; a file at the root is in `.`. The `grouping` object states
+  that areas are navigation hints from directory structure, not architecture
+  boundaries.
+- **Edges.** Proven edges are `CALLS` and `REFERENCES` edges with `Exact` precision
+  and a known callee. Only proven edges become links, hub counts and flow paths.
+  `POTENTIAL_CALL` rows are syntax-only: a callee name is matched to the snapshot's
+  function and method definitions with that name, and gives a candidate link when
+  every match is in one other area. Candidate links are name matches, never
+  relations, and are never traversed. Matches in two or more areas are counted, not
+  linked. `IMPORTS` rows are syntax-only and unresolved: they are counted per area
+  and never linked.
+- **Flows.** Entry points are definitions named `main`. A file with no `main` may
+  still get a `conventional-path` entry point, but it gets no flow. Up to three
+  `main` entries are traced three hops deep, as `riltra trace` does, and only paths
+  whose every edge is proven are kept. Each flow keeps its trace's verification,
+  freshness, freshness reasons and completeness, so a flow can be `ok` and `Stale`
+  at once. A static path is not proof of execution. `trace_command` is a suggestion
+  for you to run; riltra never runs it. A SCIP callee whose spans in one file are
+  ambiguous is not listed as a flow definition.
+- **Time limit.** A flow whose trace reaches its 2,000 ms deadline reports
+  `time-budget` with no partial content. Two runs on the same revision are
+  byte-identical unless a deadline is reached in one run and not in the other; then
+  that flow's entry, its omission, and the next actions and byte-budget trimming
+  that depend on it can differ.
+- **Graph proof.** Before any stored relationship is read, the report checks that
+  the database carries a current graph-proof token for its snapshot. Without one (an
+  index built under older proof rules, or a token for another revision),
+  `graph_proof` is `incompatible`. The report still lists areas, files, languages,
+  definitions, entry points and imports, but withholds every link, candidate, hub,
+  flow and graph counter: they are empty lists or `null`, never zero. The next
+  action is to validate the graph with `riltra semantic import` or
+  `riltra index --full --repo <name>`. riltra does not repair the token, and the map
+  never writes it.
+- **Completeness and bounds.** One report reads at most 50,000 edge rows.
+  `completeness` says whether all edges and all proven relations were read; when
+  they were not, links and hubs describe only what was read. `import_verification`
+  counts every semantic import before any list cap, so a `Stale` import past the
+  20-import list still appears there and triggers its next action. The named bounds
+  are: 50 areas (the ones with most files), 3 entry points and 3 hubs per area, 100
+  links, 100 candidate links, 3 flows of depth 3, and per flow 1,000 paths, 2,000 ms,
+  10 area paths and 20 definitions; 20 imports listed; and 262,144 bytes of JSON.
+  Anything dropped is counted in `omissions`, and a count riltra cannot know is
+  `null`. Entry-point and hub omissions count only the areas kept after the area
+  cap. When the JSON is still over the byte budget, items are removed in a fixed
+  order, each counted as `json_budget`.
+- **Accepted limits.** Grouping is by directory only, with no clustering. Flows
+  need SCIP-backed edges, so a syntax-only repository has no links and no flows. A
+  flow is at most three hops from `main`. A flow can reach its time limit, and then
+  its status can differ between runs.
+
 ## Semantic provider setup (read-only)
 
 `riltra semantic setup --repo <name> [--lsp-server <abs-path>]` prints one JSON
@@ -494,8 +564,8 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves eighteen local stdio tools. Seventeen read repository,
-index, code, knowledge, and selected-anchor packet data. The remaining tool,
+`riltra mcp` serves nineteen local stdio tools. Eighteen read repository,
+index, code, knowledge, project overview, area map, and selected-anchor packet data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the
 network. The MCP handlers themselves do not create, migrate, or replace a

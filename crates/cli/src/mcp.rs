@@ -3,9 +3,9 @@
 //! registers the first read-only tools; CP4 adds the graph tools (callers,
 //! callees, trace, impact); CP5 adds the knowledge tools (search, show,
 //! related); CP6 adds the composed `riltra_health` tool. The overview tool
-//! completes the current inventory at eighteen tools
-//! (design gate §3) through the rmcp tool macros. Tool calls
-//! reuse the CLI's response formatters byte-for-byte, and the index read path
+//! completed the design-gate inventory (§3) at eighteen tools, and the area
+//! map (`riltra_project_map`) makes it nineteen, through the rmcp tool macros.
+//! Tool calls reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
 //! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
 //! replace a database. stdout stays protocol-only; blocking work runs on the
@@ -31,7 +31,7 @@ use crate::knowledge_store_absent;
 use crate::lexical;
 use crate::{
     context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_search,
-    knowledge_store, overview, packet, paths, registry, response, store,
+    knowledge_store, map, overview, packet, paths, registry, response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -48,6 +48,16 @@ struct RepoStatusInput {
 struct OverviewInput {
     /// Registered repository name.
     repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct MapInput {
+    /// Registered repository name.
+    repo: String,
+    /// Directory depth of each area, 1 to 4 (default 2), the CLI's `--depth`.
+    depth: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -443,6 +453,20 @@ impl RiltraMcp {
         Parameters(input): Parameters<OverviewInput>,
     ) -> CallToolResult {
         blocking(move || project_overview_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_project_map",
+        description = "Area map of one indexed snapshot (same document as CLI `map`): directory areas, entry points, hubs, proven links between areas, separate name-match candidates, and up to three bounded static flows. Areas are navigation hints; flows are not proof of execution. When to call: to choose where to look before tracing a feature across components.",
+        annotations(
+            title = "Project area map",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_project_map(&self, Parameters(input): Parameters<MapInput>) -> CallToolResult {
+        blocking(move || project_map_doc(&input)).await
     }
 
     #[tool(
@@ -888,6 +912,28 @@ fn project_overview_doc(input: &OverviewInput) -> CallToolResult {
         Err(error) => return tool_error("store_error", &error),
     };
     match overview::render(&overview) {
+        Ok(json) => exact_doc(&json),
+        Err(error) => tool_error("store_error", &error),
+    }
+}
+
+/// The area map: the same document and bounds as the CLI `map` (depth 1 to 4,
+/// default 2). Read-only: a missing index answers `no-index` and creates
+/// nothing; a storage read error is `store_error`.
+fn project_map_doc(input: &MapInput) -> CallToolResult {
+    let depth = input.depth.unwrap_or(2);
+    if !(1..=4).contains(&depth) {
+        return tool_error("invalid_input", "area depth must be between 1 and 4");
+    }
+    let (home, root) = match repo_root(&input.repo) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let area_map = match map::collect(&home, &input.repo, &root, depth) {
+        Ok(value) => value,
+        Err(error) => return tool_error("store_error", &error),
+    };
+    match map::render(&area_map) {
         Ok(json) => exact_doc(&json),
         Err(error) => tool_error("store_error", &error),
     }
@@ -2310,6 +2356,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_knowledge_related",
                 "riltra_knowledge_search",
                 "riltra_knowledge_show",
+                "riltra_project_map",
                 "riltra_project_overview",
                 "riltra_repo_list",
                 "riltra_repo_status",

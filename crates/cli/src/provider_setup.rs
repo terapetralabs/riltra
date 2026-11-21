@@ -655,6 +655,7 @@ pub fn report(
 mod tests {
     use super::*;
     use crate::index::{SemanticState, SemanticStatusRow, SetupIndex};
+    #[cfg(windows)]
     use crate::json;
     use crate::syntax::Language;
     use crate::testutil::tmpdir;

@@ -16,6 +16,8 @@ Use `--path <directory>` to select another folder and `--name <name>` to set its
 
 The overview lists the index freshness and reasons, language coverage, source directories, build/test documents, candidate entry points, and definitions. Entry points are candidates inferred from definitions or conventional paths, not proof of executed flow. Manifest and instruction excerpts are live document evidence, distinct from indexed snapshot evidence. Select a definition from the menu; the wizard builds a packet for that selection without asking you to enter coordinates. If the snapshot changes while you choose, it refreshes the menu and asks again.
 
+Overview omission entries include a section, reason, and count. For `build_test_sources`, `unattempted_candidate_paths` counts generated root or one-level document paths that were not read after the 64-path read cap. The count does not say those paths exist as documents. Root candidates are read first; one-level candidates follow in deterministic order.
+
 JSON and nonterminal mode are read-only: `riltra start --path <directory> --json` prints the overview but does not register the project, index it, configure a client, or create a selected-definition packet. Use the interactive wizard for those steps, or prepare the project manually with the commands below.
 
 ### Freshness and recovery

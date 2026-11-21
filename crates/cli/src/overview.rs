@@ -10,6 +10,8 @@ use crate::{context, index, packet_source, semantic, store};
 
 const MAX_ITEMS: usize = 20;
 const MAX_DOCUMENT_BYTES: u64 = 65_536;
+/// Maximum number of candidate document paths read for one overview.
+const MAX_DOCUMENT_READS: usize = 64;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectOverview {
@@ -112,6 +114,7 @@ pub enum ActionKind {
 pub struct Omission {
     pub section: OmissionSection,
     pub reason: OmissionReason,
+    /// Unit depends on `reason`; unattempted candidate paths are not known documents.
     pub omitted_count: usize,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -131,6 +134,8 @@ pub enum OmissionSection {
 pub enum OmissionReason {
     ItemLimit,
     JsonBudget,
+    /// Candidate paths skipped after the 64-read cap; their existence is unknown.
+    UnattemptedCandidatePaths,
 }
 
 struct PendingSymbol {
@@ -301,7 +306,8 @@ pub fn collect(home: &Path, repo: &str, root: &Path) -> Result<ProjectOverview, 
                 next_actions: Vec::new(),
                 omissions: Vec::new(),
             };
-            value.build_test_sources = document_evidence(root, &files);
+            let (documents, omitted) = document_evidence(root, &files);
+            record_document_evidence(&mut value, documents, omitted);
             if definition_count > definition_retained {
                 add_omission(
                     &mut value,
@@ -492,7 +498,7 @@ fn conventional_entry_evidence(path: &str) -> SourceEvidence {
     }
 }
 
-fn document_evidence(root: &Path, files: &[store::FileRow]) -> Vec<SourceEvidence> {
+fn document_evidence(root: &Path, files: &[store::FileRow]) -> (Vec<SourceEvidence>, usize) {
     document_evidence_with(root, files, semantic::confined_read_classified)
 }
 
@@ -500,7 +506,7 @@ fn document_evidence_with(
     root: &Path,
     files: &[store::FileRow],
     mut read: impl FnMut(&Path, &str, u64) -> Result<Vec<u8>, semantic::ConfinedReadError>,
-) -> Vec<SourceEvidence> {
+) -> (Vec<SourceEvidence>, usize) {
     let mut candidates = BTreeSet::from([
         "README.md".to_string(),
         "AGENTS.md".into(),
@@ -519,7 +525,7 @@ fn document_evidence_with(
         "Makefile".into(),
     ]);
     for f in files {
-        if is_manifest(&f.path) || is_instruction(&f.path) {
+        if document_path_depth(&f.path) <= 2 && (is_manifest(&f.path) || is_instruction(&f.path)) {
             candidates.insert(f.path.clone());
         }
     }
@@ -527,7 +533,7 @@ fn document_evidence_with(
     let dirs = files
         .iter()
         .filter_map(|f| Path::new(&f.path).parent())
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| p.components().count() == 1)
         .map(|p| p.to_string_lossy().to_string())
         .collect::<BTreeSet<_>>();
     for d in dirs {
@@ -553,8 +559,15 @@ fn document_evidence_with(
         .iter()
         .map(|f| f.path.as_str())
         .collect::<BTreeSet<_>>();
-    candidates
+    let (mut root_candidates, mut child_candidates): (Vec<_>, Vec<_>) = candidates
         .into_iter()
+        .partition(|path| document_path_depth(path) == 1);
+    root_candidates.append(&mut child_candidates);
+    // This counts candidates not attempted; their existence on disk is unknown.
+    let omitted = root_candidates.len().saturating_sub(MAX_DOCUMENT_READS);
+    let documents = root_candidates
+        .into_iter()
+        .take(MAX_DOCUMENT_READS)
         .filter_map(|path| {
             let is_manifest = is_manifest(&path);
             let bytes = match read(root, &path, MAX_DOCUMENT_BYTES) {
@@ -598,7 +611,28 @@ fn document_evidence_with(
                 text: Some(excerpt),
             })
         })
-        .collect()
+        .collect();
+    (documents, omitted)
+}
+
+fn document_path_depth(path: &str) -> usize {
+    Path::new(path).components().count()
+}
+
+fn record_document_evidence(
+    value: &mut ProjectOverview,
+    documents: Vec<SourceEvidence>,
+    omitted: usize,
+) {
+    value.build_test_sources = documents;
+    if omitted > 0 {
+        add_omission(
+            value,
+            OmissionSection::BuildTestSources,
+            OmissionReason::UnattemptedCandidatePaths,
+            omitted,
+        );
+    }
 }
 
 fn failed_document(
@@ -618,7 +652,8 @@ fn failed_document(
 }
 
 fn with_live_documents(mut value: ProjectOverview, root: &Path) -> ProjectOverview {
-    value.build_test_sources = document_evidence(root, &[]);
+    let (documents, omitted) = document_evidence(root, &[]);
+    record_document_evidence(&mut value, documents, omitted);
     if !value.build_test_sources.is_empty() {
         value.next_actions.push(NextAction {
             kind: ActionKind::ReadInstructions,
@@ -1008,7 +1043,7 @@ mod tests {
                 semantic::confined_read_classified(root, path, cap)
             }
         };
-        let docs = document_evidence_with(&root, &[], read);
+        let (docs, _) = document_evidence_with(&root, &[], read);
         let readme = docs.iter().find(|e| e.path == "README.md").unwrap();
         assert_eq!(readme.status, EvidenceStatus::Unavailable);
         assert_eq!(readme.reason.as_deref(), Some("source-unavailable"));
@@ -1016,10 +1051,120 @@ mod tests {
 
         let unreadable_root = tmpdir("overview-doc-unreadable");
         fs::create_dir(unreadable_root.join("README.md")).unwrap();
-        let docs = document_evidence(&unreadable_root, &[]);
+        let (docs, _) = document_evidence(&unreadable_root, &[]);
         let readme = docs.iter().find(|e| e.path == "README.md").unwrap();
         assert_eq!(readme.status, EvidenceStatus::Unavailable);
         assert_eq!(readme.reason.as_deref(), Some("source-unavailable"));
+    }
+
+    #[test]
+    fn document_candidate_reads_are_limited_and_only_consider_one_level() {
+        let root = tmpdir("overview-document-read-limit");
+        let mut files = Vec::new();
+        for n in 0..200 {
+            files.push(store::FileRow {
+                path: format!("nested{n}/child/README.md"),
+                language: "markdown".into(),
+                bytes: 0,
+                digest: String::new(),
+                errors: 0,
+            });
+        }
+        for n in 0..70 {
+            files.push(store::FileRow {
+                path: format!("level{n:02}/source.rs"),
+                language: "rust".into(),
+                bytes: 0,
+                digest: String::new(),
+                errors: 0,
+            });
+        }
+        let reads = std::cell::RefCell::new(Vec::new());
+        let (docs, omitted) = document_evidence_with(&root, &files, |_, path, _| {
+            reads.borrow_mut().push(path.to_string());
+            Ok(b"doc".to_vec())
+        });
+
+        assert!(reads.borrow().len() <= 64);
+        assert!(reads
+            .borrow()
+            .iter()
+            .all(|path| path.matches('/').count() <= 1));
+        assert!(omitted > 0);
+        assert!(docs.iter().all(|doc| doc.path.matches('/').count() <= 1));
+
+        let mut value = empty("demo", SnapshotState::NoIndex, vec![], None);
+        record_document_evidence(&mut value, docs, omitted);
+        let omission = value
+            .omissions
+            .iter()
+            .find(|o| o.section == OmissionSection::BuildTestSources)
+            .unwrap();
+        assert_eq!(omission.reason, OmissionReason::UnattemptedCandidatePaths);
+        assert_eq!(omission.omitted_count, omitted);
+    }
+
+    #[test]
+    fn root_manifest_is_read_before_one_level_candidates() {
+        let root = tmpdir("overview-root-manifest-priority");
+        fs::write(root.join("package.json"), r#"{"name":"demo"}"#).unwrap();
+        let files = (0..70)
+            .map(|n| store::FileRow {
+                path: format!("a{n:02}/source.rs"),
+                language: "rust".into(),
+                bytes: 0,
+                digest: String::new(),
+                errors: 0,
+            })
+            .collect::<Vec<_>>();
+        let reads = std::cell::RefCell::new(Vec::new());
+        let (docs, omitted) = document_evidence_with(&root, &files, |root, path, _| {
+            reads.borrow_mut().push(path.to_string());
+            if path == "package.json" {
+                fs::read(root.join(path))
+                    .map_err(|error| semantic::ConfinedReadError::Io(error.to_string()))
+            } else {
+                Err(semantic::ConfinedReadError::NotFound(path.to_string()))
+            }
+        });
+
+        assert!(reads.borrow().len() <= 64);
+        assert!(omitted > 0);
+        assert!(reads.borrow().contains(&"package.json".to_string()));
+        assert!(docs
+            .iter()
+            .any(|doc| doc.path == "package.json" && doc.status == EvidenceStatus::Available));
+    }
+
+    #[test]
+    fn omitted_missing_candidates_are_serialized_as_unattempted_paths() {
+        let root = tmpdir("overview-unattempted-candidates");
+        let files = (0..70)
+            .map(|n| store::FileRow {
+                path: format!("a{n:02}/source.rs"),
+                language: "rust".into(),
+                bytes: 0,
+                digest: String::new(),
+                errors: 0,
+            })
+            .collect::<Vec<_>>();
+        let reads = std::cell::Cell::new(0);
+        let (docs, omitted) = document_evidence_with(&root, &files, |_, path, _| {
+            reads.set(reads.get() + 1);
+            Err(semantic::ConfinedReadError::NotFound(path.to_string()))
+        });
+        assert!(docs.is_empty());
+        assert!(omitted > 0);
+        assert_eq!(reads.get(), MAX_DOCUMENT_READS);
+
+        let mut value = empty("demo", SnapshotState::NoIndex, vec![], None);
+        record_document_evidence(&mut value, docs, omitted);
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(
+            json["omissions"][0]["reason"],
+            "unattempted_candidate_paths"
+        );
+        assert_eq!(json["omissions"][0]["omitted_count"], omitted);
     }
 
     #[test]

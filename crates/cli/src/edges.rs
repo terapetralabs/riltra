@@ -1227,7 +1227,7 @@ fn trace_bridges(
         endpoint,
         Some(TRACE_MAX_NODES),
         || budget.expired(),
-        false,
+        true,
     )
 }
 
@@ -4410,5 +4410,48 @@ pub(crate) mod tests {
         assert_eq!(owner_scip(&conn, snap, imp, owner, "lib.py", &digest), None);
         assert!(owner_bridges(&conn, snap, &endpoint).unwrap().is_empty());
         assert!(owner_bridges_strict(&conn, snap, &endpoint).is_err());
+    }
+
+    #[test]
+    fn trace_bridges_propagates_owner_read_errors() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let lib = b"def target():\n    return 1\n";
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let uri = "scip-test test test-pkg 1.0.0 lib.py/target().";
+        store::insert_semantic_facts(
+            &conn,
+            &[mk_fact(
+                snap,
+                imp,
+                "lib.py",
+                &store::content_digest(lib),
+                Some(uri),
+                "target",
+                0x1,
+                (1, 5, 1, 11),
+                (4, 10),
+                false,
+            )],
+        )
+        .unwrap();
+        let endpoint = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: uri.to_string(),
+            doc: None,
+        };
+        let budget = TraceBudget::new(3, std::time::Instant::now());
+
+        // Control: the intact database maps the endpoint to its syntax definition.
+        let bridges = trace_bridges(&conn, snap, &endpoint, &budget).unwrap();
+        assert_eq!(bridges.len(), 1);
+
+        // Fault: the owner query names the dropped index. A read error is an error
+        // here, not "no alias" as the lenient derivation reads it.
+        conn.execute_batch("DROP INDEX idx_semfacts_span").unwrap();
+        let err = trace_bridges(&conn, snap, &endpoint, &budget)
+            .expect_err("a failed SCIP owner read must not read as no alias");
+        assert!(err.contains("idx_semfacts_span"), "{err}");
     }
 }

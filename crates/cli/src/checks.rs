@@ -28,6 +28,17 @@ const MAX_LIMIT_PATHS: usize = 20;
 const MAX_INSTRUCTION_FILES: usize = 20;
 const MAX_QUOTED_LINES: usize = 20;
 const MAX_REPORT_BYTES: usize = 262_144;
+/// D5: the instruction files read at the root and in each ancestor directory of a changed file.
+const INSTRUCTION_FILES: [&str; 6] = [
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "BUILDING.md",
+    "TESTING.md",
+];
+const MAX_INSTRUCTION_BYTES: u64 = 262_144;
+const MAX_INSTRUCTION_TEXT_BYTES: usize = 200;
 const DISCLAIMER: &str = "Suggestions from git changes, stored relations and file names; riltra ran no test, and an empty or short list does not mean no test is needed. The project's required checks still apply.";
 
 /// What the index side of one report could read (D0, D6 group 1).
@@ -130,7 +141,6 @@ pub struct TestCandidate {
     pub reasons: Vec<Reason>,
 }
 
-#[allow(dead_code)] // shortcut: D5 instruction files arrive with Task 3; the list stays empty until then.
 #[derive(Debug, Serialize)]
 pub struct Instruction {
     pub path: String,
@@ -262,25 +272,43 @@ impl Omissions {
         }
     }
 
-    fn into_vec(self) -> Vec<Omission> {
+    /// Merges rows from another part of the report; a `null` count stays `null`.
+    fn absorb(&mut self, rows: Vec<Omission>) {
+        for row in rows {
+            match row.omitted_count {
+                Some(count) => self.add_count(row.section, row.reason, count),
+                None => {
+                    self.0.insert((row.section, row.reason), None);
+                }
+            }
+        }
+    }
+
+    /// The rows in their fixed order (section, then reason).
+    fn rows(&self) -> Vec<Omission> {
         self.0
-            .into_iter()
+            .iter()
             .map(|((section, reason), omitted_count)| Omission {
                 section,
                 reason,
-                omitted_count,
+                omitted_count: *omitted_count,
             })
             .collect()
     }
 }
 
 /// Rank of a D10 basis: the strongest reason of a candidate or dependent gives its basis.
+/// `explicit-instruction` never reaches a reason (instructions are not ranked), so it has no
+/// rank here; a basis without a rank is an internal fault, not a guess.
 fn basis_rank(basis: &str) -> u8 {
     match basis {
         "proven-edge" => 0,
         "unproven-edge" => 1,
         "name-candidate" => 2,
-        _ => 3,
+        "path-convention" => 3,
+        other => {
+            unreachable!("reason basis '{other}' has no rank: reasons carry only ranked bases")
+        }
     }
 }
 
@@ -955,7 +983,7 @@ pub(crate) fn assemble(
         test_candidates: candidates,
         instructions: Vec::new(),
         coverage_limits: limits,
-        omissions: omissions.into_vec(),
+        omissions: omissions.rows(),
         next_actions,
         bounds: Bounds {
             changed_files: req.limit,
@@ -979,11 +1007,249 @@ pub(crate) fn assemble(
     })
 }
 
-/// The `checks` report for one registered repository (D0): git structure first, then
-/// one read of the index in one transaction. A missing index is reported, never created.
-// shortcut: no CLI or MCP caller until Task 3 (CLI) and Task 4 (MCP); remove the allow when one calls this.
-#[allow(dead_code)]
-pub fn document(home: &Path, repo: &str, root: &Path, req: &Request) -> Result<Report, Failure> {
+/// Serialized length of one value in bytes. The D7 trim keeps a running total from these lengths.
+fn json_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, String> {
+    serde_json::to_string(value)
+        .map(|text| text.len())
+        .map_err(|e| format!("checks report cannot be serialized: {e}"))
+}
+
+/// D5: the quoted lines of the instruction files that apply to the changed paths. Files are the
+/// root and every ancestor directory of a changed file, sorted by depth then path, and the
+/// files are read through the confined reader. A file that exists but cannot be read is skipped
+/// and counted (`instructions`/`unreadable`); a missing one is not an item. Quoted lines are
+/// data: nothing here runs them.
+pub(crate) fn instruction_lines(
+    root: &Path,
+    changed: &[String],
+) -> (Vec<Instruction>, Vec<Omission>) {
+    let mut candidates: BTreeSet<(usize, String)> = BTreeSet::new();
+    for path in changed {
+        let parts: Vec<&str> = path.split('/').collect();
+        // `parts[..depth]` is a directory of the changed file, the root at depth 0.
+        for depth in 0..parts.len() {
+            let dir = parts[..depth].join("/");
+            for name in INSTRUCTION_FILES {
+                let rel = if dir.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{dir}/{name}")
+                };
+                candidates.insert((depth, rel));
+            }
+        }
+    }
+    let mut omissions = Omissions::default();
+    let mut quoted: Vec<Instruction> = Vec::new();
+    let mut present = 0usize;
+    for (_, rel) in candidates {
+        if present == MAX_INSTRUCTION_FILES {
+            // Past the file cap a file is counted, never read: a stat alone decides the count.
+            if std::fs::symlink_metadata(root.join(&rel)).is_ok() {
+                omissions.add_count("instructions", "item_limit", 1);
+            }
+            continue;
+        }
+        let bytes = match semantic::confined_read_classified(root, &rel, MAX_INSTRUCTION_BYTES) {
+            Ok(bytes) => bytes,
+            Err(semantic::ConfinedReadError::NotFound(_)) => continue,
+            Err(_) => {
+                present += 1;
+                omissions.add_count("instructions", "unreadable", 1);
+                continue;
+            }
+        };
+        present += 1;
+        let Ok(text) = String::from_utf8(bytes) else {
+            omissions.add_count("instructions", "unreadable", 1);
+            continue;
+        };
+        for (line, body) in quoted_lines(&text) {
+            if quoted.len() == MAX_QUOTED_LINES {
+                omissions.add_count("instructions", "item_limit", 1);
+                continue;
+            }
+            quoted.push(Instruction {
+                path: rel.clone(),
+                line,
+                text: body,
+                state: "found",
+                basis: "explicit-instruction",
+            });
+        }
+    }
+    (quoted, omissions.rows())
+}
+
+/// The lines inside a fenced code block (opened and closed by a line starting with three
+/// backticks or three tildes) that contain `test` as a whole word, as (1-based line, text).
+/// The fence lines themselves are never quoted.
+fn quoted_lines(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut fence: Option<&str> = None;
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        match fence {
+            Some(marker) => {
+                if trimmed.starts_with(marker) {
+                    fence = None;
+                } else if has_word_test(line) {
+                    out.push((index + 1, cut_text(line.trim())));
+                }
+            }
+            None => {
+                if trimmed.starts_with("```") {
+                    fence = Some("```");
+                } else if trimmed.starts_with("~~~") {
+                    fence = Some("~~~");
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether `test` occurs as a whole word, case-insensitively, with ASCII word boundaries.
+fn has_word_test(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    lower.match_indices("test").any(|(at, _)| {
+        let before = at == 0 || !is_word(bytes[at - 1]);
+        let after = at + 4 >= bytes.len() || !is_word(bytes[at + 4]);
+        before && after
+    })
+}
+
+/// At most 200 bytes of the line, cut on a character boundary.
+fn cut_text(line: &str) -> String {
+    let mut end = line.len().min(MAX_INSTRUCTION_TEXT_BYTES);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].to_string()
+}
+
+/// Removes the last item of a list. Returns the bytes the removal takes off the list's serialized
+/// length: the item's bytes, plus its comma when other items remain (`[a,b]` to `[a]` takes `,b`).
+/// `None` when the list is empty.
+fn pop_item<T: Serialize>(list: &mut Vec<T>) -> Result<Option<isize>, String> {
+    let Some(last) = list.last() else {
+        return Ok(None);
+    };
+    let item = json_len(last)?;
+    let comma = usize::from(list.len() > 1);
+    list.pop();
+    Ok(Some((item + comma) as isize))
+}
+
+/// `pop_item`, but only while more than one item remains (D7 keeps the first item of a list).
+fn pop_beyond_first<T: Serialize>(list: &mut Vec<T>) -> Result<Option<isize>, String> {
+    if list.len() > 1 {
+        pop_item(list)
+    } else {
+        Ok(None)
+    }
+}
+
+/// One step of the D7 order: removes one item from the first source that still has one. Returns
+/// the section it came from and the bytes the step takes off the report's serialized length
+/// (a positive number; a `listed_definitions` digit that disappears counts too).
+fn trim_one(report: &mut Report) -> Result<Option<(&'static str, isize)>, String> {
+    // 1. quoted instructions, last first
+    if let Some(bytes) = pop_item(&mut report.instructions)? {
+        return Ok(Some(("instructions", bytes)));
+    }
+    // 2. candidate reasons beyond the first, last candidate first
+    for candidate in report.test_candidates.iter_mut().rev() {
+        if let Some(bytes) = pop_beyond_first(&mut candidate.reasons)? {
+            return Ok(Some(("candidate_reasons", bytes)));
+        }
+    }
+    // 3. dependent reasons beyond the first, then dependent files (last area first)
+    for area in report.review_areas.iter_mut().rev() {
+        if let Some(files) = area.dependent_files.as_mut() {
+            for file in files.iter_mut().rev() {
+                if let Some(bytes) = pop_beyond_first(&mut file.reasons)? {
+                    return Ok(Some(("dependent_reasons", bytes)));
+                }
+            }
+        }
+    }
+    for area in report.review_areas.iter_mut().rev() {
+        if let Some(files) = area.dependent_files.as_mut() {
+            if let Some(bytes) = pop_item(files)? {
+                return Ok(Some(("area_dependent_files", bytes)));
+            }
+        }
+    }
+    // 4. test candidates, last first
+    if let Some(bytes) = pop_item(&mut report.test_candidates)? {
+        return Ok(Some(("test_candidates", bytes)));
+    }
+    // 5. changed definitions, last first; listed_definitions follows the list
+    let digits_before = json_len(&report.changed.listed_definitions)? as isize;
+    if let Some(bytes) = pop_item(&mut report.changed.definitions)? {
+        report.changed.listed_definitions = report.changed.definitions.len();
+        let digits_after = json_len(&report.changed.listed_definitions)? as isize;
+        return Ok(Some((
+            "definitions",
+            bytes - (digits_after - digits_before),
+        )));
+    }
+    // 6. changed files per area beyond the first (last area first), then review areas (last first)
+    for area in report.review_areas.iter_mut().rev() {
+        if let Some(bytes) = pop_beyond_first(&mut area.changed_files)? {
+            return Ok(Some(("area_changed_files", bytes)));
+        }
+    }
+    if let Some(bytes) = pop_item(&mut report.review_areas)? {
+        return Ok(Some(("review_areas", bytes)));
+    }
+    // 7. coverage-limit paths, last limit first
+    for limit in report.coverage_limits.iter_mut().rev() {
+        if let Some(bytes) = pop_item(&mut limit.paths)? {
+            return Ok(Some(("limit_paths", bytes)));
+        }
+    }
+    Ok(None)
+}
+
+/// Fits the report to `max_bytes` (D7). Removes one item at a time in the D7 order and records
+/// each removal as `json_budget` under its section. The running length is updated by the exact
+/// bytes each removal takes, so no step re-serializes the whole report; the final length is
+/// then measured exactly, and a report still over budget is an error, never returned.
+fn fit_with(mut report: Report, max_bytes: usize) -> Result<Report, String> {
+    let mut omissions = Omissions::default();
+    omissions.absorb(std::mem::take(&mut report.omissions));
+    report.omissions = omissions.rows();
+    let mut size = json_len(&report)? as isize;
+    while size > max_bytes as isize {
+        let Some((section, bytes)) = trim_one(&mut report)? else {
+            return Err("checks report exceeds byte budget".to_string());
+        };
+        let before = json_len(&report.omissions)? as isize;
+        omissions.add_count(section, "json_budget", 1);
+        report.omissions = omissions.rows();
+        let after = json_len(&report.omissions)? as isize;
+        size += (after - before) - bytes;
+    }
+    if json_len(&report)? > max_bytes {
+        return Err("checks report exceeds byte budget".to_string());
+    }
+    Ok(report)
+}
+
+/// Fits the report to the 262,144-byte budget (D7).
+fn fit(report: Report) -> Result<Report, String> {
+    fit_with(report, MAX_REPORT_BYTES)
+}
+
+/// The `checks` document for one registered repository (D0-D10): git structure first, then one
+/// read of the index in one transaction, then the quoted instructions (D5) and the byte budget
+/// (D7). A missing index is reported, never created. Every failure is exit 3, except what
+/// `changes::structure` refuses with its own code.
+pub fn document(home: &Path, repo: &str, root: &Path, req: &Request) -> Result<String, Failure> {
     let (structure, diff_git) = changes::structure(root, req)?;
     let fingerprint = |path: &Path| diff_git.fingerprint(path);
     let outcome = match store::open_read(&store::db_path(home, repo)) {
@@ -1028,7 +1294,19 @@ pub fn document(home: &Path, repo: &str, root: &Path, req: &Request) -> Result<R
             }
         }
     };
-    outcome.map_err(|message| Failure { code: 3, message })
+    let mut report = outcome.map_err(|message| Failure { code: 3, message })?;
+    let changed: Vec<String> = structure.files.iter().map(|f| f.path.clone()).collect();
+    let (instructions, unread) = instruction_lines(&structure.canon, &changed);
+    report.instructions = instructions;
+    let mut omissions = Omissions::default();
+    omissions.absorb(std::mem::take(&mut report.omissions));
+    omissions.absorb(unread);
+    report.omissions = omissions.rows();
+    let report = fit(report).map_err(|message| Failure { code: 3, message })?;
+    serde_json::to_string(&report).map_err(|e| Failure {
+        code: 3,
+        message: format!("checks report cannot be serialized: {e}"),
+    })
 }
 
 #[cfg(test)]
@@ -1887,5 +2165,245 @@ mod tests {
         drop(second);
         let err = run(&mut f, &s).expect_err("a failed SCIP owner read must fail the report");
         assert!(err.contains("idx_semfacts_span"), "{err}");
+    }
+
+    /// The no-index report shape, built through `assemble` so the tests never write the bounds out.
+    fn bare_report() -> Report {
+        let structure = structure_for(Path::new("."), Vec::new());
+        assemble(
+            None,
+            "r",
+            &structure,
+            &request(),
+            IndexState::Missing,
+            &clean,
+        )
+        .unwrap()
+    }
+
+    fn row_count(rows: &[Omission], section: &str, reason: &str) -> Option<Option<usize>> {
+        rows.iter()
+            .find(|o| o.section == section && o.reason == reason)
+            .map(|o| o.omitted_count)
+    }
+
+    fn def_reason(path: &str, name: &str, basis: &'static str) -> Reason {
+        Reason {
+            source: Source {
+                source_type: "definition",
+                path: path.to_string(),
+                name: Some(name.to_string()),
+                kind: Some("function".to_string()),
+            },
+            basis,
+            detail: "distance-1".to_string(),
+        }
+    }
+
+    /// One quoted instruction and one candidate with two reasons: D7 steps 1, 2 and 4 each have an item.
+    fn trimmable_report() -> Report {
+        let mut report = bare_report();
+        report.instructions.push(Instruction {
+            path: "AGENTS.md".to_string(),
+            line: 3,
+            text: "cargo test --locked".to_string(),
+            state: "found",
+            basis: "explicit-instruction",
+        });
+        report.test_candidates.push(TestCandidate {
+            path: "tests/a.rs".to_string(),
+            area: "tests".to_string(),
+            state: "suggested",
+            basis: "proven-edge",
+            reasons: vec![
+                def_reason("src/a.rs", "f", "proven-edge"),
+                def_reason("src/a.rs", "g", "proven-edge"),
+            ],
+        });
+        report
+    }
+
+    /// A string of about `bytes` bytes that starts with `tag`, so each path is distinct.
+    fn long(tag: &str, bytes: usize) -> String {
+        format!("{tag}{}", "x".repeat(bytes))
+    }
+
+    #[test]
+    fn instructions_quote_fenced_test_lines_only() {
+        let home = tmpdir("checks-instructions");
+        let root = home.join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("CONTRIBUTING.md"),
+            "Intro line.\nrun cargo test outside a fence\n```sh\ncargo test --locked\ncargo build\necho contest\n```\nafter the fence, test is not quoted\n",
+        )
+        .unwrap();
+        let changed = ["src/lib.rs".to_string()];
+        let (items, omitted) = instruction_lines(&root, &changed);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let item = &items[0];
+        assert_eq!(item.path, "CONTRIBUTING.md");
+        assert_eq!(item.line, 4);
+        assert_eq!(item.text, "cargo test --locked");
+        assert_eq!(item.state, "found");
+        assert_eq!(item.basis, "explicit-instruction");
+        assert!(omitted.is_empty(), "{omitted:?}");
+        // A 300 KiB TESTING.md and a non-UTF-8 src/README.md are skipped and counted; the quote stays.
+        std::fs::write(root.join("TESTING.md"), vec![b'a'; 300 * 1024]).unwrap();
+        std::fs::write(
+            root.join("src/README.md"),
+            [0xff, 0xfe, b't', b'e', b's', b't'],
+        )
+        .unwrap();
+        let (items, omitted) = instruction_lines(&root, &changed);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            row_count(&omitted, "instructions", "unreadable"),
+            Some(Some(2)),
+            "{omitted:?}"
+        );
+    }
+
+    #[test]
+    fn json_budget_trims_in_fixed_order() {
+        // Step 1: one byte short removes only the quoted instruction (it is the first step).
+        let full = json_len(&trimmable_report()).unwrap();
+        let first = fit_with(trimmable_report(), full - 1).unwrap();
+        assert!(first.instructions.is_empty());
+        assert_eq!(first.test_candidates[0].reasons.len(), 2);
+        assert_eq!(
+            row_count(&first.omissions, "instructions", "json_budget"),
+            Some(Some(1))
+        );
+        assert_eq!(
+            row_count(&first.omissions, "candidate_reasons", "json_budget"),
+            None
+        );
+        // Step 2: one more byte short removes a reason beyond the first, not the candidate.
+        let budget = json_len(&first).unwrap() - 1;
+        let second = fit_with(trimmable_report(), budget).unwrap();
+        assert_eq!(second.test_candidates.len(), 1);
+        assert_eq!(second.test_candidates[0].reasons.len(), 1);
+        assert_eq!(
+            row_count(&second.omissions, "candidate_reasons", "json_budget"),
+            Some(Some(1))
+        );
+        // Step 4: one more byte short removes the candidate itself.
+        let budget = json_len(&second).unwrap() - 1;
+        let third = fit_with(trimmable_report(), budget).unwrap();
+        assert!(third.test_candidates.is_empty());
+        assert_eq!(
+            row_count(&third.omissions, "test_candidates", "json_budget"),
+            Some(Some(1))
+        );
+    }
+
+    #[test]
+    fn json_budget_trims_definitions_when_they_alone_exceed() {
+        let mut report = bare_report();
+        for i in 0..200 {
+            report.changed.definitions.push(DefinitionRow {
+                path: long(&format!("{i:04}"), 1_996),
+                name: long(&format!("{i:04}n"), 1_996),
+                kind: "function",
+                change: "modified",
+                status: "analysed",
+            });
+        }
+        report.changed.total_definitions = 200;
+        report.changed.listed_definitions = 200;
+        assert!(json_len(&report).unwrap() > MAX_REPORT_BYTES);
+        let fitted = fit(report).expect("definitions alone must fit after trimming");
+        let kept = fitted.changed.definitions.len();
+        let text = serde_json::to_string(&fitted).unwrap();
+        assert!(text.len() <= MAX_REPORT_BYTES, "{} bytes", text.len());
+        assert!(kept > 0 && kept < 200, "kept {kept}");
+        assert_eq!(fitted.changed.listed_definitions, kept);
+        assert_eq!(fitted.changed.total_definitions, 200);
+        assert_eq!(
+            row_count(&fitted.omissions, "definitions", "json_budget"),
+            Some(Some(200 - kept))
+        );
+    }
+
+    #[test]
+    fn json_budget_remainder_is_small() {
+        let mut report = bare_report();
+        report.changed.total_files = 1_000;
+        report.changed.listed_files = 1_000;
+        report.changed.total_definitions = 200;
+        report.changed.listed_definitions = 200;
+        for i in 0..200 {
+            report.changed.definitions.push(DefinitionRow {
+                path: long(&format!("d{i}"), 4_000),
+                name: long(&format!("n{i}"), 4_000),
+                kind: "function",
+                change: "modified",
+                status: "analysed",
+            });
+        }
+        for i in 0..20 {
+            report.instructions.push(Instruction {
+                path: long(&format!("i{i}"), 4_000),
+                line: i + 1,
+                text: "t".repeat(200),
+                state: "found",
+                basis: "explicit-instruction",
+            });
+        }
+        for i in 0..50 {
+            report.test_candidates.push(TestCandidate {
+                path: long(&format!("t{i}"), 4_000),
+                area: "tests".to_string(),
+                state: "suggested",
+                basis: "proven-edge",
+                reasons: (0..5)
+                    .map(|k| def_reason(&long(&format!("s{k}"), 4_000), "f", "proven-edge"))
+                    .collect(),
+            });
+        }
+        for a in 0..30 {
+            report.review_areas.push(ReviewArea {
+                area: format!("area{a}"),
+                changed_files: (0..20).map(|k| long(&format!("c{a}-{k}"), 4_000)).collect(),
+                dependent_files: Some(
+                    (0..10)
+                        .map(|k| DependentFile {
+                            path: long(&format!("d{a}-{k}"), 4_000),
+                            reasons: (0..3)
+                                .map(|r| {
+                                    def_reason(
+                                        &long(&format!("r{r}"), 4_000),
+                                        "f",
+                                        "name-candidate",
+                                    )
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                ),
+                dependent_count: Some(10),
+            });
+        }
+        for i in 0..13 {
+            report.coverage_limits.push(CoverageLimit {
+                limit: "partial-graph",
+                count: 20,
+                paths: (0..20).map(|k| long(&format!("p{i}-{k}"), 4_000)).collect(),
+            });
+        }
+        assert!(json_len(&report).unwrap() > MAX_REPORT_BYTES);
+        let mut fitted = fit(report).unwrap();
+        assert!(json_len(&fitted).unwrap() <= MAX_REPORT_BYTES);
+        // The remainder: every trimmable list emptied.
+        fitted.instructions.clear();
+        fitted.test_candidates.clear();
+        fitted.review_areas.clear();
+        fitted.changed.definitions.clear();
+        for limit in fitted.coverage_limits.iter_mut() {
+            limit.paths.clear();
+        }
+        let remainder = json_len(&fitted).unwrap();
+        assert!(remainder < 16_384, "remainder is {remainder} bytes");
     }
 }

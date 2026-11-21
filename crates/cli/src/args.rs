@@ -84,6 +84,8 @@ pub enum Command {
     Packet(PacketArgs),
     Changes(ChangesArgs),
     ChangesRefused(String),
+    Checks(ChangesArgs),
+    ChecksRefused(String),
     Knowledge {
         op: KnowledgeOp,
     },
@@ -677,6 +679,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "context" => parse_context_args(args).map(Command::Context),
         "packet" => parse_packet_args(args).map(Command::Packet),
         "changes" => parse_changes_args(args),
+        "checks" => parse_checks_args(args),
         "knowledge" => match args.get(1).map(String::as_str) {
             Some(sub) => parse_knowledge_op(sub, args).map(|op| Command::Knowledge { op }),
             None => Err(crate::usage()),
@@ -725,6 +728,23 @@ fn parse_map_args(args: &[String]) -> Result<Command, String> {
 /// `changes` flags. Every refusal here is a usage error (exit 2), including a
 /// scope/base mismatch and a ref that starts with `-`.
 fn parse_changes_args(args: &[String]) -> Result<Command, String> {
+    match parse_change_flags(args)? {
+        Ok(parsed) => Ok(Command::Changes(parsed)),
+        Err(message) => Ok(Command::ChangesRefused(message)),
+    }
+}
+
+/// `checks` takes the same flags as `changes`, with the same refusals (exit 2 in dispatch).
+fn parse_checks_args(args: &[String]) -> Result<Command, String> {
+    match parse_change_flags(args)? {
+        Ok(parsed) => Ok(Command::Checks(parsed)),
+        Err(message) => Ok(Command::ChecksRefused(message)),
+    }
+}
+
+/// The flags shared by `changes` and `checks`. The outer `Err` is a malformed command line
+/// (exit 2 with usage); the inner `Err` is a request the changes module refuses (exit 2 in dispatch).
+fn parse_change_flags(args: &[String]) -> Result<Result<ChangesArgs, String>, String> {
     let mut values = std::collections::BTreeMap::new();
     let mut i = 1;
     while i < args.len() {
@@ -751,13 +771,13 @@ fn parse_changes_args(args: &[String]) -> Result<Command, String> {
     };
     // A request the changes module refuses names its own cause (exit 2 in dispatch).
     match crate::changes::request(&scope, base.as_deref(), limit) {
-        Ok(_) => Ok(Command::Changes(ChangesArgs {
+        Ok(_) => Ok(Ok(ChangesArgs {
             repo,
             scope,
             base,
             limit,
         })),
-        Err(message) => Ok(Command::ChangesRefused(message)),
+        Err(message) => Ok(Err(message)),
     }
 }
 

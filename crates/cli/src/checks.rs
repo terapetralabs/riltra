@@ -537,6 +537,12 @@ fn walk(
         true,
     ) {
         Ok(out) => {
+            // A traversal that hit its wall-clock limit contributes nothing, however far
+            // it got: its partial paths are dropped and the definition is `time-budget`.
+            // `mapping-budget` stays a labelled partial result (Ruling 9).
+            if out.unresolved.iter().any(|reason| reason == "time-budget") {
+                return Ok(Walk::TimeBudget);
+            }
             let partial =
                 out.completeness.status == "partial" || out.impact_verdict == Some("UNKNOWN");
             let mut paths = Vec::new();
@@ -562,6 +568,23 @@ fn walk(
     }
 }
 
+/// The wall-clock starts of the D2 and D3 budgets. Production leaves both unset, so
+/// each clock starts from the real clock; tests hand in instants already past a
+/// deadline, so no test sleeps.
+#[derive(Clone, Copy, Default)]
+struct Clock {
+    /// Start of the D3 total budget; unset, it starts at the first traversal.
+    total: Option<Instant>,
+    /// Start of every D2 traversal; unset, each one starts when it begins.
+    traversal: Option<Instant>,
+}
+
+impl Clock {
+    fn traversal_start(&self) -> Instant {
+        self.traversal.unwrap_or_else(Instant::now)
+    }
+}
+
 /// The test-candidate and coverage-limit report of one git change (D0-D10), built on
 /// one index read. `tx` is `None` only when no index was opened; `read` says why.
 pub(crate) fn assemble(
@@ -571,6 +594,18 @@ pub(crate) fn assemble(
     req: &Request,
     read: IndexState,
     fingerprint: &dyn Fn(&Path) -> git::GitInfo,
+) -> Result<Report, String> {
+    assemble_at(tx, repo, structure, req, read, fingerprint, Clock::default())
+}
+
+fn assemble_at(
+    tx: Option<&rusqlite::Transaction<'_>>,
+    repo: &str,
+    structure: &Structure,
+    req: &Request,
+    read: IndexState,
+    fingerprint: &dyn Fn(&Path) -> git::GitInfo,
+    clock: Clock,
 ) -> Result<Report, String> {
     let view = match (read, tx) {
         (IndexState::Missing, _) => View::Absent {
@@ -620,7 +655,7 @@ pub(crate) fn assemble(
     let mut test_reasons: BTreeMap<String, Vec<Reason>> = BTreeMap::new();
     let mut dependent_reasons: BTreeMap<String, Vec<Reason>> = BTreeMap::new();
     let mut partial_paths: BTreeSet<String> = BTreeSet::new();
-    let total_started = Instant::now();
+    let total_started = clock.total.unwrap_or_else(Instant::now);
     let mut resolvable = 0usize;
     let mut traversed = 0usize;
     let mut traversal_limit = 0usize;
@@ -651,7 +686,7 @@ pub(crate) fn assemble(
             &structure.canon,
             &p.snapshot,
             &target,
-            Instant::now(),
+            clock.traversal_start(),
         )? {
             Walk::Analysed { paths, partial } => {
                 row.status = "analysed";
@@ -2165,6 +2200,103 @@ mod tests {
         drop(second);
         let err = run(&mut f, &s).expect_err("a failed SCIP owner read must fail the report");
         assert!(err.contains("idx_semfacts_span"), "{err}");
+    }
+
+    /// The Ready path with injected clocks (see `Clock`).
+    fn run_at(f: &mut Fixture, structure: &Structure, clock: Clock) -> Result<Report, String> {
+        let tx = f.conn.transaction().unwrap();
+        let out = assemble_at(
+            Some(&tx),
+            "r",
+            structure,
+            &request(),
+            IndexState::Ready,
+            &clean,
+            clock,
+        );
+        tx.commit().unwrap();
+        out
+    }
+
+    /// An instant `ms` in the past: a budget started there is already spent.
+    fn past(ms: u64) -> Instant {
+        Instant::now()
+            .checked_sub(std::time::Duration::from_millis(ms))
+            .expect("the monotonic clock has run longer than the test offset")
+    }
+
+    fn status_of(r: &Report, name: &str) -> Option<&'static str> {
+        r.changed
+            .definitions
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.status)
+    }
+
+    #[test]
+    fn traversal_time_out_contributes_nothing() {
+        let mut f = scip_fixture("checks-traversal-timeout");
+        let s = structure_for(
+            &f.root,
+            vec![modified(
+                "crates/b/lib.py",
+                Some("python"),
+                vec![def_row("crates/b/lib.py", "target", "function", "modified")],
+            )],
+        );
+        // Control: a fresh traversal start answers, and the caller is a proven candidate.
+        let ok = run_at(&mut f, &s, Clock::default()).unwrap();
+        assert_eq!(status_of(&ok, "target"), Some("analysed"));
+        assert_eq!(
+            find(&ok, "tests/test_main.py").unwrap().basis,
+            "proven-edge"
+        );
+        assert!(limit(&ok, "traversal-time-budget").is_none());
+        // Fault: the traversal started 3 s ago, past its 2,000 ms deadline. Its partial
+        // result is dropped: no candidate, no dependent, the definition is `time-budget`.
+        let clock = Clock {
+            total: None,
+            traversal: Some(past(3_000)),
+        };
+        let timed = run_at(&mut f, &s, clock).unwrap();
+        assert_eq!(status_of(&timed, "target"), Some("time-budget"));
+        assert!(timed.test_candidates.is_empty(), "{:?}", timed.test_candidates);
+        assert!(timed
+            .review_areas
+            .iter()
+            .all(|a| a.dependent_files.as_ref().is_none_or(|d| d.is_empty())));
+        let listed = limit(&timed, "traversal-time-budget").expect("the time-out is listed");
+        assert_eq!(listed.paths, vec!["crates/b/lib.py".to_string()]);
+        // Determinism: the same time-out serializes identically on a second run.
+        let again = run_at(&mut f, &s, clock).unwrap();
+        assert_eq!(
+            serde_json::to_string(&timed).unwrap(),
+            serde_json::to_string(&again).unwrap()
+        );
+    }
+
+    #[test]
+    fn total_traversal_budget_skips_remaining_definitions() {
+        let mut f = scip_fixture("checks-total-budget");
+        let s = structure_for(
+            &f.root,
+            vec![modified(
+                "crates/b/lib.py",
+                Some("python"),
+                vec![def_row("crates/b/lib.py", "target", "function", "modified")],
+            )],
+        );
+        // The D3 total started 11 s ago: no traversal starts.
+        let clock = Clock {
+            total: Some(past(11_000)),
+            traversal: None,
+        };
+        let r = run_at(&mut f, &s, clock).unwrap();
+        assert_eq!(status_of(&r, "target"), Some("time-budget"));
+        assert_eq!(r.changed.traversed_definitions, 0);
+        assert_eq!(omission(&r, "definitions", "time_budget"), Some(Some(1)));
+        assert!(r.test_candidates.is_empty(), "{:?}", r.test_candidates);
+        assert!(limit(&r, "traversal-time-budget").is_some());
     }
 
     /// The no-index report shape, built through `assemble` so the tests never write the bounds out.

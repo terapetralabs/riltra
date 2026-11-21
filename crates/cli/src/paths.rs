@@ -264,6 +264,10 @@ mod tests {
     fn find_executable_in_is_case_sensitive_on_unix() {
         let dir = tmpdir("exe-unix-case");
         touch(&dir.join("Rust-Analyzer"));
+        // macOS APFS is case-insensitive by default; there the filesystem itself matches.
+        if dir.join("rust-analyzer").exists() {
+            return;
+        }
         assert_eq!(
             find_executable_in("rust-analyzer", std::slice::from_ref(&dir), &[""]),
             None

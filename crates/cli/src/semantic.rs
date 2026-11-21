@@ -276,13 +276,14 @@ pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
 #[derive(Debug, PartialEq)]
 pub(crate) enum ConfinedReadError {
     Path(String),
+    NotFound(String),
     Io(String),
 }
 
 impl ConfinedReadError {
     pub(crate) fn into_message(self) -> String {
         match self {
-            Self::Path(message) | Self::Io(message) => message,
+            Self::Path(message) | Self::NotFound(message) | Self::Io(message) => message,
         }
     }
 }
@@ -292,36 +293,98 @@ pub(crate) fn confined_read_classified(
     rel: &str,
     cap_bytes: u64,
 ) -> Result<Vec<u8>, ConfinedReadError> {
-    let (candidate, was_missing) = confined_path(root, rel).map_err(ConfinedReadError::Path)?;
+    confined_read_classified_with(root, rel, cap_bytes, || {})
+}
+
+fn confined_read_classified_with(
+    root: &Path,
+    rel: &str,
+    cap_bytes: u64,
+    before_open: impl FnOnce(),
+) -> Result<Vec<u8>, ConfinedReadError> {
     let canonical_root = root
         .canonicalize()
         .map_err(|e| ConfinedReadError::Path(format!("repository root unavailable: {e}")))?;
-    // Containment is decided above, before any metadata of the file is read.
-    let meta = candidate
-        .metadata()
-        .map_err(|e| ConfinedReadError::Io(format!("cannot stat '{rel}': {e}")))?;
-    // A path that appeared after the missing check must still resolve inside.
-    if was_missing && !crate::paths::contains(&canonical_root, &candidate) {
-        return Err(ConfinedReadError::Path(format!(
-            "document path escapes repository: '{rel}'"
+    let (candidate, _) = confined_path(&canonical_root, rel).map_err(ConfinedReadError::Path)?;
+    let entry_meta = candidate.symlink_metadata().map_err(|e| {
+        let message = format!("cannot stat '{rel}': {e}");
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ConfinedReadError::NotFound(message)
+        } else {
+            ConfinedReadError::Io(message)
+        }
+    })?;
+    let meta = if entry_meta.file_type().is_symlink() {
+        candidate.metadata().map_err(|e| {
+            let message = format!("cannot stat '{rel}': {e}");
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ConfinedReadError::NotFound(message)
+            } else {
+                ConfinedReadError::Io(message)
+            }
+        })?
+    } else {
+        entry_meta
+    };
+    if !meta.is_file() {
+        return Err(ConfinedReadError::Io("not a regular file".into()));
+    }
+    if meta.len() > cap_bytes {
+        return Err(ConfinedReadError::Io(format!(
+            "'{rel}' too large ({} bytes > {cap_bytes})",
+            meta.len()
         )));
     }
-    let len = meta.len();
+    candidate
+        .canonicalize()
+        .map_err(|e| ConfinedReadError::Io(format!("cannot resolve '{rel}': {e}")))?
+        .strip_prefix(&canonical_root)
+        .map_err(|_| {
+            ConfinedReadError::Path(format!("document path escapes repository: '{rel}'"))
+        })?;
+    // The test hook models a path swap after validation and immediately before open.
+    before_open();
+    let mut file = std::fs::File::open(&candidate).map_err(|e| {
+        let message = format!("cannot read '{rel}': {e}");
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ConfinedReadError::NotFound(message)
+        } else {
+            ConfinedReadError::Io(message)
+        }
+    })?;
+    // Check the file actually opened, not the path checked before open.
+    let opened_meta = file
+        .metadata()
+        .map_err(|e| ConfinedReadError::Io(format!("cannot stat opened '{rel}': {e}")))?;
+    if !opened_meta.is_file() {
+        return Err(ConfinedReadError::Io("not a regular file".into()));
+    }
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|e| ConfinedReadError::Io(format!("cannot resolve '{rel}': {e}")))?;
+    resolved.strip_prefix(&canonical_root).map_err(|_| {
+        ConfinedReadError::Path(format!("document path escapes repository: '{rel}'"))
+    })?;
+    let len = opened_meta.len();
     if len > cap_bytes {
         return Err(ConfinedReadError::Io(format!(
             "'{rel}' too large ({len} bytes > {cap_bytes})"
         )));
     }
-    // take(cap+1): the metadata check races file growth; the bounded read
-    // cannot be outrun.
-    let mut file = std::fs::File::open(&candidate)
-        .map_err(|e| ConfinedReadError::Io(format!("cannot read '{rel}': {e}")))?;
+    // take(cap+1): the opened handle remains stable if the path changes later.
     let mut bytes = Vec::new();
     use std::io::Read as _;
     file.by_ref()
         .take(cap_bytes + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| ConfinedReadError::Io(format!("cannot read '{rel}': {e}")))?;
+        .map_err(|e| {
+            let message = format!("cannot read '{rel}': {e}");
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ConfinedReadError::NotFound(message)
+            } else {
+                ConfinedReadError::Io(message)
+            }
+        })?;
     if bytes.len() as u64 > cap_bytes {
         return Err(ConfinedReadError::Io(format!(
             "'{rel}' too large (> {cap_bytes} bytes)"
@@ -515,7 +578,7 @@ mod tests {
         );
 
         let missing = confined_read_classified(&dir, "missing.txt", 1024).unwrap_err();
-        assert!(matches!(&missing, ConfinedReadError::Io(_)));
+        assert!(matches!(&missing, ConfinedReadError::NotFound(_)));
         assert_eq!(
             missing.into_message(),
             confined_read(&dir, "missing.txt", 1024).unwrap_err()
@@ -526,6 +589,100 @@ mod tests {
         assert_eq!(
             too_large.into_message(),
             confined_read(&dir, "big.txt", 64).unwrap_err()
+        );
+    }
+
+    #[test]
+    fn unavailable_repository_root_is_a_path_error() {
+        let root = tmpdir("sem-unavailable-root");
+        let missing = root.with_extension("missing");
+        let result = confined_read_classified(&missing, "file.txt", 1024);
+        assert!(matches!(result, Err(ConfinedReadError::Path(_))));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn confined_read_rejects_directories_before_open() {
+        let root = tmpdir("sem-directory-before-open");
+        std::fs::create_dir(root.join("README.md")).unwrap();
+        let before_open_called = std::cell::Cell::new(false);
+
+        let result = confined_read_classified_with(&root, "README.md", 1024, || {
+            before_open_called.set(true);
+        });
+
+        assert!(!before_open_called.get(), "directory reached the open step");
+        assert!(matches!(
+            result,
+            Err(ConfinedReadError::Io(message)) if message == "not a regular file"
+        ));
+    }
+
+    #[test]
+    fn confined_read_rejects_a_non_file_opened_after_validation() {
+        let root = tmpdir("sem-opened-directory");
+        let document = root.join("README.md");
+        std::fs::write(&document, "ordinary file").unwrap();
+        let control = confined_read_classified_with(&root, "README.md", 1024, || {}).unwrap();
+        assert_eq!(control, b"ordinary file");
+        let error = confined_read_classified_with(&root, "README.md", 1024, || {
+            std::fs::remove_file(&document).unwrap();
+            std::fs::create_dir(&document).unwrap();
+        })
+        .unwrap_err();
+        assert!(matches!(error, ConfinedReadError::Io(_)));
+        // On Windows, File::open rejects a directory inside the open step, so only the
+        // unix run reaches the post-open "not a regular file" branch.
+        if cfg!(unix) {
+            assert_eq!(error.into_message(), "not a regular file");
+        }
+    }
+
+    #[test]
+    fn symlink_swapped_after_validation_cannot_read_outside() {
+        let root = tmpdir("sem-swap-root");
+        let outside = tmpdir("sem-swap-outside");
+        let document = root.join("README.md");
+        let secret = outside.join("secret.md");
+        std::fs::write(&document, "inside").unwrap();
+        std::fs::write(&secret, "outside secret").unwrap();
+        let swapped = std::cell::Cell::new(false);
+        let result = confined_read_classified_with(&root, "README.md", 1024, || {
+            std::fs::remove_file(&document).unwrap();
+            #[cfg(unix)]
+            let linked = std::os::unix::fs::symlink(&secret, &document).is_ok();
+            #[cfg(windows)]
+            let linked = std::os::windows::fs::symlink_file(&secret, &document).is_ok();
+            swapped.set(linked);
+        });
+        if swapped.get() {
+            if let Ok(bytes) = result {
+                assert_eq!(bytes, b"inside");
+            }
+        } else {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn confined_read_keeps_internal_symlink_support() {
+        let root = tmpdir("sem-internal-link");
+        let target = root.join("docs").join("guide.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "inside target").unwrap();
+        let link = root.join("README.md");
+        // Windows does not treat '/' inside a symlink target as a separator.
+        let relative_target = std::path::Path::new("docs").join("guide.md");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&relative_target, &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&relative_target, &link).is_ok();
+        if !linked {
+            return;
+        }
+        assert_eq!(
+            confined_read_classified(&root, "README.md", 1024).unwrap(),
+            b"inside target"
         );
     }
 

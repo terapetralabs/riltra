@@ -165,6 +165,42 @@ fn ready_with<F: FnOnce(&mut Command)>(cfg: &Path, configure: F) -> Session {
 }
 
 #[test]
+fn mcp_modern_metadata_reaches_list_tools_handler() {
+    let h = home("tools-modern");
+    let mut modern = spawn(&h);
+    modern.send(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"riltra-mcp-test","version":"0.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+    );
+    let v = modern.recv();
+    assert_eq!(v["id"], 1);
+    assert_eq!(v["result"]["ttlMs"], 0, "modern cache TTL: {v}");
+    assert_eq!(
+        v["result"]["cacheScope"], "public",
+        "modern cache scope: {v}"
+    );
+    let (code, _err) = modern.finish();
+    assert_eq!(code, 0, "clean modern disconnect must exit 0");
+    assert_home_untouched(&h);
+
+    let h = home("tools-legacy");
+    let mut legacy = ready(&h);
+    legacy.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    let v = legacy.recv();
+    assert_eq!(v["id"], 2);
+    assert!(
+        v["result"].get("ttlMs").is_none(),
+        "legacy ttlMs must be absent: {v}"
+    );
+    assert!(
+        v["result"].get("cacheScope").is_none(),
+        "legacy cacheScope must be absent: {v}"
+    );
+    let (code, _err) = legacy.finish();
+    assert_eq!(code, 0, "clean legacy disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
 fn mcp_initialize_handshake_reports_identity() {
     let h = home("init");
     let mut s = spawn(&h);
@@ -187,7 +223,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_seventeen_tools() {
+fn mcp_tools_list_advertises_the_eighteen_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -217,10 +253,11 @@ fn mcp_tools_list_advertises_the_seventeen_tools() {
             "riltra_knowledge_related",
             "riltra_knowledge_search",
             "riltra_knowledge_show",
+            "riltra_project_overview",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the seventeen tools"
+        "the server advertises exactly the eighteen tools"
     );
     let code_search_tool = tools
         .iter()
@@ -331,6 +368,7 @@ fn mcp_tools_list_advertises_the_seventeen_tools() {
         "riltra_knowledge_related",
         "riltra_knowledge_search",
         "riltra_knowledge_show",
+        "riltra_project_overview",
         "riltra_repo_status",
     ] {
         let schema = &find(name)["inputSchema"];
@@ -392,6 +430,10 @@ fn mcp_tools_list_advertises_the_seventeen_tools() {
         semantic_schema["required"],
         json!(["repo", "path", "line", "col", "operation"])
     );
+    let overview_schema = &find("riltra_project_overview")["inputSchema"];
+    assert_eq!(overview_schema["required"], json!(["repo"]));
+    assert_eq!(overview_schema["additionalProperties"], false);
+    assert!(overview_schema["properties"]["repo"].is_object());
     let status_schema = &find("riltra_repo_status")["inputSchema"];
     assert_eq!(status_schema["required"], json!(["repo"]));
     assert!(status_schema["properties"]["repo"].is_object());
@@ -867,10 +909,11 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_knowledge_related",
             "riltra_knowledge_search",
             "riltra_knowledge_show",
+            "riltra_project_overview",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the seventeen tools"
+        "the health document must list the eighteen tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -1004,6 +1047,11 @@ fn g4_unknown_input_fields_are_rejected_not_ignored() {
             13,
             "riltra_knowledge_at_anchor",
             json!({"repo": "r", "path": "main.rs", "line": 1, "col": 1, "bogus": 1}),
+        ),
+        (
+            14,
+            "riltra_project_overview",
+            json!({"repo": "r", "bogus": 1}),
         ),
     ] {
         s.send(
@@ -1369,6 +1417,34 @@ fn call_tool_with_timeout(
     v["result"].clone()
 }
 
+fn modern_request(s: &mut Session, id: i64, method: &str, mut params: Value) -> Value {
+    params.as_object_mut().expect("request params object").insert(
+        "_meta".into(),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "riltra-mcp-test", "version": "0.0.0"},
+            "io.modelcontextprotocol/clientCapabilities": {}
+        }),
+    );
+    s.send(&json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params}).to_string());
+    let response = s.recv();
+    assert_eq!(response["id"], id, "{method} response: {response}");
+    assert!(
+        response.get("error").is_none(),
+        "{method} failed: {response}"
+    );
+    response["result"].clone()
+}
+
+fn modern_overview(s: &mut Session, id: i64, repo: &str) -> Value {
+    modern_request(
+        s,
+        id,
+        "tools/call",
+        json!({"name":"riltra_project_overview", "arguments":{"repo":repo}}),
+    )
+}
+
 fn is_error(result: &Value) -> bool {
     result["isError"].as_bool().unwrap_or(false)
 }
@@ -1408,6 +1484,18 @@ fn listing(dir: &Path) -> Vec<String> {
     walk(dir, dir, &mut out);
     out.sort();
     out
+}
+
+/// SQLite's read-only WAL path may create `-wal`/`-shm` sidecars; compare every other file byte-for-byte.
+fn persistent_files_snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    listing(dir)
+        .into_iter()
+        .filter(|path| !path.ends_with("-wal") && !path.ends_with("-shm"))
+        .map(|path| {
+            let bytes = std::fs::read(dir.join(&path)).unwrap();
+            (path, bytes)
+        })
+        .collect()
 }
 
 fn db_path(cfg: &Path, name: &str) -> PathBuf {
@@ -7188,4 +7276,198 @@ fn code_query_refuses_outdated_and_newer_databases_with_their_own_kinds() {
     );
     let (code, _) = s.finish();
     assert_eq!(code, 0);
+}
+
+#[test]
+fn mcp_tools_list_2026_07_28_advertises_eighteen_tools_with_cache_hints() {
+    let h = home("tools-list-modern");
+    let mut legacy = ready(&h);
+    legacy.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    let legacy_result = legacy.recv()["result"].clone();
+
+    let mut modern = spawn(&h);
+    let result = modern_request(&mut modern, 3, "tools/list", json!({}));
+    assert_eq!(result["ttlMs"], 0);
+    assert_eq!(result["cacheScope"], "public");
+    assert_eq!(result["tools"].as_array().unwrap().len(), 18);
+    assert_eq!(result["tools"], legacy_result["tools"]);
+    let (code, _) = modern.finish();
+    assert_eq!(code, 0);
+    let (code, _) = legacy.finish();
+    assert_eq!(code, 0);
+    assert_home_untouched(&h);
+}
+
+fn write_project_orientation_simple(root: &Path) {
+    let files = [
+        (
+            "Cargo.toml",
+            &include_bytes!("fixtures/project_orientation/simple/Cargo.toml")[..],
+        ),
+        (
+            "README.md",
+            &include_bytes!("fixtures/project_orientation/simple/README.md")[..],
+        ),
+        (
+            "src/main.rs",
+            &include_bytes!("fixtures/project_orientation/simple/src/main.rs")[..],
+        ),
+    ];
+    for (path, contents) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+}
+
+fn assert_project_overview_parity(modern: bool, tag: &str) {
+    let h = home(&format!("overview-{tag}"));
+    let root = home(&format!("overview-{tag}-repo"));
+    write_project_orientation_simple(&root);
+    init_repo(&h, &root, "r");
+    let before_no_index = listing(&h);
+    let mut session = if modern { spawn(&h) } else { ready(&h) };
+    if modern {
+        let listing = modern_request(&mut session, 1, "tools/list", json!({}));
+        assert_eq!(listing["ttlMs"], 0);
+        assert_eq!(listing["cacheScope"], "public");
+    }
+
+    let (code, _, err) = run_cli(&h, &["overview", "--repo", "missing"]);
+    assert_eq!(code, 3);
+    assert!(err.contains("unknown repository: 'missing'"), "{err}");
+    let missing = if modern {
+        modern_overview(&mut session, 7, "missing")
+    } else {
+        call_tool(
+            &mut session,
+            7,
+            "riltra_project_overview",
+            &json!({"repo":"missing"}),
+        )
+    };
+    assert!(is_error(&missing), "unknown repository must be refused");
+    assert_eq!(
+        doc(&missing),
+        json!({"kind":"not_registered", "message":"unknown repository: 'missing'"})
+    );
+
+    let (code, cli_text, err) = run_cli(&h, &["overview", "--repo", "r"]);
+    assert_eq!(code, 0, "overview CLI without index: {err}");
+    assert!(
+        cli_text.trim_end().len() <= 32_768,
+        "overview exceeded the JSON budget"
+    );
+    let cli: Value = serde_json::from_str(&cli_text).expect("overview CLI JSON");
+    let result = if modern {
+        modern_overview(&mut session, 2, "r")
+    } else {
+        call_tool(
+            &mut session,
+            2,
+            "riltra_project_overview",
+            &json!({"repo":"r"}),
+        )
+    };
+    assert!(!is_error(&result), "overview MCP without index: {result}");
+    assert_eq!(doc(&result), cli);
+    assert_eq!(result["content"][0]["text"], cli_text.trim_end());
+    assert_eq!(
+        listing(&h),
+        before_no_index,
+        "no-index overview wrote storage"
+    );
+    let (code, repeated, err) = run_cli(&h, &["overview", "--repo", "r"]);
+    assert_eq!(code, 0, "repeat no-index overview CLI: {err}");
+    assert_eq!(
+        repeated, cli_text,
+        "no-index overview must be deterministic"
+    );
+    let repeated = if modern {
+        modern_overview(&mut session, 3, "r")
+    } else {
+        call_tool(
+            &mut session,
+            3,
+            "riltra_project_overview",
+            &json!({"repo":"r"}),
+        )
+    };
+    assert_eq!(
+        repeated, result,
+        "repeated no-index overview must be identical"
+    );
+
+    let (code, _out, err) = run_cli(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index fixture: {err}");
+    let db = db_path(&h, "r");
+    let (code, _out, err) = run_cli(&h, &["overview", "--repo", "r"]);
+    assert_eq!(code, 0, "warm up indexed overview read path: {err}");
+    let before_index = std::fs::read(&db).unwrap();
+    let before_index_files = listing(&h);
+    let before_persistent_files = persistent_files_snapshot(&h);
+    let (code, cli_text, err) = run_cli(&h, &["overview", "--repo", "r"]);
+    assert_eq!(code, 0, "indexed overview CLI: {err}");
+    assert!(
+        cli_text.trim_end().len() <= 32_768,
+        "overview exceeded the JSON budget"
+    );
+    let cli: Value = serde_json::from_str(&cli_text).expect("indexed overview CLI JSON");
+    let result = if modern {
+        modern_overview(&mut session, 4, "r")
+    } else {
+        call_tool(
+            &mut session,
+            4,
+            "riltra_project_overview",
+            &json!({"repo":"r"}),
+        )
+    };
+    assert!(!is_error(&result), "indexed overview MCP: {result}");
+    assert_eq!(doc(&result), cli);
+    assert_eq!(result["content"][0]["text"], cli_text.trim_end());
+    assert_eq!(
+        std::fs::read(db).unwrap(),
+        before_index,
+        "overview changed index bytes"
+    );
+    assert_eq!(
+        listing(&h),
+        before_index_files,
+        "indexed overview changed home files"
+    );
+    assert_eq!(
+        persistent_files_snapshot(&h),
+        before_persistent_files,
+        "indexed overview changed a persistent home file"
+    );
+    let (code, repeated, err) = run_cli(&h, &["overview", "--repo", "r"]);
+    assert_eq!(code, 0, "repeat indexed overview CLI: {err}");
+    assert_eq!(repeated, cli_text, "indexed overview must be deterministic");
+    let repeated = if modern {
+        modern_overview(&mut session, 5, "r")
+    } else {
+        call_tool(
+            &mut session,
+            5,
+            "riltra_project_overview",
+            &json!({"repo":"r"}),
+        )
+    };
+    assert_eq!(
+        repeated, result,
+        "repeated indexed overview must be identical"
+    );
+    let (code, _) = session.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn project_overview_mcp_matches_cli_document() {
+    assert_project_overview_parity(false, "legacy");
+}
+
+#[test]
+fn project_overview_mcp_2026_07_28_matches_cli_document() {
+    assert_project_overview_parity(true, "modern");
 }

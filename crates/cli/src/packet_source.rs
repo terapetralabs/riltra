@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 
 use crate::packet::{ByteRange, SourceSnippet};
 
+pub(crate) const MAX_SNIPPET_BYTES: usize = 4096;
+pub(crate) const MAX_SNIPPET_LINES: usize = 40;
+
 pub(crate) struct SnippetInput<'a> {
     pub path: &'a str,
     pub digest: &'a str,
@@ -117,30 +120,11 @@ fn available_snippet(
     validate_range(&requested, bytes)?;
     let source =
         std::str::from_utf8(bytes).map_err(|_| "snippet source is not UTF-8".to_string())?;
-    let mut end = requested.end;
-    let byte_cap = requested.start.saturating_add(4096).min(end);
-    let mut byte_end = byte_cap;
-    while !source.is_char_boundary(byte_end) {
-        byte_end -= 1;
-    }
-    end = end.min(byte_end);
-
-    let mut lines = 0;
-    for (offset, ch) in source[requested.start..end].char_indices() {
-        if ch == '\n' {
-            lines += 1;
-            if lines == 40 {
-                let after_line = requested.start + offset + 1;
-                end = end.min(after_line);
-                break;
-            }
-        }
-    }
+    let (text, end) = bounded_excerpt(source, requested.start, requested.end);
     let returned = ByteRange {
         start: requested.start,
         end,
     };
-    let text = source[returned.start..returned.end].to_string();
     let truncated = returned.end < requested.end;
     Ok(SourceSnippet {
         path: path.to_string(),
@@ -152,6 +136,28 @@ fn available_snippet(
         reason: truncated.then_some("snippet-cap"),
         anchor_indices,
     })
+}
+
+pub(crate) fn bounded_excerpt(source: &str, start: usize, requested_end: usize) -> (String, usize) {
+    let mut end = requested_end;
+    let byte_cap = start.saturating_add(MAX_SNIPPET_BYTES).min(end);
+    let mut byte_end = byte_cap;
+    while !source.is_char_boundary(byte_end) {
+        byte_end -= 1;
+    }
+    end = end.min(byte_end);
+
+    let mut lines = 0;
+    for (offset, ch) in source[start..end].char_indices() {
+        if ch == '\n' {
+            lines += 1;
+            if lines == MAX_SNIPPET_LINES {
+                end = end.min(start + offset + 1);
+                break;
+            }
+        }
+    }
+    (source[start..end].to_string(), end)
 }
 
 #[cfg(test)]

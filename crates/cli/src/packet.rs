@@ -226,7 +226,10 @@ fn read_source_using(
         Err(crate::semantic::ConfinedReadError::Path(message)) => {
             return Err(PacketQueryError::Path(message))
         }
-        Err(crate::semantic::ConfinedReadError::Io(_)) => {
+        Err(
+            crate::semantic::ConfinedReadError::NotFound(_)
+            | crate::semantic::ConfinedReadError::Io(_),
+        ) => {
             crate::semantic::confined_path(root, path).map_err(PacketQueryError::Path)?;
             (None, Some("source-unavailable"))
         }
@@ -556,6 +559,48 @@ fn query_conn_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_classifies_removed_root_after_anchor_as_path_error() {
+        let home = crate::testutil::tmpdir("packet-removed-root-home");
+        let root = crate::testutil::tmpdir("packet-removed-root")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+        std::fs::write(root.join("b.py"), "def beta():\n    return 2\n").unwrap();
+        index::build_full(&home, "r", &root).unwrap();
+        let entry = registry::RepoEntry {
+            name: "r".to_string(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 0,
+        };
+        let request = PacketRequest {
+            anchors: parse_anchors(r#"[{"target":"alpha"},{"target":"beta"}]"#).unwrap(),
+            depth: 3,
+            limit: 20,
+            max_bytes: 32768,
+        };
+        let parked = root.with_extension("parked");
+        let mut conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let result = query_conn_classified_with_hook(
+            &mut conn,
+            &home,
+            &entry,
+            "r",
+            &root,
+            &request,
+            |anchor| {
+                if anchor == 0 {
+                    std::fs::rename(&root, &parked).unwrap();
+                }
+            },
+        );
+        std::fs::rename(&parked, &root).unwrap();
+        assert!(
+            matches!(result, Err(PacketQueryError::Path(_))),
+            "removing the root after the first distinct-path anchor must remain a path refusal"
+        );
+    }
 
     #[test]
     fn packet_preserves_detected_confinement_failure_after_path_restoration() {

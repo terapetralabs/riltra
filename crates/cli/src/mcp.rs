@@ -2,7 +2,8 @@
 //! M8 CP1/CP3/CP4/CP5/CP6: MCP stdio server. CP1 serves initialize; CP3
 //! registers the first read-only tools; CP4 adds the graph tools (callers,
 //! callees, trace, impact); CP5 adds the knowledge tools (search, show,
-//! related); CP6 adds the composed `riltra_health` tool — fourteen tools total
+//! related); CP6 adds the composed `riltra_health` tool. The overview tool
+//! completes the current inventory at eighteen tools
 //! (design gate §3) through the rmcp tool macros. Tool calls
 //! reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
@@ -30,13 +31,21 @@ use crate::knowledge_store_absent;
 use crate::lexical;
 use crate::{
     context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_search,
-    knowledge_store, packet, paths, registry, response, store,
+    knowledge_store, overview, packet, paths, registry, response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct RepoStatusInput {
+    /// Registered repository name.
+    repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct OverviewInput {
     /// Registered repository name.
     repo: String,
 }
@@ -417,6 +426,23 @@ impl RiltraMcp {
         Parameters(input): Parameters<RepoStatusInput>,
     ) -> CallToolResult {
         blocking(move || repo_status_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_project_overview",
+        description = "Summarize a registered project from bounded index and document evidence (same document as CLI `overview`). No-index and stale states remain explicit. Read-only; does not run build, test, package-manager, model, or provider commands. When to call: to orient on a registered project before choosing a definition or reading its build instructions.",
+        annotations(
+            title = "Project overview",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_project_overview(
+        &self,
+        Parameters(input): Parameters<OverviewInput>,
+    ) -> CallToolResult {
+        blocking(move || project_overview_doc(&input)).await
     }
 
     #[tool(
@@ -852,6 +878,21 @@ fn outdated_message(repo: &str, version: u32) -> String {
 
 /// `index status` through the read-only path; `Err` carries the classified
 /// refusal so every index-reading tool reports the same guard.
+fn project_overview_doc(input: &OverviewInput) -> CallToolResult {
+    let (home, root) = match repo_root(&input.repo) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let overview = match overview::collect(&home, &input.repo, &root) {
+        Ok(value) => value,
+        Err(error) => return tool_error("store_error", &error),
+    };
+    match overview::render(&overview) {
+        Ok(json) => exact_doc(&json),
+        Err(error) => tool_error("store_error", &error),
+    }
+}
+
 fn index_status_doc(
     home: &Path,
     repo: &str,
@@ -2269,6 +2310,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_knowledge_related",
                 "riltra_knowledge_search",
                 "riltra_knowledge_show",
+                "riltra_project_overview",
                 "riltra_repo_list",
                 "riltra_repo_status",
             ],
@@ -2350,9 +2392,420 @@ pub(crate) fn run() -> i32 {
     })
 }
 
+/// Exercise this process's MCP handler through an in-memory transport. This
+/// does not observe an installed executable, operating-system stdio, or a
+/// client connection.
+pub(crate) fn in_process_self_test() -> Result<(), String> {
+    in_process_self_test_after_startup(|| Ok(()))
+}
+
+fn in_process_self_test_after_startup(
+    after_startup: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+    const BUFFER_BYTES: usize = 64 * 1024;
+    const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "could not create the in-process MCP test runtime".to_string())?;
+    runtime.block_on(async move {
+        use tokio::io::BufReader;
+        let (server_io, client_io) = tokio::io::duplex(BUFFER_BYTES);
+        let (reader, mut writer) = tokio::io::split(client_io);
+        let mut reader = BufReader::new(reader);
+        let mut server_task = Some(tokio::spawn(serve_server(RiltraMcp, server_io)));
+        let operation = async {
+            let initialize = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": ProtocolVersion::V_2025_11_25,
+                    "capabilities": {},
+                    "clientInfo": {"name": "riltra-in-process-self-test", "version": "1"}
+                }
+            });
+            let initialize_response = exchange_json(
+                &mut writer,
+                &mut reader,
+                initialize,
+                DEADLINE,
+                MAX_RESPONSE_BYTES,
+            )
+            .await?;
+            if initialize_response.get("error").is_some()
+                || initialize_response
+                    .pointer("/result/protocolVersion")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+            {
+                return Err("in-process MCP initialize returned an invalid response".into());
+            }
+            let startup = server_task
+                .take()
+                .expect("startup task is consumed at most once");
+            let server = await_server_startup(startup, DEADLINE).await?;
+            let result = match after_startup() {
+                Err(error) => Err(error),
+                Ok(()) => async {
+                write_initialized(&mut writer, DEADLINE).await?;
+                let invalid = exchange_json(
+                    &mut writer,
+                    &mut reader,
+                    serde_json::json!({"jsonrpc":"2.0","id":2,"method":"riltra/invalid-self-test-method"}),
+                    DEADLINE,
+                    MAX_RESPONSE_BYTES,
+                )
+                .await?;
+                if invalid.get("error").is_none() || invalid.get("result").is_some() {
+                    return Err("in-process MCP invalid request was not rejected".into());
+                }
+                let ping = exchange_json(
+                    &mut writer,
+                    &mut reader,
+                    serde_json::json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
+                    DEADLINE,
+                    MAX_RESPONSE_BYTES,
+                )
+                .await?;
+                if ping.get("error").is_some()
+                    || !ping.pointer("/result").is_some_and(serde_json::Value::is_object)
+                {
+                    return Err("in-process MCP ping returned an invalid response".into());
+                }
+                let tools = exchange_json(
+                    &mut writer,
+                    &mut reader,
+                    serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}),
+                    DEADLINE,
+                    MAX_RESPONSE_BYTES,
+                )
+                .await?;
+                let count = tools
+                    .pointer("/result/tools")
+                    .and_then(serde_json::Value::as_array)
+                    .map_or(0, Vec::len);
+                if tools.get("error").is_some() || count == 0 {
+                    return Err("in-process MCP tools/list returned no tools".into());
+                }
+                Ok(())
+            }
+            .await,
+            };
+            let cleanup = cleanup_with_deadline(server.cancel(), DEADLINE).await;
+            if !matches!(cleanup, Ok(Ok(_))) {
+                return Err("in-process MCP service cleanup failed or timed out".into());
+            }
+            result
+        }
+        .await;
+        if let Some(startup) = server_task.take() {
+            if stop_startup_task(startup, DEADLINE).await.is_err() {
+                return Err("in-process MCP startup cleanup failed or timed out".into());
+            }
+        }
+        operation
+    })
+}
+
+type SelfTestServer = rmcp::service::RunningService<rmcp::RoleServer, RiltraMcp>;
+type ServerStartupTask =
+    tokio::task::JoinHandle<Result<SelfTestServer, rmcp::service::ServerInitializeError>>;
+
+async fn await_server_startup(
+    mut startup: ServerStartupTask,
+    timeout: std::time::Duration,
+) -> Result<SelfTestServer, String> {
+    match tokio::time::timeout(timeout, &mut startup).await {
+        Ok(Ok(Ok(server))) => Ok(server),
+        Ok(Ok(Err(_))) => Err("in-process MCP server startup failed".into()),
+        Ok(Err(_)) => Err("in-process MCP server startup task failed".into()),
+        Err(_) => {
+            stop_startup_task(startup, timeout).await?;
+            Err("in-process MCP server startup timed out and was stopped".into())
+        }
+    }
+}
+
+async fn stop_startup_task(
+    startup: ServerStartupTask,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    startup.abort();
+    match cleanup_with_deadline(startup, timeout).await {
+        Err(_) => Err("in-process MCP startup task cleanup timed out".into()),
+        Ok(Err(error)) if error.is_cancelled() => Ok(()),
+        Ok(Err(_)) => Err("in-process MCP startup task cleanup failed".into()),
+        Ok(Ok(Err(_))) => Ok(()),
+        Ok(Ok(Ok(server))) => match cleanup_with_deadline(server.cancel(), timeout).await {
+            Ok(Ok(_)) => Ok(()),
+            _ => Err("in-process MCP late startup service cleanup failed or timed out".into()),
+        },
+    }
+}
+
+async fn write_initialized<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    tokio::time::timeout(timeout, async {
+        writer
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .map_err(|_| "in-process MCP initialized notification write failed".to_string())?;
+        writer
+            .flush()
+            .await
+            .map_err(|_| "in-process MCP initialized notification flush failed".to_string())
+    })
+    .await
+    .map_err(|_| "in-process MCP initialized notification timed out".to_string())?
+}
+
+async fn cleanup_with_deadline<T>(
+    cleanup: impl std::future::Future<Output = T>,
+    timeout: std::time::Duration,
+) -> Result<T, String> {
+    tokio::time::timeout(timeout, cleanup)
+        .await
+        .map_err(|_| "in-process MCP service cleanup timed out".to_string())
+}
+
+async fn exchange_json<R, W>(
+    writer: &mut W,
+    reader: &mut tokio::io::BufReader<R>,
+    request: serde_json::Value,
+    timeout: std::time::Duration,
+    max_response_bytes: usize,
+) -> Result<serde_json::Value, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let expected_id = request
+        .get("id")
+        .filter(|id| !id.is_null())
+        .cloned()
+        .ok_or_else(|| "in-process MCP request lacks an id".to_string())?;
+    let mut line = serde_json::to_vec(&request)
+        .map_err(|_| "in-process MCP request could not be encoded".to_string())?;
+    if line.len() >= max_response_bytes {
+        return Err("in-process MCP request exceeded the byte limit".into());
+    }
+    line.push(b'\n');
+    tokio::time::timeout(timeout, async {
+        writer
+            .write_all(&line)
+            .await
+            .map_err(|_| "in-process MCP request could not be written".to_string())?;
+        writer
+            .flush()
+            .await
+            .map_err(|_| "in-process MCP request could not be flushed".to_string())?;
+        let response = read_bounded_json_line(reader, max_response_bytes).await?;
+        let response: serde_json::Value = serde_json::from_slice(&response)
+            .map_err(|_| "in-process MCP response was invalid JSON".to_string())?;
+        validate_rpc_response(response, &expected_id)
+    })
+    .await
+    .map_err(|_| "in-process MCP request timed out".to_string())?
+}
+
+async fn read_bounded_json_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncBufReadExt;
+    let mut line = Vec::with_capacity(max_bytes.min(4096));
+    loop {
+        let (count, ended) = {
+            let available = reader
+                .fill_buf()
+                .await
+                .map_err(|_| "in-process MCP response read failed".to_string())?;
+            if available.is_empty() {
+                return Err("in-process MCP response ended before newline".into());
+            }
+            let count = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |position| position + 1);
+            if line.len().saturating_add(count) > max_bytes {
+                return Err("in-process MCP response exceeded the byte limit".into());
+            }
+            let ended = available[count - 1] == b'\n';
+            line.extend_from_slice(&available[..count]);
+            (count, ended)
+        };
+        reader.consume(count);
+        if ended {
+            return Ok(line);
+        }
+    }
+}
+
+fn validate_rpc_response(
+    response: serde_json::Value,
+    expected_id: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if response.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+        return Err("in-process MCP response has an invalid jsonrpc version".into());
+    }
+    if response.get("id") != Some(expected_id) {
+        return Err("in-process MCP response id did not match the request".into());
+    }
+    let result = response.get("result").is_some();
+    let error = response.get("error").is_some();
+    if result == error {
+        return Err("in-process MCP response must contain exactly one result or error".into());
+    }
+    if let Some(error) = response.get("error") {
+        if !error.get("code").is_some_and(serde_json::Value::is_number)
+            || !error
+                .get("message")
+                .is_some_and(serde_json::Value::is_string)
+        {
+            return Err("in-process MCP error response had an invalid shape".into());
+        }
+    }
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{doc, sorted_tool_definitions, structured_doc, tool_error};
+    use super::{
+        doc, in_process_self_test, in_process_self_test_after_startup, sorted_tool_definitions,
+        structured_doc, tool_error,
+    };
+
+    #[test]
+    fn in_process_self_test_completes_initialize_ping_and_tools_list() {
+        in_process_self_test().unwrap();
+    }
+
+    #[test]
+    fn in_process_self_test_returns_post_startup_failure_without_reawaiting_task() {
+        let error = in_process_self_test_after_startup(|| {
+            Err("injected protocol failure after server startup".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "injected protocol failure after server startup");
+    }
+
+    #[test]
+    fn in_process_server_startup_timeout_aborts_and_joins_pending_task() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (server_io, client_io) = tokio::io::duplex(64);
+            let startup = tokio::spawn(super::serve_server(super::RiltraMcp, server_io));
+            let error =
+                match super::await_server_startup(startup, std::time::Duration::from_millis(10))
+                    .await
+                {
+                    Err(error) => error,
+                    Ok(_) => panic!("uninitialized server unexpectedly completed startup"),
+                };
+            assert!(error.contains("startup timed out"));
+            drop(client_io);
+        });
+    }
+
+    #[test]
+    fn in_process_exchange_times_out_when_peer_stops_reading() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use tokio::io::BufReader;
+            let (_peer, io) = tokio::io::duplex(1);
+            let (reader, mut writer) = tokio::io::split(io);
+            let mut reader = BufReader::new(reader);
+            let error = super::exchange_json(
+                &mut writer,
+                &mut reader,
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"long":"request"}}),
+                std::time::Duration::from_millis(10),
+                1024,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("timed out"));
+        });
+    }
+
+    #[test]
+    fn in_process_response_validation_rejects_wrong_id_and_invalid_rpc_version() {
+        let id = serde_json::json!(7);
+        let wrong_id = super::validate_rpc_response(
+            serde_json::json!({"jsonrpc":"2.0","id":8,"result":{}}),
+            &id,
+        );
+        assert!(wrong_id.unwrap_err().contains("id did not match"));
+        let wrong_version = super::validate_rpc_response(
+            serde_json::json!({"jsonrpc":"1.0","id":7,"result":{}}),
+            &id,
+        );
+        assert!(wrong_version.unwrap_err().contains("jsonrpc version"));
+        let malformed_error = super::validate_rpc_response(
+            serde_json::json!({"jsonrpc":"2.0","id":7,"error":{"message":"bad"}}),
+            &id,
+        );
+        assert!(malformed_error.unwrap_err().contains("invalid shape"));
+    }
+
+    #[test]
+    fn in_process_response_reader_rejects_oversized_line_with_bounded_buffer() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use tokio::io::{AsyncWriteExt, BufReader};
+            let (mut peer, io) = tokio::io::duplex(128);
+            let (reader, _writer) = tokio::io::split(io);
+            let mut reader = BufReader::new(reader);
+            let send = tokio::spawn(async move {
+                peer.write_all(&[b'x'; 128]).await.unwrap();
+            });
+            let error = super::read_bounded_json_line(&mut reader, 64)
+                .await
+                .unwrap_err();
+            assert!(error.contains("exceeded the byte limit"));
+            send.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn in_process_notification_write_and_cleanup_are_deadline_bounded() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_peer, io) = tokio::io::duplex(1);
+            let (_reader, mut writer) = tokio::io::split(io);
+            let write_error =
+                super::write_initialized(&mut writer, std::time::Duration::from_millis(10))
+                    .await
+                    .unwrap_err();
+            assert!(write_error.contains("timed out"));
+
+            let cleanup_error = super::cleanup_with_deadline(
+                std::future::pending::<()>(),
+                std::time::Duration::from_millis(10),
+            )
+            .await
+            .unwrap_err();
+            assert!(cleanup_error.contains("cleanup timed out"));
+        });
+    }
 
     #[test]
     fn packet_late_confinement_and_store_errors_keep_distinct_kinds() {

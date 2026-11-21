@@ -21,7 +21,7 @@ Start with the [quick start](#quick-start), or see the [documentation index](doc
   freshness labels.
 - See which definitions a git change touches with `riltra changes`.
 - Keep revisioned project notes and link them explicitly to source anchors.
-- Give an AI coding agent the same repository and note queries through MCP.
+- Start with a guided project overview and definition packet using `riltra start` or give an AI coding agent the same repository and note queries through MCP.
 
 Riltra shows when evidence is incomplete. Name-based call matches are
 candidates, and an `UNKNOWN` or `partial` impact result is not proof that a
@@ -79,13 +79,13 @@ Run `riltra --help` for the full command list. Git is needed for repository
 fingerprints; without it, Riltra reports that status as unavailable instead of
 guessing.
 
-## MCP server (sixteen read-only tools, one provider-backed tool)
+## MCP server (seventeen read-only tools, one provider-backed tool)
 
 <a id="mcp-server-twelve-read-only-tools-one-provider-backed-tool"></a>
 <a id="mcp-server-sixteen-read-only-tools-one-provider-backed-tool"></a>
 
-Run `riltra mcp` to start a local stdio MCP server with seventeen tools: sixteen
-read-only tools for repository, code, knowledge, and selected-anchor packets, plus
+Run `riltra mcp` to start a local stdio MCP server with eighteen tools: seventeen
+read-only tools for repository, code, knowledge, project overview, and selected-anchor packets, plus
 `riltra_code_semantic`, which starts the language server configured by the
 operator. That server may write its own cache, run project tools, or access the
 network. Riltra's MCP handlers do not create, migrate, or replace a database.

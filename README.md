@@ -37,6 +37,10 @@ change is safe. See [capabilities and limits](docs/guide/capabilities.md).
   anchors explicitly and verify source before relying on it. See the [agent
   setup guide](docs/guide/agent-setup.md#selected-anchor-packets).
 - Optional SCIP import and operator-configured language-server queries.
+- `riltra semantic setup --repo <name>` reports, read-only, the guided SCIP
+  producers and language-server settings for a repository, with the commands
+  for you to run yourself. Riltra installs and runs no provider. See the
+  [capabilities guide](docs/guide/capabilities.md#semantic-provider-setup-read-only).
 - Opt-in `riltra watch` (CLI only) rebuilds the code index after source changes.
   See the [capabilities guide](docs/guide/capabilities.md#automatic-index-updates-opt-in).
 - `riltra agent-block` prints a Markdown instruction block for your agent's

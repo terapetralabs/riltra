@@ -925,6 +925,46 @@ mod tests {
         assert_eq!(version, 99, "unsupported schema must not be migrated");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fifo_document_is_unavailable_without_blocking_collection() {
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let home = tmpdir("overview-fifo-home");
+        let root = tmpdir("overview-fifo-root");
+        fs::write(root.join("README.md"), "read me\n").unwrap();
+        let regular = collect(&home, "demo", &root).unwrap();
+        assert!(regular
+            .build_test_sources
+            .iter()
+            .any(|e| { e.path == "README.md" && e.status == EvidenceStatus::Available }));
+
+        fs::remove_file(root.join("README.md")).unwrap();
+        let fifo = root.join("README.md");
+        let status = match Command::new("mkfifo").arg(&fifo).status() {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("could not run mkfifo: {error}"),
+        };
+        assert!(status.success(), "mkfifo failed with {status}");
+
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = collect(&home, "demo", &root);
+            let _ = send.send(result);
+        });
+        let overview = receive
+            .recv_timeout(Duration::from_secs(10))
+            .expect("collect blocked while reading FIFO")
+            .unwrap();
+        assert!(overview
+            .build_test_sources
+            .iter()
+            .any(|e| { e.path == "README.md" && e.status == EvidenceStatus::Unavailable }));
+    }
+
     #[test]
     fn collect_never_uses_semantic_retrieval() {
         let home = tmpdir("overview-no-semantic-retrieval");

@@ -306,7 +306,7 @@ fn confined_read_classified_with(
         .canonicalize()
         .map_err(|e| ConfinedReadError::Io(format!("repository root unavailable: {e}")))?;
     let (candidate, _) = confined_path(&canonical_root, rel).map_err(ConfinedReadError::Path)?;
-    let meta = candidate.metadata().map_err(|e| {
+    let entry_meta = candidate.symlink_metadata().map_err(|e| {
         let message = format!("cannot stat '{rel}': {e}");
         if e.kind() == std::io::ErrorKind::NotFound {
             ConfinedReadError::NotFound(message)
@@ -314,12 +314,34 @@ fn confined_read_classified_with(
             ConfinedReadError::Io(message)
         }
     })?;
+    let meta = if entry_meta.file_type().is_symlink() {
+        candidate.metadata().map_err(|e| {
+            let message = format!("cannot stat '{rel}': {e}");
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ConfinedReadError::NotFound(message)
+            } else {
+                ConfinedReadError::Io(message)
+            }
+        })?
+    } else {
+        entry_meta
+    };
+    if !meta.is_file() {
+        return Err(ConfinedReadError::Io("not a regular file".into()));
+    }
     if meta.len() > cap_bytes {
         return Err(ConfinedReadError::Io(format!(
             "'{rel}' too large ({} bytes > {cap_bytes})",
             meta.len()
         )));
     }
+    candidate
+        .canonicalize()
+        .map_err(|e| ConfinedReadError::Io(format!("cannot resolve '{rel}': {e}")))?
+        .strip_prefix(&canonical_root)
+        .map_err(|_| {
+            ConfinedReadError::Path(format!("document path escapes repository: '{rel}'"))
+        })?;
     // The test hook models a path swap after validation and immediately before open.
     before_open();
     let mut file = std::fs::File::open(&candidate).map_err(|e| {
@@ -335,9 +357,7 @@ fn confined_read_classified_with(
         .metadata()
         .map_err(|e| ConfinedReadError::Io(format!("cannot stat opened '{rel}': {e}")))?;
     if !opened_meta.is_file() {
-        return Err(ConfinedReadError::Io(format!(
-            "'{rel}' is not a regular file"
-        )));
+        return Err(ConfinedReadError::Path("not a regular file".into()));
     }
     let resolved = candidate
         .canonicalize()
@@ -573,6 +593,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn confined_read_rejects_directories_before_open() {
+        let root = tmpdir("sem-directory-before-open");
+        std::fs::create_dir(root.join("README.md")).unwrap();
+        let before_open_called = std::cell::Cell::new(false);
+
+        let result = confined_read_classified_with(&root, "README.md", 1024, || {
+            before_open_called.set(true);
+        });
+
+        assert!(!before_open_called.get(), "directory reached the open step");
+        assert!(matches!(
+            result,
+            Err(ConfinedReadError::Io(message)) if message == "not a regular file"
+        ));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn confined_read_rejects_a_non_file_opened_after_validation() {
         let root = tmpdir("sem-opened-directory");
@@ -584,7 +622,7 @@ mod tests {
         });
         assert!(matches!(
             result,
-            Err(ConfinedReadError::Io(message)) if message.contains("not a regular file")
+            Err(ConfinedReadError::Path(message)) if message == "not a regular file"
         ));
     }
 

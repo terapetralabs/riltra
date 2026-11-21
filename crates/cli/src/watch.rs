@@ -35,6 +35,8 @@ pub struct Excluded {
 }
 
 impl Excluded {
+    // Maintainer note: the exclusion list must be updated whenever Riltra adds a new directory
+    // under RILTRA_HOME, because a build writes there and would otherwise retrigger itself.
     /// `canon_home` must already be canonical; the caller canonicalizes it once.
     pub fn new(canon_home: &Path) -> Excluded {
         Excluded {

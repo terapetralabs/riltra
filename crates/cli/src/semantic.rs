@@ -465,7 +465,7 @@ pub fn validate_doc_path(root: &Path, rel: &str) -> Result<String, String> {
         .canonicalize()
         .map_err(|e| format!("repository root unavailable: {e}"))?;
     if !paths::contains(&canonical_root, &candidate) {
-        return Err(format!("document path escapes repository: '{normalized}'"));
+        return Err(format!("document path escapes repository: '{rel}'"));
     }
     Ok(normalized)
 }

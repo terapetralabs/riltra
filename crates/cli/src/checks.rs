@@ -595,7 +595,15 @@ pub(crate) fn assemble(
     read: IndexState,
     fingerprint: &dyn Fn(&Path) -> git::GitInfo,
 ) -> Result<Report, String> {
-    assemble_at(tx, repo, structure, req, read, fingerprint, Clock::default())
+    assemble_at(
+        tx,
+        repo,
+        structure,
+        req,
+        read,
+        fingerprint,
+        Clock::default(),
+    )
 }
 
 fn assemble_at(
@@ -1943,8 +1951,8 @@ mod tests {
             .reasons
             .iter()
             .any(|x| x.basis == "name-candidate" && x.source.source_type == "definition"));
-        // Control: a file with no snapshot row gives no candidate. The brief expects
-        // anchor-unavailable here; symbol_rows joins files, so the row is not-in-index.
+        // Control: a file with no snapshot row gives no candidate. D1 gives `not-in-index`
+        // for a path with zero symbol rows (`symbol_rows` joins files), not `anchor-unavailable`.
         let s2 = structure_for(&f.root, vec![removed_file("src/other.rs", "target")]);
         let r2 = run(&mut f, &s2).unwrap();
         assert_eq!(r2.changed.definitions[0].status, "not-in-index");
@@ -2260,7 +2268,11 @@ mod tests {
         };
         let timed = run_at(&mut f, &s, clock).unwrap();
         assert_eq!(status_of(&timed, "target"), Some("time-budget"));
-        assert!(timed.test_candidates.is_empty(), "{:?}", timed.test_candidates);
+        assert!(
+            timed.test_candidates.is_empty(),
+            "{:?}",
+            timed.test_candidates
+        );
         assert!(timed
             .review_areas
             .iter()

@@ -391,7 +391,8 @@ The scopes, the `--limit` default and maximum, and the refusals are those of
 [changed definitions](#changed-definitions). The document is a suggestion. Riltra
 runs no test and no project tool, so an empty `test_candidates` list does not mean
 that no test is needed, and the project's required checks still apply. The CLI
-and the MCP tool print the same bytes.
+and the MCP tool return the same JSON document; the CLI's stdout adds one trailing
+newline.
 
 Reads and writes. The index is opened once, read-only, in one transaction. A
 missing index is reported as `no-index` and is not created. An older index schema
@@ -405,7 +406,8 @@ project tool and no test runner.
 Exit codes. `0` prints the report, including for a missing index and an unsupported
 schema. `2` is a usage error or an unknown `--base` ref. `3` is every refusal that
 `changes` gives with exit 3, an unknown repository, and a storage read error, including
-one inside a traversal. MCP answers exit 2 as `invalid_input` and exit 3 as `store_error`.
+one inside a traversal (for example a failed read of a SCIP owner mapping, which is
+never read as "no mapping"). MCP answers exit 2 as `invalid_input` and exit 3 as `store_error`.
 
 Bases. Each reason keeps its own basis. A candidate's basis is its strongest
 reason, in this order:
@@ -474,7 +476,8 @@ Each has a count and at most 20 paths, sorted, with the rest counted:
 8. `hunks-outside-definitions`: a file has a hunk outside every definition.
 9. `added-definitions`: added definitions have no indexed dependents yet.
 10. `definitions-not-analysed`: a changed definition was not analysed or was not traversed.
-11. `traversal-time-budget`: a traversal reached its time limit.
+11. `traversal-time-budget`: a traversal reached its 2,000 ms limit, or no traversal started
+    after the 10,000 ms total. Each such definition is `time-budget` and contributes nothing.
 12. `changes-truncated`: `changes` listed fewer files than it found.
 13. `no-test-candidates`: the list of test candidates is empty. An empty list is not "no test is needed".
 

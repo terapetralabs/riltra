@@ -812,8 +812,9 @@ fn doc(json_text: &str) -> CallToolResult {
 }
 
 /// Like `doc`, but the content text is the formatter's own bytes, so its key
-/// order matches the CLI stdout. Used by `riltra_code_query` only; every other
-/// tool keeps the `doc` behaviour. `structuredContent` is unchanged.
+/// order matches the CLI stdout. Used by `riltra_code_query` and by `checks_doc`
+/// (`riltra_change_checks`); every other tool keeps the `doc` behaviour.
+/// `structuredContent` is unchanged.
 fn exact_doc(json_text: &str) -> CallToolResult {
     let mut result = doc(json_text);
     // A parse failure comes back as an error result; its message text stays.

@@ -13,6 +13,7 @@ mod agent_setup;
 mod args;
 mod backup;
 mod changes;
+mod checks;
 mod concept;
 mod context;
 mod doctor;

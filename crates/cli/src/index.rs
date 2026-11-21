@@ -3296,8 +3296,7 @@ pub(crate) fn graph_query_tx_classified(
 /// already holds, so no position is resolved against the live source (which refuses
 /// the syntax fallback after any edit). Carries no destination; `request.source` is
 /// ignored.
-// shortcut: no non-test caller until the `checks` report (Task 2) uses it; remove the allow then.
-#[allow(clippy::too_many_arguments, dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn graph_query_from_anchor_tx(
     tx: &rusqlite::Transaction<'_>,
     name: &str,
@@ -3318,8 +3317,6 @@ pub(crate) fn graph_query_from_anchor_tx(
 /// The anchor of one snapshot definition, built from its index row. It reads
 /// nothing, so it stays valid after the live file changed. Not a position query:
 /// `line1`/`col1` are 0 and must never be printed.
-// shortcut: no non-test caller until the `checks` report (Task 2) uses it; remove the allow then.
-#[allow(dead_code)]
 pub(crate) fn snapshot_def_anchor(
     path: &str,
     name: &str,

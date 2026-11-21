@@ -357,7 +357,7 @@ fn confined_read_classified_with(
         .metadata()
         .map_err(|e| ConfinedReadError::Io(format!("cannot stat opened '{rel}': {e}")))?;
     if !opened_meta.is_file() {
-        return Err(ConfinedReadError::Path("not a regular file".into()));
+        return Err(ConfinedReadError::Io("not a regular file".into()));
     }
     let resolved = candidate
         .canonicalize()
@@ -619,19 +619,23 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn confined_read_rejects_a_non_file_opened_after_validation() {
         let root = tmpdir("sem-opened-directory");
         let document = root.join("README.md");
         std::fs::write(&document, "ordinary file").unwrap();
-        let result = confined_read_classified_with(&root, "README.md", 1024, || {
+        let control = confined_read_classified_with(&root, "README.md", 1024, || {}).unwrap();
+        assert_eq!(control, b"ordinary file");
+        let error = confined_read_classified_with(&root, "README.md", 1024, || {
             std::fs::remove_file(&document).unwrap();
             std::fs::create_dir(&document).unwrap();
-        });
-        assert!(matches!(
-            result,
-            Err(ConfinedReadError::Path(message)) if message == "not a regular file"
-        ));
+        })
+        .unwrap_err();
+        assert!(matches!(error, ConfinedReadError::Io(_)));
+        // On Windows, File::open rejects a directory inside the open step, so only the
+        // unix run reaches the post-open "not a regular file" branch.
+        if cfg!(unix) {
+            assert_eq!(error.into_message(), "not a regular file");
+        }
     }
 
     #[test]

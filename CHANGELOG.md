@@ -6,6 +6,15 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Added
 
+- `checks` (CLI) and MCP tool `riltra_change_checks`: test candidates and coverage limits
+  for one git change, as one read-only JSON document. Each candidate and each reason carries
+  its basis (`proven-edge`, `unproven-edge`, `name-candidate`, `path-convention`), and quoted
+  instructions from the repository's instruction files are marked `explicit-instruction`.
+  It lists the coverage limits that bound the answer, such as a stale index, a withheld graph
+  proof, or files riltra does not parse. Riltra runs no test, and an empty list does not mean
+  no test is needed. The index is opened read-only and nothing is created or migrated; with no
+  index the answer names `no-index`. See [capabilities](docs/guide/capabilities.md#change-checks-read-only).
+
 - `map` (CLI) and MCP tool `riltra_project_map`: a read-only area map of one indexed
   snapshot. It groups files by directory and lists entry points, hubs, proven links
   between areas, name-match candidates and up to three bounded static flows, with the

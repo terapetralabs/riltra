@@ -4,7 +4,8 @@
 //! callees, trace, impact); CP5 adds the knowledge tools (search, show,
 //! related); CP6 adds the composed `riltra_health` tool. The overview tool
 //! completed the design-gate inventory (§3) at eighteen tools, and the area
-//! map (`riltra_project_map`) makes it nineteen, through the rmcp tool macros.
+//! map (`riltra_project_map`) makes it nineteen, and the change checks tool
+//! (`riltra_change_checks`) makes it twenty, through the rmcp tool macros.
 //! Tool calls reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
 //! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
@@ -25,6 +26,7 @@ use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
 use crate::changes;
+use crate::checks;
 #[cfg(feature = "semantic-knowledge")]
 use crate::json;
 use crate::knowledge_store_absent;
@@ -535,6 +537,23 @@ impl RiltraMcp {
     }
 
     #[tool(
+        name = "riltra_change_checks",
+        description = "Test candidates and coverage limits for one git change (same document as CLI `checks`): the test files a change may affect, each with the reasons that name it, the changed definitions and review areas, quoted verification instructions found in the repository, and the limits that bound the answer. Each candidate carries one basis: `proven-edge`, `unproven-edge`, `name-candidate` or `path-convention`; quoted instructions are marked `explicit-instruction`. Riltra runs no test, and an empty `test_candidates` list does not mean no test is needed. The project's required checks still apply. When to call: after a change, to choose which tests and areas to check before running the project's required suite.",
+        annotations(
+            title = "Test candidates and coverage limits",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_change_checks(
+        &self,
+        Parameters(input): Parameters<ChecksInput>,
+    ) -> CallToolResult {
+        blocking(move || checks_doc(&input)).await
+    }
+
+    #[tool(
         name = "riltra_code_callees",
         description = "Symbols the anchor definition calls (same document as CLI `callees`). A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to see what a function or method appears to depend on.",
         annotations(
@@ -1010,6 +1029,42 @@ fn changes_doc(input: &ChangesInput) -> CallToolResult {
     };
     match changes::document(&home, &input.repo, &canon, &req) {
         Ok(text) => doc(&text),
+        Err(failure) if failure.code == 2 => tool_error("invalid_input", &failure.message),
+        Err(failure) => tool_error("store_error", &failure.message),
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct ChecksInput {
+    /// Registered repository name.
+    repo: String,
+    /// `unstaged` (index to worktree), `staged` (HEAD to index), `all` (HEAD to worktree) or `compare` (`base` to worktree). Default `all`.
+    scope: Option<String>,
+    /// Git ref to compare with. Required for scope `compare`, refused otherwise.
+    base: Option<String>,
+    /// Maximum changed files listed (default 50, range 1 to 1000).
+    limit: Option<usize>,
+}
+
+fn checks_doc(input: &ChecksInput) -> CallToolResult {
+    let req = match changes::request(
+        input.scope.as_deref().unwrap_or("all"),
+        input.base.as_deref(),
+        input.limit.unwrap_or(changes::DEFAULT_LIMIT),
+    ) {
+        Ok(req) => req,
+        Err(e) => return tool_error("invalid_input", &e),
+    };
+    // The same record check as the other repository tools: a moved or retargeted root is refused.
+    let (home, canon) = match repo_root(&input.repo) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match checks::document(&home, &input.repo, &canon, &req) {
+        // The formatter's own bytes, so the text equals the CLI stdout.
+        Ok(text) => exact_doc(&text),
         Err(failure) if failure.code == 2 => tool_error("invalid_input", &failure.message),
         Err(failure) => tool_error("store_error", &failure.message),
     }
@@ -2341,6 +2396,7 @@ fn health_doc() -> CallToolResult {
             "network": true,
             "knowledge_schema_v1_readable": true,
             "tools": [
+                "riltra_change_checks",
                 "riltra_code_callees",
                 "riltra_code_callers",
                 "riltra_code_changes",

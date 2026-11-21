@@ -223,7 +223,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_nineteen_tools() {
+fn mcp_tools_list_advertises_the_twenty_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -238,6 +238,7 @@ fn mcp_tools_list_advertises_the_nineteen_tools() {
     assert_eq!(
         names,
         [
+            "riltra_change_checks",
             "riltra_code_callees",
             "riltra_code_callers",
             "riltra_code_changes",
@@ -258,7 +259,7 @@ fn mcp_tools_list_advertises_the_nineteen_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the nineteen tools"
+        "the server advertises exactly the twenty tools"
     );
     let code_search_tool = tools
         .iter()
@@ -355,6 +356,7 @@ fn mcp_tools_list_advertises_the_nineteen_tools() {
     );
     // Every tool with inputs rejects unsupported fields.
     for name in [
+        "riltra_change_checks",
         "riltra_code_callees",
         "riltra_code_callers",
         "riltra_code_changes",
@@ -896,6 +898,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
     assert_eq!(
         health_tools,
         [
+            "riltra_change_checks",
             "riltra_code_callees",
             "riltra_code_callers",
             "riltra_code_changes",
@@ -916,7 +919,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the nineteen tools"
+        "the health document must list the twenty tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -6999,6 +7002,131 @@ fn mcp_code_changes_refuses_a_registry_record_retargeted_to_a_link() {
     assert_eq!(code, 0);
 }
 
+const CHECKS_CALC: &str = "def add(a, b):\n    return a + b\n";
+/// The body of `add` changes; its definition starts on the same line.
+const CHECKS_CALC_EDITED: &str = "def add(a, b):\n    total = a + b\n    return total\n";
+const CHECKS_TEST: &str =
+    "from pkg.calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n";
+
+/// A committed repository (`pkg/calc.py` defines `add`, `tests/test_calc.py` calls it), registered
+/// as `r` in a fresh home. The index is built before the edit when `index` is set, so the
+/// definition is stale afterwards. Returns the home.
+fn change_checks_fixture(tag: &str, index: bool) -> PathBuf {
+    let h = home(tag);
+    let dir = home(&format!("{tag}-repo"));
+    std::fs::create_dir_all(dir.join("pkg")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main", "."]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["config", "core.autocrlf", "false"]);
+    std::fs::write(dir.join("pkg/calc.py"), CHECKS_CALC).unwrap();
+    std::fs::write(dir.join("tests/test_calc.py"), CHECKS_TEST).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    if index {
+        indexed_repo(&h, &dir, "r");
+    } else {
+        init_repo(&h, &dir, "r");
+    }
+    std::fs::write(dir.join("pkg/calc.py"), CHECKS_CALC_EDITED).unwrap();
+    h
+}
+
+#[test]
+fn change_checks_mcp_matches_cli_document() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = change_checks_fixture("cc-cli", true);
+    let (code, out, err) = run_cli(&h, &["checks", "--repo", "r"]);
+    assert_eq!(code, 0, "{err}");
+
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_change_checks", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("tool content text");
+    assert_eq!(
+        text,
+        out.trim_end_matches('\n'),
+        "the MCP text must equal the CLI stdout byte for byte"
+    );
+    let d = doc(&result);
+    assert_eq!(d["index_freshness"]["status"], "stale", "{d}");
+    assert!(
+        d["test_candidates"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "the calling test is a candidate: {d}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn change_checks_mcp_no_index_is_read_only() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = change_checks_fixture("cc-no-index", false);
+    let before = listing(&h);
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_change_checks", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    let d = doc(&result);
+    assert_eq!(d["index_freshness"]["status"], "no-index", "{d}");
+    assert!(d["snapshot"].is_null(), "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(
+        listing(&h),
+        before,
+        "a change-checks call must not create or modify storage"
+    );
+    assert!(!h.join("index").join("r.db").exists());
+}
+
+#[test]
+fn change_checks_mcp_rejects_unknown_field() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = change_checks_fixture("cc-unknown", false);
+    let mut s = ready(&h);
+    s.send(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "riltra_change_checks", "arguments": {"repo": "r", "x": 1}}
+        })
+        .to_string(),
+    );
+    let v = s.recv();
+    // The refusal is the schema layer's (`deny_unknown_fields`), not "tool not found".
+    assert!(
+        is_error(&v["result"]),
+        "an unknown field must be refused: {v}"
+    );
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("unknown field `x`"), "{v}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
 /// Whether git is installed; without it the test skips, with a printed message.
 fn git_or_skip() -> bool {
     let present = std::process::Command::new("git")
@@ -7282,7 +7410,7 @@ fn code_query_refuses_outdated_and_newer_databases_with_their_own_kinds() {
 }
 
 #[test]
-fn mcp_tools_list_2026_07_28_advertises_nineteen_tools_with_cache_hints() {
+fn mcp_tools_list_2026_07_28_advertises_twenty_tools_with_cache_hints() {
     let h = home("tools-list-modern");
     let mut legacy = ready(&h);
     legacy.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -7292,7 +7420,7 @@ fn mcp_tools_list_2026_07_28_advertises_nineteen_tools_with_cache_hints() {
     let result = modern_request(&mut modern, 3, "tools/list", json!({}));
     assert_eq!(result["ttlMs"], 0);
     assert_eq!(result["cacheScope"], "public");
-    assert_eq!(result["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(result["tools"].as_array().unwrap().len(), 20);
     assert_eq!(result["tools"], legacy_result["tools"]);
     let (code, _) = modern.finish();
     assert_eq!(code, 0);

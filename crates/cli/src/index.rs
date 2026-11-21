@@ -1048,6 +1048,29 @@ pub fn semantic_import(
     }
 }
 
+/// Read-only semantic state of one repository's live snapshot.
+// shortcut: no caller until `riltra semantic setup` (next task); drop this allow with that caller.
+#[allow(dead_code)]
+pub struct SemanticState {
+    pub snapshot: Option<store::Snapshot>,
+    /// Snapshot-wide source verdict (`fresh` or `stale`); `None` without a snapshot.
+    pub freshness: Option<String>,
+    /// Named reasons behind a `stale` verdict; empty when fresh or absent.
+    pub reasons: Vec<String>,
+    pub rows: Vec<SemanticStatusRow>,
+}
+
+/// What the provider setup flow can see of the index, without writing to it.
+// shortcut: no caller until `riltra semantic setup` (next task); drop this allow with that caller.
+// The Ready variant is large by design: the brief fixes its payload type.
+#[allow(dead_code, clippy::large_enum_variant)]
+pub enum SetupIndex {
+    NoIndex,
+    SchemaOutdated(u32),
+    SchemaAhead(u32),
+    Ready(SemanticState),
+}
+
 pub struct SemanticStatusRow {
     pub import_id: i64,
     pub provider_name: String,
@@ -1072,18 +1095,52 @@ pub fn semantic_status(
     let canon = canonical_repo_root(root)?;
     let db = store::db_path(home, name);
     let mut conn = store::open_live(&db)?;
+    let state = semantic_status_on(&mut conn, name, &canon)?;
+    Ok((state.snapshot, state.rows))
+}
+
+/// Read-only semantic state for the provider setup flow. Opens the database
+/// with `open_read`: a missing, outdated or newer database is reported, never
+/// created or migrated.
+#[allow(dead_code)] // shortcut: see SetupIndex; drop with its first caller.
+pub fn semantic_setup_state(home: &Path, name: &str, root: &Path) -> Result<SetupIndex, String> {
+    let canon = canonical_repo_root(root)?;
+    let db = store::db_path(home, name);
+    match store::open_read(&db) {
+        store::IndexRead::Missing => Ok(SetupIndex::NoIndex),
+        store::IndexRead::Outdated(v) => Ok(SetupIndex::SchemaOutdated(v)),
+        store::IndexRead::Ahead(v) => Ok(SetupIndex::SchemaAhead(v)),
+        store::IndexRead::Error(e) => Err(e),
+        store::IndexRead::Ready(mut conn) => Ok(SetupIndex::Ready(semantic_status_on(
+            &mut conn, name, &canon,
+        )?)),
+    }
+}
+
+/// Shared body of `semantic_status` and `semantic_setup_state`: one read
+/// transaction on the given connection, no writes.
+pub fn semantic_status_on(
+    conn: &mut rusqlite::Connection,
+    name: &str,
+    canon: &Path,
+) -> Result<SemanticState, String> {
     // One read transaction across snapshot, facts, imports, nonce, and the
     // freshness verdict: every answer describes exactly one revision, even
     // if a rebuild or import commits mid-query (WAL snapshot isolation).
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let latest = store::latest_snapshot(&tx)?;
     let Some(snapshot) = latest else {
-        return Ok((None, Vec::new()));
+        return Ok(SemanticState {
+            snapshot: None,
+            freshness: None,
+            reasons: Vec::new(),
+            rows: Vec::new(),
+        });
     };
     // Source freshness from the M3-M4 evaluator on the same transaction:
     // a source that moved after the snapshot (no rebuild yet) downgrades
     // every import to Stale instead of serving old rows as matching.
-    let (source_status, _) = evaluate_snapshot(&tx, name, &canon, &snapshot);
+    let (source_status, reasons) = evaluate_snapshot(&tx, name, canon, &snapshot);
     let source_fresh = source_status == "fresh";
     let live = live_state_for(&tx, &snapshot)?;
     let mut rows = Vec::new();
@@ -1091,7 +1148,7 @@ pub fn semantic_status(
         let bound = crate::semantic::verify_live(&import, &live);
         // Import-granular drift: this import's own covered files moved, even
         // where the snapshot-wide freshness is blind (unindexed documents).
-        let drifted = import_source_changed(&tx, snapshot.id, id, &canon)?;
+        let drifted = import_source_changed(&tx, snapshot.id, id, canon)?;
         let verification = if source_fresh && !drifted {
             bound
         } else {
@@ -1117,7 +1174,12 @@ pub fn semantic_status(
             limitation,
         });
     }
-    Ok((Some(snapshot), rows))
+    Ok(SemanticState {
+        snapshot: Some(snapshot),
+        freshness: Some(source_status),
+        reasons,
+        rows,
+    })
 }
 
 pub struct SemanticHit {
@@ -7641,5 +7703,233 @@ class Box :
                 candidates: None
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod setup_state_tests {
+    use super::{build_full, semantic_import, semantic_setup_state, SetupIndex};
+    use crate::store;
+    use crate::testutil::tmpdir;
+    use rusqlite::{Connection, OpenFlags};
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
+
+    // Minimal SCIP encoder for the fields the importer reads.
+    // Field numbers as pinned by scip.proto (same layout as the edges tests).
+
+    fn varint(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let low = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(low);
+                return;
+            }
+            out.push(low | 0x80);
+        }
+    }
+
+    fn tag(field: u32, wire: u64, out: &mut Vec<u8>) {
+        varint((u64::from(field) << 3) | wire, out);
+    }
+
+    fn len_field(field: u32, bytes: &[u8], out: &mut Vec<u8>) {
+        tag(field, 2, out);
+        varint(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    fn str_field(field: u32, value: &str, out: &mut Vec<u8>) {
+        len_field(field, value.as_bytes(), out);
+    }
+
+    fn varint_field(field: u32, value: u64, out: &mut Vec<u8>) {
+        tag(field, 0, out);
+        varint(value, out);
+    }
+
+    const TARGET: &str = "scip-test test test-pkg 1.0.0 lib.py/target().";
+
+    /// One definition of `target` on line 0 of `lib.py`, columns 4..10,
+    /// written to `home/index.scip` (outside the indexed repository).
+    fn definition_scip(home: &Path, repo: &Path) -> PathBuf {
+        let mut range = Vec::new();
+        varint_field(1, 0, &mut range);
+        varint_field(2, 4, &mut range);
+        varint_field(3, 10, &mut range);
+        let mut occurrence = Vec::new();
+        str_field(2, TARGET, &mut occurrence);
+        varint_field(3, 1, &mut occurrence); // Definition role
+        len_field(8, &range, &mut occurrence);
+        let mut symbol = Vec::new();
+        str_field(1, TARGET, &mut symbol);
+        str_field(6, "target", &mut symbol);
+        let mut document = Vec::new();
+        str_field(1, "lib.py", &mut document);
+        len_field(2, &occurrence, &mut document);
+        len_field(3, &symbol, &mut document);
+        varint_field(6, 1, &mut document); // UTF-8
+        let mut tool = Vec::new();
+        str_field(1, "scip-test", &mut tool);
+        str_field(2, "1.0", &mut tool);
+        let root = repo.to_string_lossy().replace(char::from(92), "/");
+        let mut metadata = Vec::new();
+        len_field(2, &tool, &mut metadata);
+        str_field(3, &format!("file://{root}"), &mut metadata);
+        varint_field(4, 1, &mut metadata);
+        let mut index = Vec::new();
+        len_field(1, &metadata, &mut index);
+        len_field(2, &document, &mut index);
+        let scip = home.join("index.scip");
+        std::fs::write(&scip, index).unwrap();
+        scip
+    }
+
+    /// A repository with one Python file, fully indexed. Returns (home, repo).
+    fn indexed_repo(tag: &str) -> (PathBuf, PathBuf) {
+        let home = tmpdir(&format!("setup-{tag}-home"));
+        let repo = tmpdir(&format!("setup-{tag}-repo"));
+        std::fs::write(repo.join("lib.py"), "def target():\n    return 1\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        (home, repo)
+    }
+
+    /// `indexed_repo` plus one SCIP import bound to the live snapshot.
+    fn imported_repo(tag: &str) -> (PathBuf, PathBuf) {
+        let (home, repo) = indexed_repo(tag);
+        let scip = definition_scip(&home, &repo);
+        semantic_import(&home, "r", &repo, &scip, None).unwrap();
+        (home, repo)
+    }
+
+    /// Every file under `dir` as (relative path, length, mtime), sorted.
+    fn listing(dir: &Path) -> Vec<(String, u64, SystemTime)> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, u64, SystemTime)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let meta = entry.metadata().unwrap();
+                if meta.is_dir() {
+                    walk(base, &path, out);
+                } else {
+                    let rel = path
+                        .strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    out.push((rel, meta.len(), meta.modified().unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Names present in only one of the two listings.
+    fn changed(
+        before: &[(String, u64, SystemTime)],
+        after: &[(String, u64, SystemTime)],
+    ) -> Vec<String> {
+        let mut names: Vec<String> = before
+            .iter()
+            .filter(|e| !after.contains(e))
+            .chain(after.iter().filter(|e| !before.contains(e)))
+            .map(|e| e.0.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    #[test]
+    fn setup_state_missing_index_creates_nothing() {
+        let home = tmpdir("setup-missing-home");
+        let repo = tmpdir("setup-missing-repo");
+        let state = semantic_setup_state(&home, "r", &repo).unwrap();
+        assert!(matches!(state, SetupIndex::NoIndex));
+        assert!(!store::db_path(&home, "r").exists());
+    }
+
+    #[test]
+    fn setup_state_does_not_migrate_outdated_schema() {
+        let (home, repo) = indexed_repo("setup-outdated");
+        let db = store::db_path(&home, "r");
+        {
+            let writer = Connection::open(&db).unwrap();
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA user_version = {};",
+                    store::SCHEMA_VERSION - 1
+                ))
+                .unwrap();
+        }
+        let before = listing(&home);
+        let state = semantic_setup_state(&home, "r", &repo).unwrap();
+        assert!(matches!(state, SetupIndex::SchemaOutdated(v) if v == store::SCHEMA_VERSION - 1));
+        let version: i64 = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, i64::from(store::SCHEMA_VERSION - 1));
+        // The database file keeps its length and mtime; only WAL sidecars may appear.
+        for name in changed(&before, &listing(&home)) {
+            assert!(
+                name.ends_with("-wal") || name.ends_with("-shm"),
+                "unexpected write: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_state_writes_only_wal_sidecars() {
+        let (home, repo) = indexed_repo("setup-wal");
+        let registry = home.join("registry.json");
+        std::fs::write(&registry, "{\"repos\":[]}").unwrap();
+        let registry_before = std::fs::read(&registry).unwrap();
+        let before = listing(&home);
+        let state = semantic_setup_state(&home, "r", &repo).unwrap();
+        assert!(matches!(state, SetupIndex::Ready(_)));
+        for name in changed(&before, &listing(&home)) {
+            assert!(
+                name.ends_with("-wal") || name.ends_with("-shm"),
+                "unexpected write: {name}"
+            );
+        }
+        assert_eq!(std::fs::read(&registry).unwrap(), registry_before);
+    }
+
+    #[test]
+    fn setup_state_ready_reports_import_and_freshness() {
+        let (home, repo) = imported_repo("setup-ready");
+        let SetupIndex::Ready(state) = semantic_setup_state(&home, "r", &repo).unwrap() else {
+            panic!("expected Ready");
+        };
+        assert!(state.snapshot.is_some());
+        assert_eq!(state.freshness.as_deref(), Some("fresh"));
+        assert!(state.reasons.is_empty(), "{:?}", state.reasons);
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].verification, "Unverified");
+    }
+
+    #[test]
+    fn setup_state_stale_after_edit() {
+        use std::io::Write;
+        let (home, repo) = imported_repo("setup-stale");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(repo.join("lib.py"))
+            .unwrap();
+        writeln!(file, "# edited").unwrap();
+        drop(file);
+        let SetupIndex::Ready(state) = semantic_setup_state(&home, "r", &repo).unwrap() else {
+            panic!("expected Ready");
+        };
+        assert_eq!(state.freshness.as_deref(), Some("stale"));
+        assert!(!state.reasons.is_empty());
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].verification, "Stale");
     }
 }

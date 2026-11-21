@@ -39,6 +39,8 @@ mod packet;
 mod packet_source;
 mod paths;
 mod progress;
+#[allow(dead_code)] // shortcut: unused until Task 3 wires semantic setup, remove then
+mod provider_setup;
 mod registry;
 mod response;
 mod scan;

@@ -76,6 +76,59 @@ pub fn contains(canonical_root: &Path, candidate: &Path) -> bool {
     }
 }
 
+/// First regular file named `name` plus one of `exts`, searched in `dirs` in
+/// order (each location tries every extension). Only existence is checked;
+/// nothing is executed.
+pub fn find_executable_in(name: &str, dirs: &[PathBuf], exts: &[&str]) -> Option<PathBuf> {
+    dirs.iter().find_map(|dir| {
+        exts.iter()
+            .map(|ext| dir.join(format!("{name}{ext}")))
+            .find(|candidate| is_regular_file(candidate))
+            .or_else(|| {
+                if cfg!(windows) {
+                    case_insensitive_match(dir, name, exts)
+                } else {
+                    None
+                }
+            })
+    })
+}
+
+/// True when `path` resolves to a regular file (existence only, never opened).
+pub fn is_regular_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
+
+/// Windows fallback for directories whose entry names differ only in case
+/// from the requested name (exact candidates were already tried).
+fn case_insensitive_match(dir: &Path, name: &str, exts: &[&str]) -> Option<PathBuf> {
+    let entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    exts.iter().find_map(|ext| {
+        let wanted = format!("{name}{ext}").to_ascii_lowercase();
+        entries
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|f| f.to_string_lossy().to_ascii_lowercase() == wanted)
+                    && is_regular_file(path)
+            })
+            .cloned()
+    })
+}
+
+/// Directories listed in `PATH`, in order.
+pub fn path_dirs() -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default()
+}
+
 /// Registry keys are plain names: no separators, dots, controls, or empties.
 pub fn validate_name(name: &str) -> bool {
     !(name.is_empty()
@@ -90,7 +143,7 @@ pub fn validate_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_root, config_dir_from, contains, validate_name};
+    use super::{canonical_root, config_dir_from, contains, find_executable_in, validate_name};
     use crate::testutil::tmpdir;
 
     #[test]
@@ -156,5 +209,68 @@ mod tests {
         assert!(!validate_name("../evil"));
         assert!(!validate_name("a/b"));
         assert!(!validate_name("a\\b"));
+    }
+
+    fn touch(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+
+    #[test]
+    fn find_executable_in_takes_first_match_in_dir_order() {
+        let a = tmpdir("exe-order-a");
+        let b = tmpdir("exe-order-b");
+        touch(&a.join("tool"));
+        touch(&b.join("tool"));
+        let found = find_executable_in("tool", &[b.clone(), a], &[""]);
+        assert_eq!(found, Some(b.join("tool")));
+    }
+
+    #[test]
+    fn find_executable_in_ignores_directories() {
+        let a = tmpdir("exe-dir-a");
+        let b = tmpdir("exe-dir-b");
+        std::fs::create_dir_all(a.join("tool")).unwrap();
+        touch(&b.join("tool"));
+        let found = find_executable_in("tool", &[a, b.clone()], &[""]);
+        assert_eq!(found, Some(b.join("tool")));
+    }
+
+    #[test]
+    fn find_executable_in_tries_extensions_in_order() {
+        let dir = tmpdir("exe-ext");
+        touch(&dir.join("tool.cmd"));
+        let dirs = std::slice::from_ref(&dir);
+        assert_eq!(
+            find_executable_in("tool", dirs, &["", ".exe", ".cmd"]),
+            Some(dir.join("tool.cmd"))
+        );
+        assert_eq!(find_executable_in("tool", dirs, &["", ".exe"]), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_executable_in_matches_windows_names_case_insensitively() {
+        let dir = tmpdir("exe-win-case");
+        touch(&dir.join("Rust-Analyzer.EXE"));
+        let found = find_executable_in("rust-analyzer", std::slice::from_ref(&dir), &["", ".exe"])
+            .expect("case-insensitive match");
+        let name = found.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.eq_ignore_ascii_case("rust-analyzer.exe"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_executable_in_is_case_sensitive_on_unix() {
+        let dir = tmpdir("exe-unix-case");
+        touch(&dir.join("Rust-Analyzer"));
+        // macOS APFS is case-insensitive by default; there the filesystem itself matches.
+        if dir.join("rust-analyzer").exists() {
+            return;
+        }
+        assert_eq!(
+            find_executable_in("rust-analyzer", std::slice::from_ref(&dir), &[""]),
+            None
+        );
     }
 }

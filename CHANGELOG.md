@@ -25,6 +25,12 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   25 in total. Expansion is implemented and tested on fixtures; its effect on ranking is not
   measured. See the [agent setup guide](docs/guide/agent-setup.md#opt-in-expansion).
 
+- `semantic setup --repo <name> [--lsp-server <abs-path>]` (CLI): prints a read-only provider
+  setup report as JSON, one entry per language in the repository. It installs and runs no
+  provider or language server; its only subprocess is the read-only git check that
+  `index status` also runs. It does not create or migrate the index and changes no schema. See
+  [capabilities](docs/guide/capabilities.md#semantic-provider-setup-read-only).
+
 - `context` (CLI and MCP `riltra_context`) appends four read-only sections: `containment`
   (enclosing scopes and direct members), `heritage` (declared supertypes, name-matched
   implementations and subtypes), `imports` (file imports and importers, with an unresolved

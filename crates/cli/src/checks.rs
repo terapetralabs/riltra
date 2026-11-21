@@ -1851,16 +1851,41 @@ mod tests {
             find(&ok, "tests/test_main.py").unwrap().basis,
             "proven-edge"
         );
-        // Fault: the SCIP owner lookup names this index (INDEXED BY), so dropping
-        // it is a storage error inside the traversal, which must fail the report.
         // Fault: the stored edges are read only by the D2 traversal (D0 and D1 read
         // snapshots, meta, files, symbols and imports), so a missing table is a
-        // storage error inside D2. Dropping idx_semfacts_span does not propagate:
-        // the SCIP owner read inside the traversal swallows its own errors.
+        // storage error inside D2. The SCIP owner index fault has its own test.
         let second = rusqlite::Connection::open(store::db_path(&f.home, "r")).unwrap();
         second.execute_batch("DROP TABLE code_edges").unwrap();
         drop(second);
         let err = run(&mut f, &s).expect_err("a storage error inside D2 must fail the report");
         assert!(err.contains("code_edges"), "{err}");
+    }
+
+    #[test]
+    fn scip_owner_lookup_error_propagates() {
+        let mut f = scip_fixture("checks-owner-error");
+        let s = structure_for(
+            &f.root,
+            vec![modified(
+                "crates/b/lib.py",
+                Some("python"),
+                vec![def_row("crates/b/lib.py", "target", "function", "modified")],
+            )],
+        );
+        // Control: the intact index maps the SCIP owner, so the caller is a proven candidate.
+        let ok = run(&mut f, &s).unwrap();
+        assert_eq!(
+            find(&ok, "tests/test_main.py").unwrap().basis,
+            "proven-edge"
+        );
+        // Fault: the owner query names this index (INDEXED BY). A failed owner read is a
+        // storage error inside the traversal, so the report must fail, not omit the owner.
+        let second = rusqlite::Connection::open(store::db_path(&f.home, "r")).unwrap();
+        second
+            .execute_batch("DROP INDEX idx_semfacts_span")
+            .unwrap();
+        drop(second);
+        let err = run(&mut f, &s).expect_err("a failed SCIP owner read must fail the report");
+        assert!(err.contains("idx_semfacts_span"), "{err}");
     }
 }

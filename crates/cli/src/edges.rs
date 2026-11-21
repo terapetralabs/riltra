@@ -1286,7 +1286,7 @@ fn trace_node(
         if scope.is_some_and(|want| want != id) || !import_provenance_ok(&import) {
             continue;
         }
-        if let Some(mapped) = owner_scip(conn, snapshot_id, id, &owner, path, &digest) {
+        if let Some(mapped) = owner_scip_checked(conn, snapshot_id, id, &owner, path, &digest)? {
             if !candidates.iter().any(|old| unify(old, &mapped)) {
                 candidates.push(mapped);
             }

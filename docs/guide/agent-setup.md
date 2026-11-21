@@ -87,6 +87,8 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 
 The MCP tools cannot write. Decisions and their bindings to code are recorded with the CLI (`riltra knowledge ...`, see the [README](../../README.md#available-today)).
 
+To choose where to look before tracing a feature across components, an agent may call `riltra_project_map` for the area map, then `riltra_code_trace` for per-hop evidence.
+
 ## Selected-anchor packets
 
 Use a packet after search or query has shown which anchors matter. Select one to

@@ -1207,6 +1207,24 @@ fn scip_imported(h: &Path) -> PathBuf {
 }
 
 #[test]
+fn cli_map_counts_scip_edges() {
+    let h = home("map-scip");
+    scip_imported(&h);
+    let (code, out, err) = run(&h, &["map", "--repo", "sem", "--depth", "1"]);
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let root_area = report["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|area| area["area"] == ".")
+        .expect("the fixture's files sit at the root");
+    assert!(root_area["proven_internal"].as_u64().unwrap() >= 1, "{out}");
+    assert_eq!(report["links"], serde_json::json!([]), "{out}");
+    assert_eq!(report["completeness"]["edges_complete"], true, "{out}");
+}
+
+#[test]
 fn cli_callers_finds_scip_callers_without_reindex() {
     let h = home("callers");
     scip_imported(&h);

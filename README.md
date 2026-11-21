@@ -45,6 +45,10 @@ change is safe. See [capabilities and limits](docs/guide/capabilities.md).
   See the [capabilities guide](docs/guide/capabilities.md#automatic-index-updates-opt-in).
 - `riltra agent-block` prints a Markdown instruction block for your agent's
   instruction file. It is plain text, not JSON, and it writes nothing.
+- `riltra map --repo <name>` prints a read-only area map of the indexed snapshot:
+  directory areas, entry points, hubs, proven links between areas, name-match
+  candidates and bounded static flows, as JSON or Markdown. It creates and
+  migrates nothing. See the [capabilities guide](docs/guide/capabilities.md#area-map-read-only).
 - Optional local vector search for knowledge records. It is off by default,
   requires separately provisioned assets, and falls back to lexical search
   when unavailable. It does not index source code; see the [local inference
@@ -85,13 +89,14 @@ Run `riltra --help` for the full command list. Git is needed for repository
 fingerprints; without it, Riltra reports that status as unavailable instead of
 guessing.
 
-## MCP server (seventeen read-only tools, one provider-backed tool)
+## MCP server (eighteen read-only tools, one provider-backed tool)
 
 <a id="mcp-server-twelve-read-only-tools-one-provider-backed-tool"></a>
 <a id="mcp-server-sixteen-read-only-tools-one-provider-backed-tool"></a>
+<a id="mcp-server-eighteen-read-only-tools-one-provider-backed-tool"></a>
 
-Run `riltra mcp` to start a local stdio MCP server with eighteen tools: seventeen
-read-only tools for repository, code, knowledge, project overview, and selected-anchor packets, plus
+Run `riltra mcp` to start a local stdio MCP server with nineteen tools: eighteen
+read-only tools for repository, code, knowledge, project overview, the area map, and selected-anchor packets, plus
 `riltra_code_semantic`, which starts the language server configured by the
 operator. That server may write its own cache, run project tools, or access the
 network. Riltra's MCP handlers do not create, migrate, or replace a database.

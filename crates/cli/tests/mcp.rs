@@ -223,7 +223,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_eighteen_tools() {
+fn mcp_tools_list_advertises_the_nineteen_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -253,11 +253,12 @@ fn mcp_tools_list_advertises_the_eighteen_tools() {
             "riltra_knowledge_related",
             "riltra_knowledge_search",
             "riltra_knowledge_show",
+            "riltra_project_map",
             "riltra_project_overview",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the eighteen tools"
+        "the server advertises exactly the nineteen tools"
     );
     let code_search_tool = tools
         .iter()
@@ -368,6 +369,7 @@ fn mcp_tools_list_advertises_the_eighteen_tools() {
         "riltra_knowledge_related",
         "riltra_knowledge_search",
         "riltra_knowledge_show",
+        "riltra_project_map",
         "riltra_project_overview",
         "riltra_repo_status",
     ] {
@@ -909,11 +911,12 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_knowledge_related",
             "riltra_knowledge_search",
             "riltra_knowledge_show",
+            "riltra_project_map",
             "riltra_project_overview",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the eighteen tools"
+        "the health document must list the nineteen tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -7279,7 +7282,7 @@ fn code_query_refuses_outdated_and_newer_databases_with_their_own_kinds() {
 }
 
 #[test]
-fn mcp_tools_list_2026_07_28_advertises_eighteen_tools_with_cache_hints() {
+fn mcp_tools_list_2026_07_28_advertises_nineteen_tools_with_cache_hints() {
     let h = home("tools-list-modern");
     let mut legacy = ready(&h);
     legacy.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -7289,7 +7292,7 @@ fn mcp_tools_list_2026_07_28_advertises_eighteen_tools_with_cache_hints() {
     let result = modern_request(&mut modern, 3, "tools/list", json!({}));
     assert_eq!(result["ttlMs"], 0);
     assert_eq!(result["cacheScope"], "public");
-    assert_eq!(result["tools"].as_array().unwrap().len(), 18);
+    assert_eq!(result["tools"].as_array().unwrap().len(), 19);
     assert_eq!(result["tools"], legacy_result["tools"]);
     let (code, _) = modern.finish();
     assert_eq!(code, 0);
@@ -7470,4 +7473,119 @@ fn project_overview_mcp_matches_cli_document() {
 #[test]
 fn project_overview_mcp_2026_07_28_matches_cli_document() {
     assert_project_overview_parity(true, "modern");
+}
+
+#[test]
+fn mcp_project_map_matches_cli() {
+    let h = home("map-parity");
+    let r = home("map-parity-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    for (id, depth) in [(2i64, None), (3, Some(1usize))] {
+        let mut cli_args = vec!["map", "--repo", "r"];
+        let depth_text = depth.map(|d| d.to_string());
+        if let Some(text) = depth_text.as_deref() {
+            cli_args.extend(["--depth", text]);
+        }
+        let (code, cli_text, err) = run_cli(&h, &cli_args);
+        assert_eq!(code, 0, "map CLI {cli_args:?}: {err}");
+        let cli: Value = serde_json::from_str(&cli_text).expect("map CLI JSON");
+        let args = match depth {
+            None => json!({"repo": "r"}),
+            Some(d) => json!({"repo": "r", "depth": d}),
+        };
+        let result = call_tool(&mut s, id, "riltra_project_map", &args);
+        assert!(!is_error(&result), "map MCP {args}: {result}");
+        assert_eq!(
+            doc(&result),
+            cli,
+            "map MCP {args} must equal the CLI document"
+        );
+        assert_eq!(
+            result["content"][0]["text"],
+            cli_text.trim_end(),
+            "map MCP text must be the CLI bytes without the trailing newline"
+        );
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mcp_project_map_rejects_bad_input() {
+    let h = home("map-bad");
+    let r = home("map-bad-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "demo");
+    let mut s = ready(&h);
+    for (id, depth) in [(2i64, json!(0)), (3, json!(5)), (4, json!(9))] {
+        let res = call_tool(
+            &mut s,
+            id,
+            "riltra_project_map",
+            &json!({"repo": "demo", "depth": depth}),
+        );
+        assert!(is_error(&res), "depth {depth} must be refused: {res}");
+        assert_eq!(doc(&res)["kind"], "invalid_input", "{res}");
+    }
+    let res = call_tool(
+        &mut s,
+        5,
+        "riltra_project_map",
+        &json!({"repo": "demo", "bogus": 1}),
+    );
+    assert!(is_error(&res), "{res}");
+    let message = res["content"][0]["text"].as_str().unwrap();
+    assert!(
+        message.starts_with("failed to deserialize parameters") && message.contains("bogus"),
+        "an extra key is a schema refusal naming the field: {res}"
+    );
+    let res = call_tool(
+        &mut s,
+        6,
+        "riltra_project_map",
+        &json!({"repo": "demo", "depth": -1}),
+    );
+    assert!(is_error(&res), "{res}");
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("failed to deserialize parameters"),
+        "a negative depth is a schema refusal: {res}"
+    );
+    let res = call_tool(&mut s, 7, "riltra_project_map", &json!({"repo": "nope"}));
+    assert_eq!(doc(&res)["kind"], "not_registered", "{res}");
+    // Valid calls still answer after every refusal.
+    let res = call_tool(&mut s, 8, "riltra_project_map", &json!({"repo": "demo"}));
+    assert!(!is_error(&res), "{res}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mcp_project_map_no_index_creates_nothing() {
+    let h = home("map-noindex");
+    let r = home("map-noindex-repo");
+    write_search_fixture(&r);
+    init_repo(&h, &r, "r");
+    let before = listing(&h);
+    let mut s = ready(&h);
+    let res = call_tool(&mut s, 2, "riltra_project_map", &json!({"repo": "r"}));
+    assert!(!is_error(&res), "{res}");
+    assert_eq!(doc(&res)["snapshot"]["status"], "no-index", "{res}");
+    assert_eq!(
+        listing(&h),
+        before,
+        "map over MCP must not create a database"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+
+    // Control: a planted database file shows up in the same listing helper.
+    let db = db_path(&h, "r");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    std::fs::write(&db, b"").unwrap();
+    assert_ne!(listing(&h), before, "the planted control must be detected");
 }

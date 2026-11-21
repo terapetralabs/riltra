@@ -26,6 +26,13 @@ pub enum Command {
     Overview {
         repo: String,
     },
+    /// Area map of one snapshot. `depth` is 1..=4 (default 2); `markdown` picks
+    /// the Markdown report over the JSON document.
+    Map {
+        repo: String,
+        depth: usize,
+        markdown: bool,
+    },
     Doctor {
         repo: Option<String>,
     },
@@ -325,6 +332,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 None => Err(crate::usage()),
             }
         }
+        "map" => parse_map_args(args),
         "agent-block" if args.len() == 1 => Ok(Command::AgentBlock),
         "init" => {
             let mut repo = None;
@@ -675,6 +683,43 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         },
         _ => Err(crate::usage()),
     }
+}
+
+/// `map` flags. Every refusal here is a usage error (exit 2).
+fn parse_map_args(args: &[String]) -> Result<Command, String> {
+    let mut repo = None;
+    let mut depth = None;
+    let mut format = None;
+    let mut i = 1;
+    while i < args.len() {
+        if let Some(v) = take_value(args, &mut i, "--repo") {
+            repo = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--depth") {
+            depth = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--format") {
+            format = Some(v);
+        } else {
+            return Err(crate::usage());
+        }
+    }
+    let repo = repo.ok_or_else(crate::usage)?;
+    let depth = match depth {
+        None => 2,
+        Some(text) => match text.parse::<usize>() {
+            Ok(n) if (1..=4).contains(&n) => n,
+            _ => return Err(crate::usage()),
+        },
+    };
+    let markdown = match format.as_deref() {
+        None | Some("json") => false,
+        Some("markdown") => true,
+        Some(_) => return Err(crate::usage()),
+    };
+    Ok(Command::Map {
+        repo,
+        depth,
+        markdown,
+    })
 }
 
 /// `changes` flags. Every refusal here is a usage error (exit 2), including a
@@ -1366,6 +1411,39 @@ mod tests {
         ));
         assert!(p(&["overview"]).is_err());
         assert!(p(&["overview", "--repo", "r", "--json"]).is_err());
+    }
+
+    #[test]
+    fn parses_map_defaults_and_flags() {
+        assert_eq!(
+            p(&["map", "--repo", "r"]),
+            Ok(Command::Map {
+                repo: "r".to_string(),
+                depth: 2,
+                markdown: false,
+            })
+        );
+        assert_eq!(
+            p(&["map", "--repo=r", "--depth=4", "--format", "markdown"]),
+            Ok(Command::Map {
+                repo: "r".to_string(),
+                depth: 4,
+                markdown: true,
+            })
+        );
+        assert_eq!(
+            p(&["map", "--repo", "r", "--format", "json"]),
+            Ok(Command::Map {
+                repo: "r".to_string(),
+                depth: 2,
+                markdown: false,
+            })
+        );
+        assert!(p(&["map", "--repo", "r", "--depth", "0"]).is_err());
+        assert!(p(&["map", "--repo", "r", "--depth", "5"]).is_err());
+        assert!(p(&["map", "--repo", "r", "--format", "xml"]).is_err());
+        assert!(p(&["map"]).is_err());
+        assert!(p(&["map", "--repo", "r", "--json"]).is_err());
     }
 
     #[test]

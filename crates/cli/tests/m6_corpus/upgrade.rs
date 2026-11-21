@@ -3,7 +3,7 @@
 //! injected here so CI never needs an old compiler checkout or executable.
 use super::*;
 use rusqlite::{params, Connection};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn n(v: &Value, key: &str) -> usize {
     v[key].as_u64().unwrap() as usize
@@ -198,6 +198,44 @@ fn query(h: &Path, m: &Value, case: &str, cmd: &str) -> (i32, String, String) {
     )
 }
 
+/// The area map follows the same fixture state: withheld, with the D9 rule 0 action.
+fn map_blocked(h: &Path, case: &str) {
+    let (code, out, err) = run(h, &["map", "--repo", "sem"]);
+    assert_eq!(code, 0, "map must report, not fail: {case}: {err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["graph_proof"], "incompatible", "{case}: {out}");
+    assert_eq!(v["links"], json!([]), "{case}: {out}");
+    assert_eq!(v["flows"], json!([]), "{case}: {out}");
+    assert!(
+        v["next_actions"].as_array().unwrap().iter().any(|action| {
+            action["kind"] == "refresh_index"
+                && action["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("validate them with riltra semantic import")
+        }),
+        "{case}: {out}"
+    );
+}
+
+/// The area map recovers with the fixture state: a current proof, and for the
+/// valid `direct` proof at least one link or one internal proven edge.
+fn map_restored(h: &Path, case: &str) {
+    let (code, out, err) = run(h, &["map", "--repo", "sem"]);
+    assert_eq!(code, 0, "{case}: {err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["graph_proof"], "current", "{case}: {out}");
+    if case == "direct" {
+        let linked = !v["links"].as_array().unwrap().is_empty()
+            || v["areas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|area| area["proven_internal"].as_u64().unwrap_or(0) >= 1);
+        assert!(linked, "valid proof must reach the map: {out}");
+    }
+}
+
 fn blocked(h: &Path, m: &Value, case: &str) {
     for cmd in ["callers", "callees", "trace", "impact"] {
         let (code, out, err) = query(h, m, case, cmd);
@@ -208,6 +246,7 @@ fn blocked(h: &Path, m: &Value, case: &str) {
         assert!(out.is_empty());
         assert!(err.contains("graph-proof-incompatible"), "{err}");
     }
+    map_blocked(h, case);
 }
 fn restored(h: &Path, m: &Value, case: &str) {
     for cmd in ["callers", "callees", "trace", "impact"] {
@@ -236,6 +275,7 @@ fn restored(h: &Path, m: &Value, case: &str) {
             );
         }
     }
+    map_restored(h, case);
 }
 
 macro_rules! upgrade {

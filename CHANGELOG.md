@@ -6,6 +6,13 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Added
 
+- `map` (CLI) and MCP tool `riltra_project_map`: a read-only area map of one indexed
+  snapshot. It groups files by directory and lists entry points, hubs, proven links
+  between areas, name-match candidates and up to three bounded static flows, with the
+  database revision, the named bounds and omission counts. It reads the code index through
+  the read-only path and creates and migrates nothing; SQLite may create `-wal`/`-shm`
+  sidecars beside an existing index. See [capabilities](docs/guide/capabilities.md#area-map-read-only).
+
 - `agent-block` (CLI): prints the Markdown instruction block for an agent's instruction file
   (`AGENTS.md` or `CLAUDE.md`), naming the graph tools and when to call them. It is plain
   Markdown text, not JSON, like `--help` and `--version`. It takes no arguments, reads no

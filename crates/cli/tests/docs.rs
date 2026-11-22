@@ -925,6 +925,27 @@ impl Fixture {
         child.wait_with_output().expect("wait for riltra")
     }
 
+    /// Run `riltra` with `args` and `input` on stdin.
+    fn stdin_cli(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+            .args(args)
+            .env("RILTRA_HOME", &self.home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn riltra");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().expect("wait for riltra")
+    }
+
     /// `knowledge show` of one revision, or `None` when that revision does not exist.
     fn show_revision(&self, id: &str, revision: u64) -> Option<Value> {
         let rev = revision.to_string();
@@ -1771,4 +1792,82 @@ fn ingest_refuses_inner_nested_anchor_for_outer_definition() {
         vec![binding_of(&inner_p["target"], "inner")],
     )]));
     assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: `record_evidence` counts on code-binding objects.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn binding_reports_stale_record_evidence_after_doc_edit() {
+    let Some(f) = fixture(
+        "record-evidence-stale",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let input = input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    )]);
+    let out = f.ingest(&input);
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+
+    let line = p["target"]["anchor"]["line"].to_string();
+    let col = p["target"]["anchor"]["col"].to_string();
+    let before = f.at("pkg/calc.py", &line, &col);
+    assert_eq!(
+        before["result"]["bindings"][0]["record_evidence"],
+        json!({"total": 1, "fresh": 1, "stale": 0, "unresolved": 0}),
+        "{before}"
+    );
+    assert_eq!(
+        before["result"]["bindings"][0]["freshness"], "fresh",
+        "{before}"
+    );
+
+    f.write("docs/adr/0001.md", &DOC.replace("Add uses", "Add is used"));
+    let after = f.at("pkg/calc.py", &line, &col);
+    assert_eq!(
+        after["result"]["bindings"][0]["record_evidence"],
+        json!({"total": 1, "fresh": 0, "stale": 1, "unresolved": 0}),
+        "{after}"
+    );
+    assert_eq!(
+        after["result"]["bindings"][0]["freshness"], "fresh",
+        "{after}"
+    );
+}
+
+#[test]
+fn binding_without_record_evidence_reports_zero_total() {
+    let Some(f) = fixture("record-evidence-zero", &[("pkg/calc.py", CALC)]) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let created = f.knowledge_create(
+        r#"{"id":"plain","kind":"decision","title":"Plain","body":"no evidence","status":"active","author":"a"}"#,
+    );
+    assert_eq!(code_of(&created), Some(0), "{}", stderr_of(&created));
+    let bound = f.stdin_cli(
+        &[
+            "knowledge", "bind", "--repo", "r", "--path", "pkg/calc.py", "--line", "1", "--col",
+            "5", "--input", "-",
+        ],
+        r#"{"record_id":"plain","record_revision":1,"relation":"documents","author":"a","rationale":"r","provenance":"p"}"#,
+    );
+    assert_eq!(code_of(&bound), Some(0), "{}", stderr_of(&bound));
+    let page = f.at("pkg/calc.py", "1", "5");
+    assert_eq!(
+        page["result"]["bindings"][0]["record_evidence"],
+        json!({"total": 0, "fresh": 0, "stale": 0, "unresolved": 0}),
+        "{page}"
+    );
 }

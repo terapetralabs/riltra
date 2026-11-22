@@ -1094,7 +1094,7 @@ mod records_citing_path_tests {
     }
 }
 
-fn read_evidence(
+pub(crate) fn read_evidence(
     conn: &Connection,
     id: &str,
     revision: i64,
@@ -1131,14 +1131,18 @@ pub fn evidence_freshness(
     repo_root: &Path,
 ) -> crate::knowledge::EvidenceFreshness {
     use crate::knowledge::EvidenceFreshness as Fresh;
-    let bytes = match crate::semantic::confined_read(
-        repo_root,
-        &recorded.path,
-        crate::scan::MAX_FILE_BYTES,
-    ) {
-        Ok(found) => found,
-        Err(e) => return Fresh::Unresolved { reason: e },
-    };
+    match crate::semantic::confined_read(repo_root, &recorded.path, crate::scan::MAX_FILE_BYTES) {
+        Ok(bytes) => evidence_freshness_from_bytes(recorded, &bytes),
+        Err(e) => Fresh::Unresolved { reason: e },
+    }
+}
+
+/// Freshness of one stored span against bytes already read from the live file.
+pub(crate) fn evidence_freshness_from_bytes(
+    recorded: &crate::knowledge::CapturedEvidence,
+    bytes: &[u8],
+) -> crate::knowledge::EvidenceFreshness {
+    use crate::knowledge::EvidenceFreshness as Fresh;
     let len = bytes.len() as u64;
     let start = recorded.byte_start.map(|v| v as u64).unwrap_or(0);
     let end = recorded.byte_end.map(|v| v as u64).unwrap_or(len);
@@ -1149,7 +1153,7 @@ pub fn evidence_freshness(
     let explicit_span = recorded.byte_start.is_some() || recorded.byte_end.is_some();
     if end > len || start > len || (explicit_span && start >= end) {
         return Fresh::Stale {
-            observed_digest: crate::store::content_digest(&bytes),
+            observed_digest: crate::store::content_digest(bytes),
         };
     }
     let live = crate::store::content_digest(&bytes[start as usize..end as usize]);

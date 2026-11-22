@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Explicit, revision-pinned links from code anchors to knowledge records.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
@@ -53,6 +54,16 @@ pub struct RetractInput {
     pub reason: String,
 }
 
+/// Counts of the evidence rows the bound record revision cites (D7). `total: 0`
+/// means the record cites nothing; it is no claim about the code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvidenceSummary {
+    pub total: usize,
+    pub fresh: usize,
+    pub stale: usize,
+    pub unresolved: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct BindingView {
     pub binding_id: i64,
@@ -87,6 +98,7 @@ pub struct BindingView {
     pub retracted_unix: Option<i64>,
     pub freshness: String,
     pub freshness_reason: Option<String>,
+    pub record_evidence: EvidenceSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -1132,7 +1144,61 @@ fn binding_from_row(
         retracted_unix: row.get(28)?,
         freshness,
         freshness_reason,
+        record_evidence: EvidenceSummary::default(),
     })
+}
+
+/// Fills `record_evidence` for each binding from the caller's knowledge read, so
+/// evidence rows and binding rows come from one transaction. Live files are
+/// sampled once per distinct path for the whole page.
+fn attach_record_evidence(
+    conn: &Connection,
+    rows: &mut [BindingView],
+    root: &Path,
+) -> Result<(), String> {
+    let mut cache = HashMap::new();
+    let mut read_live =
+        |path: &str| semantic::confined_read(root, path, crate::scan::MAX_FILE_BYTES);
+    for binding in rows.iter_mut() {
+        let revision = i64::try_from(binding.record_revision)
+            .map_err(|_| "corrupt knowledge store: record revision out of range".to_string())?;
+        let evidence = knowledge_store::read_evidence(conn, &binding.record_id, revision)?;
+        binding.record_evidence = summarize_evidence(&evidence, &mut cache, &mut read_live);
+    }
+    Ok(())
+}
+
+/// Counts the evidence rows of one bound record revision against the live root.
+/// `cache` and `read` are shared across one page, so each distinct path is read
+/// at most once; a read or confinement failure counts as `unresolved`.
+pub(crate) fn summarize_evidence<F>(
+    rows: &[crate::knowledge::CapturedEvidence],
+    cache: &mut HashMap<String, Result<Vec<u8>, String>>,
+    read: &mut F,
+) -> EvidenceSummary
+where
+    F: FnMut(&str) -> Result<Vec<u8>, String>,
+{
+    use crate::knowledge::EvidenceFreshness as Fresh;
+    let mut summary = EvidenceSummary {
+        total: rows.len(),
+        ..EvidenceSummary::default()
+    };
+    for row in rows {
+        if !cache.contains_key(&row.path) {
+            let loaded = read(&row.path);
+            cache.insert(row.path.clone(), loaded);
+        }
+        match cache.get(&row.path) {
+            Some(Ok(bytes)) => match knowledge_store::evidence_freshness_from_bytes(row, bytes) {
+                Fresh::Fresh => summary.fresh += 1,
+                Fresh::Stale { .. } => summary.stale += 1,
+                Fresh::Unresolved { .. } => summary.unresolved += 1,
+            },
+            _ => summary.unresolved += 1,
+        }
+    }
+    summary
 }
 
 pub(crate) fn empty_at(
@@ -1269,7 +1335,7 @@ pub(crate) fn at(
              ORDER BY b.binding_id LIMIT ?8 OFFSET ?9",
         )
         .map_err(|e| format!("cannot prepare code binding read: {e}"))?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map(
             params![
                 entry.name,
@@ -1288,6 +1354,7 @@ pub(crate) fn at(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("cannot read code bindings: {e}"))?;
     drop(stmt);
+    attach_record_evidence(&conn_tx, &mut rows, &root)?;
     drop(conn_tx);
     let total = usize::try_from(total)
         .map_err(|_| "corrupt knowledge store: negative binding count".to_string())?;
@@ -1436,6 +1503,7 @@ pub(crate) fn at_pinned(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("cannot read code bindings: {e}"))?;
     drop(stmt);
+    attach_record_evidence(&tx, &mut rows, &root)?;
     drop(tx);
     let total = usize::try_from(total)
         .map_err(|_| "corrupt knowledge store: negative binding count".to_string())?;
@@ -1500,7 +1568,8 @@ fn binding_json(b: &BindingView) -> String {
             "\"record\":{{\"kind\":\"{}\",\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\"}},",
             "\"author\":\"{}\",\"rationale\":\"{}\",\"provenance\":\"{}\",\"created_unix\":{},",
             "\"retracted\":{},\"retraction_author\":{},\"retraction_reason\":{},\"retracted_unix\":{},",
-            "\"freshness\":\"{}\",\"freshness_reason\":{},\"verification\":\"Unverified\",\"support\":\"unverified\"}}"
+            "\"freshness\":\"{}\",\"freshness_reason\":{},\"verification\":\"Unverified\",\"support\":\"unverified\",",
+            "\"record_evidence\":{{\"total\":{},\"fresh\":{},\"stale\":{},\"unresolved\":{}}}}}"
         ),
         b.binding_id, crate::json::escape(&b.repo), crate::json::escape(&b.path), b.byte_start, b.byte_end,
         b.cursor_line, b.cursor_col, optional_string(b.symbol_uri.as_deref()), optional_string(b.display_name.as_deref()),
@@ -1511,7 +1580,8 @@ fn binding_json(b: &BindingView) -> String {
         crate::json::escape(&b.record_status), crate::json::escape(&b.author), crate::json::escape(&b.rationale),
         crate::json::escape(&b.provenance), b.created_unix, b.retracted, optional_string(b.retraction_author.as_deref()),
         optional_string(b.retraction_reason.as_deref()), b.retracted_unix.map_or_else(|| "null".to_string(), |n| n.to_string()),
-        crate::json::escape(&b.freshness), optional_string(b.freshness_reason.as_deref())
+        crate::json::escape(&b.freshness), optional_string(b.freshness_reason.as_deref()),
+        b.record_evidence.total, b.record_evidence.fresh, b.record_evidence.stale, b.record_evidence.unresolved
     )
 }
 
@@ -1863,6 +1933,7 @@ mod review_regressions {
             retracted_unix: None,
             freshness: "fresh".to_string(),
             freshness_reason: None,
+            record_evidence: super::EvidenceSummary::default(),
         }
     }
 
@@ -1898,5 +1969,128 @@ mod review_regressions {
         let mut binding = binding();
         binding.symbol_uri = Some("scip pkg 1.0.0 lib/g().".to_string());
         assert!(!super::binding_matches_pinned_anchor(&binding, &anchor));
+    }
+
+    #[test]
+    fn record_evidence_is_appended_after_support() {
+        let mut binding = binding();
+        binding.record_evidence = super::EvidenceSummary {
+            total: 2,
+            fresh: 1,
+            stale: 1,
+            unresolved: 0,
+        };
+        let json = super::page_json(&super::AtPage {
+            status: "linked",
+            unresolved_reason: None,
+            path: "src/lib.rs".to_string(),
+            line: 1,
+            col: 5,
+            bindings: vec![binding],
+            total: 1,
+            limit: 10,
+            offset: 0,
+            truncated: false,
+            next_offset: None,
+            generation: 0,
+            schema_version: 3,
+        });
+        assert!(
+            json.contains("\"support\":\"unverified\",\"record_evidence\":{\"total\":2,\"fresh\":1,\"stale\":1,\"unresolved\":0}}"),
+            "{json}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod record_evidence_tests {
+    use crate::knowledge::CapturedEvidence;
+    use std::collections::HashMap;
+
+    fn ev(path: &str, start: Option<i64>, end: Option<i64>, digest: &str) -> CapturedEvidence {
+        CapturedEvidence {
+            path: path.to_string(),
+            byte_start: start,
+            byte_end: end,
+            digest: digest.to_string(),
+            git_head: None,
+            git_branch: None,
+        }
+    }
+
+    #[test]
+    fn record_evidence_reads_each_path_once_per_page() {
+        let digest = crate::store::content_digest(b"alpha");
+        let shared = vec![ev("src.rs", Some(0), Some(5), &digest)];
+        let also = vec![
+            ev("src.rs", Some(0), Some(5), &digest),
+            ev("docs.md", None, None, "unused"),
+        ];
+        let mut reads: Vec<String> = Vec::new();
+        let mut cache = HashMap::new();
+        let mut read = |p: &str| {
+            reads.push(p.to_string());
+            if p == "src.rs" {
+                Ok(b"alpha".to_vec())
+            } else {
+                Err("missing".to_string())
+            }
+        };
+        let first = super::summarize_evidence(&shared, &mut cache, &mut read);
+        let second = super::summarize_evidence(&also, &mut cache, &mut read);
+        assert_eq!(
+            first,
+            super::EvidenceSummary {
+                total: 1,
+                fresh: 1,
+                stale: 0,
+                unresolved: 0
+            }
+        );
+        assert_eq!(
+            second,
+            super::EvidenceSummary {
+                total: 2,
+                fresh: 1,
+                stale: 0,
+                unresolved: 1
+            }
+        );
+        assert_eq!(
+            reads.iter().filter(|p| *p == "src.rs").count(),
+            1,
+            "{reads:?}"
+        );
+        assert_eq!(
+            reads.iter().filter(|p| *p == "docs.md").count(),
+            1,
+            "{reads:?}"
+        );
+    }
+
+    #[test]
+    fn record_evidence_classifies_fresh_stale_and_span_past_end() {
+        let digest = crate::store::content_digest(b"alpha");
+        let rows = vec![
+            ev("ok.rs", Some(0), Some(5), &digest),
+            ev("changed.rs", Some(0), Some(5), &digest),
+            ev("short.rs", Some(0), Some(50), &digest),
+        ];
+        let mut cache = HashMap::new();
+        let mut read = |p: &str| match p {
+            "ok.rs" => Ok(b"alpha".to_vec()),
+            "changed.rs" => Ok(b"bravo".to_vec()),
+            _ => Ok(b"alpha".to_vec()),
+        };
+        let summary = super::summarize_evidence(&rows, &mut cache, &mut read);
+        assert_eq!(
+            summary,
+            super::EvidenceSummary {
+                total: 3,
+                fresh: 1,
+                stale: 2,
+                unresolved: 0
+            }
+        );
     }
 }

@@ -5,7 +5,8 @@
 //! related); CP6 adds the composed `riltra_health` tool. The overview tool
 //! completed the design-gate inventory (§3) at eighteen tools, and the area
 //! map (`riltra_project_map`) makes it nineteen, and the change checks tool
-//! (`riltra_change_checks`) makes it twenty, through the rmcp tool macros.
+//! (`riltra_change_checks`) makes it twenty, and the documents tool
+//! (`riltra_docs_scan`) makes it twenty-one, through the rmcp tool macros.
 //! Tool calls reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
 //! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
@@ -27,6 +28,7 @@ use serde::Deserialize;
 
 use crate::changes;
 use crate::checks;
+use crate::docs;
 #[cfg(feature = "semantic-knowledge")]
 use crate::json;
 use crate::knowledge_store_absent;
@@ -554,6 +556,23 @@ impl RiltraMcp {
     }
 
     #[tool(
+        name = "riltra_docs_scan",
+        description = "Local Markdown documents of one registered repository (same document as CLI `docs scan`): their sections, inline links to project files and definitions, the knowledge records that already cite them, and proposals for bindings. Proposals come only from explicit links to indexed definitions; no link is guessed from text similarity. Riltra writes nothing: the scan opens no store for writing and changes no record. Ingesting a proposal is CLI-only (`docs ingest`) and needs the user's approval. When to call: to find which documented rules and decisions point at code, before proposing records for the user to ingest.",
+        annotations(
+            title = "Documents linked to code",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_docs_scan(
+        &self,
+        Parameters(input): Parameters<DocsScanInput>,
+    ) -> CallToolResult {
+        blocking(move || docs_scan_doc(&input)).await
+    }
+
+    #[tool(
         name = "riltra_code_callees",
         description = "Symbols the anchor definition calls (same document as CLI `callees`). A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to see what a function or method appears to depend on.",
         annotations(
@@ -1047,6 +1066,31 @@ struct ChecksInput {
     base: Option<String>,
     /// Maximum changed files listed (default 50, range 1 to 1000).
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct DocsScanInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative Markdown paths to scan (CLI `--path`, repeatable). Omit to scan every Markdown document in the repository.
+    paths: Option<Vec<String>>,
+}
+
+/// The `docs scan` document (`riltra_docs_scan`): the CLI's own text, read-only.
+fn docs_scan_doc(input: &DocsScanInput) -> CallToolResult {
+    let (home, canon) = match repo_root(&input.repo) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let doc_paths = input.paths.clone().unwrap_or_default();
+    match docs::scan(&home, &input.repo, &canon, &doc_paths) {
+        // The formatter's own bytes, so the text equals the CLI stdout.
+        Ok(text) => exact_doc(&text),
+        Err((2, message)) => tool_error("invalid_input", &message),
+        Err((_, message)) => tool_error("store_error", &message),
+    }
 }
 
 fn checks_doc(input: &ChecksInput) -> CallToolResult {
@@ -2408,6 +2452,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_code_semantic",
                 "riltra_code_trace",
                 "riltra_context",
+                "riltra_docs_scan",
                 "riltra_health",
                 "riltra_knowledge_at_anchor",
                 "riltra_knowledge_related",

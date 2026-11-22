@@ -223,7 +223,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_twenty_tools() {
+fn mcp_tools_list_advertises_the_twenty_one_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -249,6 +249,7 @@ fn mcp_tools_list_advertises_the_twenty_tools() {
             "riltra_code_semantic",
             "riltra_code_trace",
             "riltra_context",
+            "riltra_docs_scan",
             "riltra_health",
             "riltra_knowledge_at_anchor",
             "riltra_knowledge_related",
@@ -259,7 +260,19 @@ fn mcp_tools_list_advertises_the_twenty_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the twenty tools"
+        "the server advertises exactly the twenty-one tools"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("ingest")),
+        "docs ingest is CLI-only; no MCP tool may ingest: {names:?}"
+    );
+    let docs_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "riltra_docs_scan")
+        .expect("docs scan tool");
+    assert_eq!(
+        docs_tool["annotations"]["readOnlyHint"], true,
+        "{docs_tool}"
     );
     let code_search_tool = tools
         .iter()
@@ -367,6 +380,7 @@ fn mcp_tools_list_advertises_the_twenty_tools() {
         "riltra_code_semantic",
         "riltra_code_trace",
         "riltra_context",
+        "riltra_docs_scan",
         "riltra_knowledge_at_anchor",
         "riltra_knowledge_related",
         "riltra_knowledge_search",
@@ -909,6 +923,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_code_semantic",
             "riltra_code_trace",
             "riltra_context",
+            "riltra_docs_scan",
             "riltra_health",
             "riltra_knowledge_at_anchor",
             "riltra_knowledge_related",
@@ -919,7 +934,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the twenty tools"
+        "the health document must list the twenty-one tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -7127,6 +7142,115 @@ fn change_checks_mcp_rejects_unknown_field() {
     assert_eq!(code, 0);
 }
 
+/// A registered repository with one Markdown document that links to a source file, and no index.
+fn docs_scan_fixture(tag: &str) -> PathBuf {
+    let h = home(tag);
+    let dir = home(&format!("{tag}-repo"));
+    std::fs::create_dir_all(dir.join("docs/adr")).unwrap();
+    std::fs::create_dir_all(dir.join("pkg")).unwrap();
+    std::fs::write(
+        dir.join("pkg/calc.py"),
+        "def add(a, b):\n    return a + b\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("docs/adr/0001.md"),
+        "# Storage\n\nRows are kept in [the calculator](../../pkg/calc.py).\n",
+    )
+    .unwrap();
+    init_repo(&h, &dir, "r");
+    h
+}
+
+#[test]
+fn docs_scan_mcp_matches_cli_document() {
+    let h = docs_scan_fixture("docs-cli");
+    let (code, out, err) = run_cli(&h, &["docs", "scan", "--repo", "r"]);
+    assert_eq!(code, 0, "{err}");
+
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_docs_scan", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("tool content text");
+    assert_eq!(
+        text,
+        out.trim_end_matches('\n'),
+        "the MCP text must equal the CLI stdout byte for byte"
+    );
+    let d = doc(&result);
+    assert_eq!(d["documents"][0]["path"], "docs/adr/0001.md", "{d}");
+    assert_eq!(d["index_freshness"]["status"], "no-index", "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn docs_scan_mcp_creates_no_store() {
+    let h = docs_scan_fixture("docs-no-store");
+    let before = listing(&h);
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_docs_scan", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    let d = doc(&result);
+    assert_eq!(d["knowledge"]["status"], "no-store", "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(
+        listing(&h),
+        before,
+        "a docs scan call must not create or modify storage"
+    );
+    assert!(!h.join("index").join("r.db").exists());
+    assert!(!h.join("knowledge").join("r.db").exists());
+}
+
+#[test]
+fn docs_scan_mcp_rejects_unknown_field() {
+    let h = docs_scan_fixture("docs-unknown");
+    let mut s = ready(&h);
+    s.send(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "riltra_docs_scan", "arguments": {"repo": "r", "x": 1}}
+        })
+        .to_string(),
+    );
+    let v = s.recv();
+    assert!(
+        is_error(&v["result"]),
+        "an unknown field must be refused: {v}"
+    );
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("unknown field `x`"), "{v}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn docs_scan_mcp_refuses_a_path_outside_the_repository() {
+    let h = docs_scan_fixture("docs-bad-path");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_docs_scan",
+        &json!({"repo": "r", "paths": ["../outside.md"]}),
+    );
+    assert!(is_error(&result), "{result}");
+    assert_eq!(
+        result["structuredContent"]["kind"], "invalid_input",
+        "{result}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
 /// Whether git is installed; without it the test skips, with a printed message.
 fn git_or_skip() -> bool {
     let present = std::process::Command::new("git")
@@ -7410,7 +7534,7 @@ fn code_query_refuses_outdated_and_newer_databases_with_their_own_kinds() {
 }
 
 #[test]
-fn mcp_tools_list_2026_07_28_advertises_twenty_tools_with_cache_hints() {
+fn mcp_tools_list_2026_07_28_advertises_twenty_one_tools_with_cache_hints() {
     let h = home("tools-list-modern");
     let mut legacy = ready(&h);
     legacy.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -7420,7 +7544,7 @@ fn mcp_tools_list_2026_07_28_advertises_twenty_tools_with_cache_hints() {
     let result = modern_request(&mut modern, 3, "tools/list", json!({}));
     assert_eq!(result["ttlMs"], 0);
     assert_eq!(result["cacheScope"], "public");
-    assert_eq!(result["tools"].as_array().unwrap().len(), 20);
+    assert_eq!(result["tools"].as_array().unwrap().len(), 21);
     assert_eq!(result["tools"], legacy_result["tools"]);
     let (code, _) = modern.finish();
     assert_eq!(code, 0);

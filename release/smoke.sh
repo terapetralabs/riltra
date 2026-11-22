@@ -156,7 +156,7 @@ jsonrpc="$(grep -c '^{"jsonrpc":"2.0"' "$work/mcp.out" || true)"
 [ "$lines" -gt 0 ] && [ "$lines" = "$jsonrpc" ] && pass "stdout carries only JSON-RPC ($lines lines)" \
   || fail "stdout carries only JSON-RPC (lines=$lines jsonrpc=$jsonrpc)"
 tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp.out" | sort -u | wc -l | tr -d ' ')"
-[ "$tools" = "20" ] && pass "twenty tools advertised" || fail "twenty tools advertised (got $tools)"
+[ "$tools" = "21" ] && pass "twenty-one tools advertised" || fail "twenty-one tools advertised (got $tools)"
 expect "overview tool advertised" '"name":"riltra_project_overview"' "$out"
 expect "packet tool advertised" '"name":"riltra_code_packet"' "$out"
 expect "a source-grounded call" 'alpha' "$out"

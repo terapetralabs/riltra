@@ -6,6 +6,14 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Added
 
+- `docs scan` and `docs ingest` (CLI), and MCP tool `riltra_docs_scan`: link local Markdown
+  sections to indexed definitions. `docs scan` is one read-only JSON document of the sections,
+  the explicit links with their status, the proposed bindings (`state: proposed`), and the records
+  that already cite each document with their freshness; it creates no index or store. `docs ingest`
+  reads items the user reviewed and writes candidate records and their code bindings, all
+  `Unverified`, in one transaction per item; it is CLI only. See
+  [capabilities](docs/guide/capabilities.md#documents-linked-to-code).
+
 - `checks` (CLI) and MCP tool `riltra_change_checks`: test candidates and coverage limits
   for one git change, as one read-only JSON document. Each candidate and each reason carries
   its basis (`proven-edge`, `unproven-edge`, `name-candidate`, `path-convention`), and quoted
@@ -108,6 +116,7 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Changed
 
+- `knowledge at`, `context`, `packet` and the other binding objects gain an appended `record_evidence` key (`total`, `fresh`, `stale`, `unresolved`) that counts the evidence rows of the bound record revision. It is read-only and does not change any existing key.
 - The code-index schema is now 6 and `PARSER_VERSION` is 14. After upgrading,
   every code-index read answers `schema_outdated` until `riltra index` is run,
   and `riltra changes` keeps its symbols but reports caller counts as

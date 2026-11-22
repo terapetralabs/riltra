@@ -78,6 +78,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | Which definitions match a description in words? | `riltra_code_query` | Lexical ranking over names, paths and doc comments. Results carry `path` and `line` but no column; pass `name` as `target` and `path` as `in`. |
 | Which definitions does my git change touch? | `riltra_code_changes` | Live parse of the changed files: definitions added, removed or modified. A map of structure, not an impact verdict. |
 | Which tests and areas should I check for my git change? | `riltra_change_checks` | Suggestions from git changes, stored relations and file names. Riltra runs no test, and an empty list does not mean no test is needed; run the checks your project requires. |
+| Which documented rules and decisions point at this code? | `riltra_docs_scan` | Read-only. Lists Markdown sections, explicit links to indexed definitions, and the records that cite each document. Proposals are not verified; ingest is CLI-only and needs your approval. |
 | What calls this? | `riltra_code_callers` | Anchor with `path`, `line` and `col`. Heuristic edges stay `POTENTIAL_CALL`. |
 | What does this call? | `riltra_code_callees` | Same anchor. |
 | How might A reach B? | `riltra_code_trace` | Optional `to` (`PATH:LINE:COL`) and `depth` (default 3, 1 to 6). Paths are plausible traversal, not execution. |
@@ -89,6 +90,8 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | Definition or references from a language server | `riltra_code_semantic` | Opt-in; see below. |
 
 The MCP tools cannot write. Decisions and their bindings to code are recorded with the CLI (`riltra knowledge create`, `update`, `bind` and the other `riltra knowledge` commands that `riltra --help` lists).
+
+Agents may run `riltra docs scan` and propose items for ingest, but `riltra docs ingest` writes records and needs the user's approval.
 
 To choose where to look before tracing a feature across components, an agent may call `riltra_project_map` for the area map, then `riltra_code_trace` for per-hop evidence.
 

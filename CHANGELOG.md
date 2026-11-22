@@ -1,8 +1,10 @@
 # Changelog
 
-All notable changes to Riltra are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, the [stability notes](README.md#stability-pre-10) say what stays fixed within `0.1.x`.
+All notable changes to Riltra are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, the [stability notes](README.md#stability-pre-10) say what stays fixed within `0.2.x`.
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-11-22
 
 ### Added
 
@@ -173,6 +175,17 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 - Existing knowledge bindings made at a bare `struct X *p;` or forward
   declaration, or inside `typedef struct X {...} X;`, can read as unresolved
   after the reindex because the definition they anchored on changed or moved.
+
+### Upgrading
+
+- Run `riltra index --repo <name>` for each indexed repository after upgrading from
+  `0.2.0-rc.1` or `0.1.0`. The code-index schema is 6 and the parser version is 14; until
+  the rebuild, code-index reads answer `schema_outdated` (see the Changed entry above).
+- The knowledge store (`knowledge/<repo>.db`) is a separate database. Upgrading does not
+  delete, rebuild or migrate it as part of `riltra index`.
+- The MCP server exposes twenty-one tools: twenty read-only and one provider-backed
+  (`riltra_code_semantic`).
+- The semantic-knowledge feature is optional and is not included in the default release package.
 
 ## [0.2.0-rc.1] - 2026-11-10
 

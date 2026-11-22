@@ -65,10 +65,12 @@ languages, evidence labels, provider boundaries, and known limits.
 
 ## Quick start
 
-The [`0.1.0` pre-release](https://github.com/terapetralabs/riltra/releases/tag/v0.1.0)
+The [`0.2.0` release](https://github.com/terapetralabs/riltra/releases/tag/v0.2.0)
 provides native archives for Windows x64, Linux x64, and macOS Intel x64 with
-SHA-256 checksums. See [release/INSTALL.md](release/INSTALL.md) for install and
-uninstall instructions.
+SHA-256 checksums. The default package does not include the optional
+semantic-knowledge feature. See [release/INSTALL.md](release/INSTALL.md) for install and
+uninstall instructions. The earlier `0.1.0` pre-release is described in the
+[changelog](CHANGELOG.md).
 
 To install from source, use a stable Rust toolchain:
 
@@ -171,18 +173,24 @@ guide](docs/guide/capabilities.md#known-limitations).
 
 ## Stability (pre-1.0)
 
-Within `0.1.x`, CLI exit codes (`0` success, `2` usage error, `3` repository or
+Within `0.2.x`, CLI exit codes (`0` success, `2` usage error, `3` repository or
 data error), JSON key order, and MCP tool names are stable. New JSON keys are
 opt-in or appended; changes to existing keys are released in a minor version
 and described in the release notes. The on-disk index schema is versioned: an
 older schema is reported as stale or `schema_outdated` and rebuilt with
-`riltra index`, never silently reused.
+`riltra index`, never silently reused. These are compatibility commitments for
+the `0.2.x` line only. They are not API guarantees for a 1.0 release, and this
+release makes no claim about measured results on real projects.
+
+Platform support for the `0.2.0` archives is Windows x64, Linux x64, and macOS
+Intel x64. The optional semantic-knowledge feature is not part of the default
+package.
 
 ## Project status
 
-Riltra is pre-release software; `0.1.0` is published as a pre-release, not a
-stable release. Check the [release notes](https://github.com/terapetralabs/riltra/releases)
-for the published version and its limits.
+Riltra is pre-1.0 software. `0.2.0` is a release, not a pre-release. `0.1.0`
+was published as a pre-release. Check the [release notes](https://github.com/terapetralabs/riltra/releases)
+for the published versions and their limits.
 
 ## Documentation
 

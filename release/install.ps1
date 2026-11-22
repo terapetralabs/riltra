@@ -3,14 +3,14 @@
 # Minimal user-level installer for a Riltra release archive (M10 Task 5).
 #
 # Local archive:  install.ps1 -ArchivePath <riltra-<version>-windows-x64.zip>
-# Release asset:  install.ps1 [-Version 0.1.0]
+# Release asset:  install.ps1 [-Version 0.2.0]
 #
 # The payload (binary, LICENSE, NOTICE, THIRD_PARTY_LICENSES.txt, sbom.cdx.json
 # and INSTALL.md) goes to %LOCALAPPDATA%\Programs\Riltra\bin. PATH is printed,
 # not changed. No administrative rights are needed or requested.
 param(
     [string]$ArchivePath,
-    [string]$Version = '0.1.0'
+    [string]$Version = '0.2.0'
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

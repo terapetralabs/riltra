@@ -2,7 +2,7 @@
 
 How a Riltra release candidate is built, checked and verified. Nothing here
 publishes a release, creates a tag or signs anything: publishing a release, such
-as the `v0.1.0` pre-release, is a separate maintainer action.
+as the `v0.2.0` release (earlier, the `v0.1.0` pre-release), is a separate maintainer action.
 
 ## What the workflow does
 

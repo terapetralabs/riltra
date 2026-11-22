@@ -19,9 +19,9 @@ you configure explicitly, and Riltra never starts one by default:
 
 ## Supported versions
 
-Riltra is pre-1.0. `0.1.0` is the first pre-release. Security fixes land on
-`master` and ship with the next pre-release; only the latest release is
-supported.
+Riltra is pre-1.0. `0.2.0` is the current release (`0.1.0` was the first
+pre-release). Security fixes land on `master` and ship with the next release;
+only the latest release is supported.
 
 ## Reporting a vulnerability
 

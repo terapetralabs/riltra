@@ -927,7 +927,9 @@ struct Report {
 #[derive(Serialize)]
 struct SnapshotOut {
     nonce: String,
-    /// The snapshot row id. The store keeps no other per-snapshot counter.
+    /// The semantic-import generation (`store::semantic_generation`), read in the same D1
+    /// transaction as the snapshot. It is the counter `checks` and `map` report, and it moves
+    /// when a SCIP import commits, which can change the anchors a scan proves.
     generation: i64,
 }
 
@@ -1631,10 +1633,13 @@ fn assemble(
     let knowledge = read_knowledge(home, repo, root, &doc_paths)?;
     let mut acc = Acc::default();
     acc.omissions.add("documents", "item_limit", doc_omitted);
-    let snapshot_out = index.snapshot.as_ref().map(|s| SnapshotOut {
-        nonce: s.nonce.clone(),
-        generation: s.id,
-    });
+    let snapshot_out = match (index.conn, index.snapshot.as_ref()) {
+        (Some(conn), Some(s)) => Some(SnapshotOut {
+            nonce: s.nonce.clone(),
+            generation: store::semantic_generation(conn).map_err(storage)?,
+        }),
+        _ => None,
+    };
     let link_index = match (index.conn, index.snapshot.as_ref()) {
         (Some(conn), Some(snapshot)) => Some((conn, snapshot.id)),
         _ => None,
@@ -1897,30 +1902,220 @@ mod scan_tests {
         }
     }
 
-    fn two_docs() -> Report {
-        let mut first = doc_out("docs/a.md");
-        first.sections = vec![section(0, 1), section(1, 1)];
-        let mut second = doc_out("docs/b.md");
-        second.sections = vec![section(0, 1), section(1, 2)];
-        report(vec![first, second])
+    /// The D8 removal order, by list name.
+    const LISTS: [&str; 5] = [
+        "links",
+        "proposals",
+        "sections",
+        "stale_records",
+        "documents",
+    ];
+
+    fn proposal(i: usize) -> Proposal {
+        let symbol = "scip-kt test pkg 1.0.0 pkg/calc.py/add().".to_string();
+        Proposal {
+            doc: format!("docs/d{i}.md"),
+            section_id: "S0@1".to_string(),
+            section_digest: "e".repeat(64),
+            suggested_record_id: format!("doc-d{i}-s0-0123abcd"),
+            target: TargetOut {
+                path: "pkg/calc.py".to_string(),
+                symbol: Some(symbol.clone()),
+                definition: DefOut {
+                    name: Some("add".to_string()),
+                    kind: "function".to_string(),
+                    line: 1,
+                    col: 5,
+                    byte_start: 0,
+                    byte_end: 30,
+                },
+                anchor: AnchorOut {
+                    kind: "semantic",
+                    precision: "exact".to_string(),
+                    line: 1,
+                    col: 5,
+                    byte_start: 4,
+                    byte_end: 7,
+                    symbol_uri: Some(symbol),
+                    display_name: Some("add".to_string()),
+                    source_digest: "f".repeat(64),
+                },
+            },
+            relation: "documents",
+            state: "proposed",
+            ingest_refusal: None,
+        }
+    }
+
+    fn stale(d: usize) -> StaleOut {
+        StaleOut {
+            id: format!("record-{d}"),
+            revision: 1,
+            kind: "decision".to_string(),
+            title: "a stored record title".to_string(),
+            status: "active".to_string(),
+            evidence: vec![EvidenceOut {
+                byte_start: Some(0),
+                byte_end: Some(10),
+                freshness: "stale",
+            }],
+        }
+    }
+
+    /// Three documents, two sections of two links each, a proposal per document, a stale
+    /// record in the last two documents, and four next actions.
+    fn base() -> Report {
+        let mut documents = Vec::new();
+        for d in 0..3 {
+            let mut doc = doc_out(&format!("docs/d{d}.md"));
+            doc.sections = vec![section(0, 2), section(1, 2)];
+            if d > 0 {
+                doc.stale_records = vec![stale(d)];
+            }
+            documents.push(doc);
+        }
+        let mut r = report(documents);
+        r.proposals = (0..3).map(proposal).collect();
+        r.next_actions = (0..4)
+            .map(|i| NextAction {
+                reason: "a next action",
+                command: Some(format!("riltra step {i}")),
+            })
+            .collect();
+        r
+    }
+
+    /// The state after the first `stages` lists of D8 are emptied (stage 5 keeps only the first
+    /// document and three next actions), with the omission rows that emptying records.
+    fn done(stages: usize) -> (Report, Omissions) {
+        let mut r = base();
+        let mut om = Omissions::default();
+        let links: usize = r
+            .documents
+            .iter()
+            .flat_map(|d| d.sections.iter())
+            .map(|s| s.links.len())
+            .sum();
+        let sections: usize = r.documents.iter().map(|d| d.sections.len()).sum();
+        let stale_total: usize = r.documents.iter().map(|d| d.stale_records.len()).sum();
+        if stages >= 1 {
+            for doc in r.documents.iter_mut() {
+                for s in doc.sections.iter_mut() {
+                    s.links.clear();
+                }
+            }
+            om.add("links", "json_budget", links);
+        }
+        if stages >= 2 {
+            om.add("proposals", "json_budget", r.proposals.len());
+            r.proposals.clear();
+        }
+        if stages >= 3 {
+            for doc in r.documents.iter_mut() {
+                doc.sections.clear();
+            }
+            om.add("sections", "json_budget", sections);
+        }
+        if stages >= 4 {
+            for doc in r.documents.iter_mut() {
+                doc.stale_records.clear();
+            }
+            om.add("stale_records", "json_budget", stale_total);
+        }
+        if stages >= 5 {
+            om.add("documents", "json_budget", r.documents.len() - 1);
+            r.documents.truncate(1);
+            r.next_actions.truncate(3);
+        }
+        r.omissions = om.rows();
+        (r, om)
+    }
+
+    /// The expected report when the budget forces exactly one removal from list `step`
+    /// (1-based), starting from the state where the earlier lists are already empty.
+    fn expected_step(step: usize) -> Report {
+        let (mut r, mut om) = done(step - 1);
+        match step {
+            1 => {
+                let doc = r
+                    .documents
+                    .iter_mut()
+                    .rev()
+                    .find(|d| d.sections.iter().any(|s| !s.links.is_empty()))
+                    .unwrap();
+                let section = doc
+                    .sections
+                    .iter_mut()
+                    .rev()
+                    .find(|s| !s.links.is_empty())
+                    .unwrap();
+                section.links.pop();
+            }
+            2 => {
+                r.proposals.pop();
+            }
+            3 => {
+                let doc = r
+                    .documents
+                    .iter_mut()
+                    .rev()
+                    .find(|d| !d.sections.is_empty())
+                    .unwrap();
+                doc.sections.pop();
+            }
+            4 => {
+                let doc = r
+                    .documents
+                    .iter_mut()
+                    .rev()
+                    .find(|d| !d.stale_records.is_empty())
+                    .unwrap();
+                doc.stale_records.pop();
+            }
+            _ => {
+                r.documents.pop();
+            }
+        }
+        om.add(LISTS[step - 1], "json_budget", 1);
+        r.omissions = om.rows();
+        r
     }
 
     #[test]
     fn json_budget_trims_in_fixed_order() {
-        let full = report_size(two_docs());
-        // One byte under the full size: the first thing removed is the last link of the
-        // last section of the last document, and nothing else is removed.
-        let fitted = fit_with(two_docs(), Omissions::default(), full - 1).unwrap();
-        assert_eq!(fitted.documents[1].sections[1].links.len(), 1);
-        assert_eq!(fitted.documents[1].sections.len(), 2);
-        assert_eq!(fitted.documents[0].sections[0].links.len(), 1);
-        assert_eq!(fitted.documents[0].sections[1].links.len(), 1);
-        assert_eq!(fitted.documents[0].sections.len(), 2);
-        let rows = fitted.omissions;
-        assert!(rows
-            .iter()
-            .any(|r| r.section == "links" && r.reason == "json_budget"));
-        assert!(rows.iter().all(|r| r.section == "links"));
+        // Each step in turn is the one that shrinks: the budget is one byte under the state
+        // where every earlier list is empty, so exactly one item of that list goes.
+        for step in 1..=5 {
+            let (before, _) = done(step - 1);
+            let budget = json_len(&before).unwrap() - 1;
+            let fitted = fit_with(base(), Omissions::default(), budget).unwrap();
+            let expected = expected_step(step);
+            assert_eq!(
+                serde_json::to_string(&fitted).unwrap(),
+                serde_json::to_string(&expected).unwrap(),
+                "step {step} ({})",
+                LISTS[step - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn json_budget_remainder_is_header_and_one_document() {
+        let (remainder, _) = done(5);
+        let size = json_len(&remainder).unwrap();
+        let fitted = fit_with(base(), Omissions::default(), size).unwrap();
+        assert_eq!(
+            serde_json::to_string(&fitted).unwrap(),
+            serde_json::to_string(&remainder).unwrap()
+        );
+        assert_eq!(fitted.documents.len(), 1);
+        assert!(fitted.documents[0].sections.is_empty());
+        assert!(fitted.documents[0].stale_records.is_empty());
+        assert!(fitted.next_actions.len() <= 3);
+        let err = fit_with(base(), Omissions::default(), size - 1)
+            .err()
+            .unwrap();
+        assert_eq!(err, "docs scan report exceeds byte budget");
     }
 
     #[test]
@@ -1944,12 +2139,6 @@ mod scan_tests {
         let root = std::env::temp_dir();
         assert!(semantic::validate_doc_path(&root, "docs/gone-riltra-test.md").is_err());
         assert!(semantic::validate_snapshot_rel("docs/gone-riltra-test.md").is_ok());
-    }
-
-    fn report_size(report: Report) -> usize {
-        let mut report = report;
-        report.omissions = Omissions::default().rows();
-        json_len(&report).unwrap()
     }
 }
 

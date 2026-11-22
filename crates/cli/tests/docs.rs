@@ -654,6 +654,60 @@ fn scan_does_not_offer_return_type_occurrence() {
 }
 
 #[test]
+fn scan_offers_nothing_when_the_make_occurrence_is_dropped() {
+    let src = "struct Thing {};\nThing make() { return {}; }\n";
+    let doc_text = "# Cpp\n[make](../src/thing.cpp#L2)\n";
+    let Some(f) = fixture(
+        "rettype-dropped",
+        &[("src/thing.cpp", src), ("docs/cpp.md", doc_text)],
+    ) else {
+        return;
+    };
+    f.index();
+    let thing = "scip-kt test pkg 1.0.0 src/thing.cpp/Thing#";
+    // The `make` definition occurrence is absent; the reference to `Thing` remains.
+    f.import(&[(
+        "src/thing.cpp",
+        vec![(thing, 0, 7, 12, DEF_ROLE), (thing, 1, 0, 5, 0)],
+    )]);
+    let report = f.scan_json(&[]);
+    let link = &section(doc(&report, "docs/cpp.md"), "Cpp@1")["links"][0];
+    assert_eq!(link["status"], "anchor-unproven", "{report}");
+    assert!(link["definition"].is_null(), "{report}");
+    assert!(link["anchor"].is_null(), "{report}");
+    assert!(
+        report["proposals"].as_array().unwrap().is_empty(),
+        "{report}"
+    );
+    assert!(!report.to_string().contains("Thing"), "{report}");
+
+    // Control: the resolver itself, at line 2 column 1 (the start of `make`), returns `Thing`.
+    // This is the trap the scan avoids; reached through `callers`, which resolves the same
+    // anchor without writing.
+    let out = stage2::run(
+        &f.home,
+        &[
+            "callers".to_string(),
+            "--repo".to_string(),
+            "r".to_string(),
+            "--path".to_string(),
+            "src/thing.cpp".to_string(),
+            "--line".to_string(),
+            "2".to_string(),
+            "--col".to_string(),
+            "1".to_string(),
+        ],
+        &[],
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        text.contains("Thing"),
+        "control: {text} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn scan_does_not_offer_nested_same_name_occurrence() {
     let src = "def foo():\n    def foo():\n        return 1\n    return foo\n";
     let doc_outer = "# Nest\n[outer](../pkg/nest.py#L1)\n";
@@ -740,4 +794,24 @@ fn scan_storage_error_in_resolver_exits_3() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn scan_snapshot_generation_moves_only_on_semantic_import() {
+    let Some(f) = fixture(
+        "generation",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let first = f.scan_json(&[])["snapshot"]["generation"].clone();
+    // Control: with no import between them, the generation is unchanged.
+    let again = f.scan_json(&[])["snapshot"]["generation"].clone();
+    assert_eq!(first, again);
+    assert!(first.is_i64(), "{first}");
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let after = f.scan_json(&[])["snapshot"]["generation"].clone();
+    assert_ne!(first, after, "a semantic import must move the generation");
 }

@@ -2610,6 +2610,7 @@ mod tests {
             symbol: None,
             query: None,
             semantic: false,
+            by_name: false,
             depth: 3,
             limit: 20,
             max_bytes: crate::context::MAX_MAX_BYTES,

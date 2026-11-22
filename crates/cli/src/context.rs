@@ -11,8 +11,8 @@ use petgraph::visit::Reversed;
 use petgraph::Directed;
 
 use crate::{
-    edges, index, knowledge, knowledge_binding, knowledge_search, knowledge_store, registry,
-    response, store,
+    docs, edges, index, knowledge, knowledge_binding, knowledge_search, knowledge_store, registry,
+    response, scan, semantic, store,
 };
 
 pub const DEFAULT_DEPTH: usize = 3;
@@ -29,6 +29,9 @@ pub struct ContextRequest<'a> {
     pub symbol: Option<&'a str>,
     pub query: Option<&'a str>,
     pub semantic: bool,
+    /// The anchor came from a name selector, not a position. Only then may a
+    /// binding on the proven SCIP name occurrence be listed beside the fallback.
+    pub by_name: bool,
     pub depth: usize,
     pub limit: usize,
     pub max_bytes: usize,
@@ -180,11 +183,21 @@ pub(crate) fn query_pinned_with_hook(
     between_resolutions: impl FnOnce(&rusqlite::Transaction<'_>),
 ) -> Result<ContextResult, PinnedContextError> {
     let (canon, rel) = validate_request(root, request).map_err(PinnedContextError::Path)?;
-    let (trace, facts) = read_code_tx(tx, repo, &canon, &rel, request, || {}, between_resolutions)?;
+    let (trace, facts, name_occurrence) =
+        read_code_tx(tx, repo, &canon, &rel, request, || {}, between_resolutions)?;
     let mut graph = context_nodes(&trace);
     let omitted_nodes = graph.len().saturating_sub(request.limit);
     graph.truncate(request.limit);
-    let knowledge = knowledge_context(tx, home, entry, root, &trace, request, || {});
+    let knowledge = knowledge_context(
+        tx,
+        home,
+        entry,
+        root,
+        &trace,
+        name_occurrence.as_ref(),
+        request,
+        || {},
+    );
     Ok(ContextResult {
         graph,
         trace,
@@ -204,7 +217,14 @@ fn read_code_tx(
     request: &ContextRequest<'_>,
     pinned: impl FnOnce(),
     between_resolutions: impl FnOnce(&rusqlite::Transaction<'_>),
-) -> Result<(index::TraceQueryOut, index::FactSections), PinnedContextError> {
+) -> Result<
+    (
+        index::TraceQueryOut,
+        index::FactSections,
+        Option<index::EdgeAnchor>,
+    ),
+    PinnedContextError,
+> {
     let trace = index::graph_query_tx_classified(
         tx,
         repo,
@@ -223,7 +243,59 @@ fn read_code_tx(
     })?;
     between_resolutions(tx);
     let facts = fact_sections(tx, repo, canon, rel, request, &trace)?;
-    Ok((trace, facts))
+    let name_occurrence = if request.by_name {
+        proven_name_occurrence(tx, canon, rel, &trace)?
+    } else {
+        None
+    };
+    Ok((trace, facts, name_occurrence))
+}
+
+/// For a name selector whose anchor is the syntax fallback over a definition,
+/// the definition's own SCIP name occurrence, when the same ownership proof that
+/// `docs scan` and `docs ingest` use establishes it. Never a name match: the
+/// occurrence is returned only when `prove_anchor` proves a semantic anchor on a
+/// span other than the definition. An unproven definition or a refused anchor
+/// gives `None`; a storage failure is an error. `canon` is the canonical root.
+fn proven_name_occurrence(
+    tx: &rusqlite::Transaction<'_>,
+    canon: &Path,
+    rel: &str,
+    trace: &index::TraceQueryOut,
+) -> Result<Option<index::EdgeAnchor>, PinnedContextError> {
+    if trace.anchor.kind != index::AnchorKind::SyntaxFallback {
+        return Ok(None);
+    }
+    let Some((start, end)) = trace.anchor.span_bytes else {
+        return Ok(None);
+    };
+    let snapshot_id = trace.snapshot.id;
+    let rows: Vec<store::SymbolRow> = store::symbols_at(tx, snapshot_id, rel)
+        .map_err(PinnedContextError::Store)?
+        .into_iter()
+        .filter(|row| row.byte_start == start && row.byte_end == end)
+        .collect();
+    let [definition] = rows.as_slice() else {
+        return Ok(None);
+    };
+    let Ok(bytes) = semantic::confined_read(canon, rel, scan::MAX_FILE_BYTES) else {
+        return Ok(None);
+    };
+    // The proof reads these bytes, so they must be the bytes the snapshot indexed.
+    let indexed = store::file_identity(tx, snapshot_id, rel).map_err(PinnedContextError::Store)?;
+    if indexed.is_none_or(|(_, digest)| digest != store::content_digest(&bytes)) {
+        return Ok(None);
+    }
+    match docs::prove_anchor(tx, snapshot_id, canon, rel, definition, &bytes) {
+        Ok(docs::Proof::Proven(edge))
+            if edge.kind == index::AnchorKind::Semantic
+                && edge.span_bytes.is_some_and(|span| span != (start, end)) =>
+        {
+            Ok(Some(edge))
+        }
+        Ok(_) | Err(index::GraphQueryError::Anchor(_)) => Ok(None),
+        Err(index::GraphQueryError::Store(message)) => Err(PinnedContextError::Store(message)),
+    }
 }
 
 #[cfg(test)]
@@ -264,7 +336,7 @@ fn query_conn_inner(
     let (canon, rel) = validate_request(root, request)?;
     // One read transaction: the graph and every fact section see the same
     // pinned snapshot. The knowledge store is a separate database, read after.
-    let (trace, facts) = {
+    let (trace, facts, name_occurrence) = {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         read_code_tx(&tx, repo, &canon, &rel, request, pinned, |_| {})
             .map_err(PinnedContextError::into_message)?
@@ -272,7 +344,16 @@ fn query_conn_inner(
     let mut graph = context_nodes(&trace);
     let omitted_nodes = graph.len().saturating_sub(request.limit);
     graph.truncate(request.limit);
-    let knowledge = knowledge_context(conn, home, entry, root, &trace, request, before_bindings);
+    let knowledge = knowledge_context(
+        conn,
+        home,
+        entry,
+        root,
+        &trace,
+        name_occurrence.as_ref(),
+        request,
+        before_bindings,
+    );
     Ok(ContextResult {
         graph,
         trace,
@@ -486,12 +567,14 @@ fn map_semantic(outcome: knowledge_search::SearchOutcome) -> ContextRetrieval {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn knowledge_context(
     code_conn: &rusqlite::Connection,
     home: &Path,
     entry: &registry::RepoEntry,
     root: &Path,
     trace: &index::TraceQueryOut,
+    name_occurrence: Option<&index::EdgeAnchor>,
     request: &ContextRequest<'_>,
     before_bindings: impl FnOnce(),
 ) -> ContextKnowledge {
@@ -627,6 +710,20 @@ fn knowledge_context(
             };
         }
     };
+    let alternate = name_occurrence.and_then(|edge| {
+        let (byte_start, byte_end) = edge.span_bytes?;
+        Some(knowledge_binding::CodeAnchor {
+            byte_start,
+            byte_end,
+            cursor_line: edge.line1,
+            cursor_col: edge.col1,
+            symbol_uri: edge.symbol_uri.clone(),
+            display_name: edge.display.clone(),
+            anchor_kind: edge.kind.as_str().to_string(),
+            precision: edge.precision.clone(),
+            ..anchor.clone()
+        })
+    });
     let model_dir = std::env::var_os("RILTRA_MODEL_DIR").map(std::path::PathBuf::from);
     let mut expected_generation = None;
     let mut status = "available";
@@ -692,6 +789,7 @@ fn knowledge_context(
         &knowledge_conn,
         entry,
         &anchor,
+        alternate.as_ref(),
         request.limit,
         expected_generation,
     ) {
@@ -925,6 +1023,7 @@ mod tests {
             symbol: None,
             query: Some("local database"),
             semantic: false,
+            by_name: false,
             depth: 3,
             limit: 20,
             max_bytes: DEFAULT_MAX_BYTES,
@@ -1235,6 +1334,7 @@ mod tests {
             symbol: None,
             query: None,
             semantic: false,
+            by_name: false,
             depth: 3,
             limit: 20,
             max_bytes: DEFAULT_MAX_BYTES,

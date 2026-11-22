@@ -2164,3 +2164,143 @@ fn position_selector_at_definition_start_keeps_old_behaviour() {
     let name = packet_bindings(&f, r#"[{"path":"pkg/calc.py","line":1,"col":5}]"#);
     assert_only_doc_storage(&name);
 }
+
+const ADD_SELECTOR: &str = r#"[{"target":"add","in":"pkg/calc.py","kind":"function"}]"#;
+
+/// Creates record `record` (no evidence) and binds it to `path` at `line`/`col`.
+fn bind_plain_record(f: &Fixture, record: &str, path: &str, line: &str, col: &str) {
+    let created = f.knowledge_create(&format!(
+        r#"{{"id":"{record}","kind":"decision","title":"{record}","body":"no evidence","status":"active","author":"a"}}"#
+    ));
+    assert_eq!(code_of(&created), Some(0), "{}", stderr_of(&created));
+    let bound = f.stdin_cli(
+        &[
+            "knowledge", "bind", "--repo", "r", "--path", path, "--line", line, "--col", col,
+            "--input", "-",
+        ],
+        &format!(
+            r#"{{"record_id":"{record}","record_revision":1,"relation":"documents","author":"a","rationale":"r","provenance":"p"}}"#
+        ),
+    );
+    assert_eq!(code_of(&bound), Some(0), "{}", stderr_of(&bound));
+}
+
+/// Reads one column of the `doc-storage` binding row from the fixture's knowledge DB.
+fn doc_storage_binding_column(f: &Fixture, column: &str) -> String {
+    let db = rusqlite::Connection::open(f.home.join("knowledge").join("r.db")).unwrap();
+    let sql = format!("SELECT {column} FROM code_bindings WHERE record_id = 'doc-storage'");
+    db.query_row(&sql, [], |row| row.get(0)).unwrap()
+}
+
+/// Overwrites one column of the `doc-storage` binding row in the fixture's knowledge DB.
+fn set_doc_storage_binding_column(f: &Fixture, column: &str, value: &str) {
+    let db = rusqlite::Connection::open(f.home.join("knowledge").join("r.db")).unwrap();
+    let sql = format!("UPDATE code_bindings SET {column} = ?1 WHERE record_id = 'doc-storage'");
+    assert_eq!(db.execute(&sql, [value]).unwrap(), 1, "one doc-storage row");
+}
+
+#[test]
+fn name_selector_unproven_anchor_keeps_existing_bindings() {
+    // A same-name nested `def` makes `--target foo` ambiguous by design, so the
+    // child shares the name `foo` as a nested class; `--kind function` picks the parent.
+    let src = "def foo():\n    class foo:\n        pass\n    return foo\n";
+    let Some(f) = fixture("name-sel-unproven", &[("pkg/nest.py", src)]) else {
+        return;
+    };
+    f.index();
+    let inner = "scip-kt test pkg 1.0.0 pkg/nest.py/inner().";
+    let outer = "scip-kt test pkg 1.0.0 pkg/nest.py/outer().";
+    let selector = r#"[{"target":"foo","in":"pkg/nest.py","kind":"function"}]"#;
+    // Partial import: only the nested class occurrence, which the outer name does not own.
+    f.import(&[("pkg/nest.py", vec![(inner, 1, 10, 13, DEF_ROLE)])]);
+    bind_plain_record(&f, "child", "pkg/nest.py", "2", "11");
+    let refused = packet_bindings(&f, selector);
+    assert_eq!(
+        refused["bindings"].as_array().unwrap().len(),
+        0,
+        "{refused}"
+    );
+    assert_eq!(refused["total"], 0, "{refused}");
+    // Control: the complete import proves the outer occurrence, which then lists its own binding.
+    f.import(&[(
+        "pkg/nest.py",
+        vec![(outer, 0, 4, 7, DEF_ROLE), (inner, 1, 10, 13, DEF_ROLE)],
+    )]);
+    bind_plain_record(&f, "parent", "pkg/nest.py", "1", "5");
+    let page = packet_bindings(&f, selector);
+    assert_eq!(page["status"], "linked", "{page}");
+    let bindings = page["bindings"].as_array().unwrap();
+    assert_eq!(bindings.len(), 1, "{page}");
+    assert_eq!(bindings[0]["record_id"], "parent", "{page}");
+    assert_eq!(bindings[0]["freshness"], "fresh", "{page}");
+}
+
+#[test]
+fn name_selector_binding_digest_mismatch_is_unresolved() {
+    let Some(f) = name_selector_fixture("name-sel-digest") else {
+        return;
+    };
+    let original = doc_storage_binding_column(&f, "source_digest");
+    let wrong = "0123456789abcdef";
+    assert_ne!(
+        original, wrong,
+        "fixture digest must differ from the mutation"
+    );
+    set_doc_storage_binding_column(&f, "source_digest", wrong);
+    let page = packet_bindings(&f, ADD_SELECTOR);
+    assert_eq!(page["status"], "unresolved", "{page}");
+    assert_eq!(
+        page["unresolved_reason"], "stored binding identity does not match pinned code anchor",
+        "{page}"
+    );
+    let bindings = page["bindings"].as_array().unwrap();
+    assert_eq!(bindings.len(), 1, "{page}");
+    assert_eq!(bindings[0]["freshness"], "unresolved", "{page}");
+    assert_eq!(
+        bindings[0]["freshness_reason"],
+        "stored binding identity does not match pinned code anchor",
+        "{page}"
+    );
+    set_doc_storage_binding_column(&f, "source_digest", &original);
+    assert_only_doc_storage(&packet_bindings(&f, ADD_SELECTOR));
+}
+
+#[test]
+fn name_selector_rejects_same_span_wrong_uri_or_kind() {
+    let Some(f) = name_selector_fixture("name-sel-wrong-uri") else {
+        return;
+    };
+    let original_uri = doc_storage_binding_column(&f, "symbol_uri");
+    let wrong_uri = "scip-kt test pkg 1.0.0 pkg/calc.py/wrong().";
+    assert_ne!(original_uri, wrong_uri);
+    set_doc_storage_binding_column(&f, "symbol_uri", wrong_uri);
+    let refused = packet_bindings(&f, ADD_SELECTOR);
+    assert_eq!(
+        refused["bindings"].as_array().unwrap().len(),
+        0,
+        "{refused}"
+    );
+    assert_eq!(refused["total"], 0, "{refused}");
+    set_doc_storage_binding_column(&f, "symbol_uri", &original_uri);
+    assert_only_doc_storage(&packet_bindings(&f, ADD_SELECTOR));
+
+    let Some(g) = name_selector_fixture("name-sel-wrong-kind") else {
+        return;
+    };
+    let original_kind = doc_storage_binding_column(&g, "anchor_kind");
+    let wrong_kind = if original_kind == "semantic" {
+        "syntax-fallback"
+    } else {
+        "semantic"
+    };
+    set_doc_storage_binding_column(&g, "anchor_kind", wrong_kind);
+    let refused = packet_bindings(&g, ADD_SELECTOR);
+    assert_eq!(
+        refused["bindings"].as_array().unwrap().len(),
+        0,
+        "{refused}"
+    );
+    assert_eq!(refused["total"], 0, "{refused}");
+    set_doc_storage_binding_column(&g, "anchor_kind", &original_kind);
+    assert_only_doc_storage(&packet_bindings(&g, ADD_SELECTOR));
+}

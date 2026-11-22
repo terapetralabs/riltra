@@ -7162,8 +7162,90 @@ fn docs_scan_fixture(tag: &str) -> PathBuf {
     h
 }
 
+/// A committed repository with two functions and a document whose two links name them by
+/// line (`#L1` and `#L4`), indexed with no SCIP import, so the proposals come from the
+/// syntax definitions. Returns the home.
+fn docs_scan_indexed_fixture(tag: &str) -> PathBuf {
+    let h = home(tag);
+    let dir = home(&format!("{tag}-repo"));
+    std::fs::create_dir_all(dir.join("docs/adr")).unwrap();
+    std::fs::create_dir_all(dir.join("pkg")).unwrap();
+    std::fs::write(
+        dir.join("pkg/calc.py"),
+        "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("docs/adr/0001.md"),
+        "# Storage\n\nAddition is [add](../../pkg/calc.py#L1) and subtraction is [sub](../../pkg/calc.py#L4).\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main", "."]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["config", "core.autocrlf", "false"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    indexed_repo(&h, &dir, "r");
+    h
+}
+
 #[test]
 fn docs_scan_mcp_matches_cli_document() {
+    if !git_or_skip() {
+        return;
+    }
+    let h = docs_scan_indexed_fixture("docs-cli-indexed");
+    let (code, out, err) = run_cli(&h, &["docs", "scan", "--repo", "r"]);
+    assert_eq!(code, 0, "{err}");
+
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_docs_scan", &json!({"repo": "r"}));
+    assert!(!is_error(&result), "{result}");
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("tool content text");
+    assert_eq!(
+        text,
+        out.trim_end_matches('\n'),
+        "the MCP text must equal the CLI stdout byte for byte"
+    );
+    // The document is populated, so the parity above is not vacuous.
+    let d = doc(&result);
+    assert_eq!(d["documents"][0]["path"], "docs/adr/0001.md", "{d}");
+    assert!(
+        d["snapshot"].is_object(),
+        "an indexed scan has a snapshot: {d}"
+    );
+    let proposals = d["proposals"].as_array().expect("proposals array");
+    assert_eq!(proposals.len(), 2, "{d}");
+    let statuses: Vec<&str> = d["documents"][0]["sections"]
+        .as_array()
+        .expect("sections array")
+        .iter()
+        .flat_map(|s| s["links"].as_array().unwrap().iter())
+        .map(|l| l["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        statuses.iter().filter(|s| **s == "definition").count(),
+        2,
+        "both links resolve to a definition: {statuses:?}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn docs_scan_mcp_matches_cli_document_without_index() {
     let h = docs_scan_fixture("docs-cli");
     let (code, out, err) = run_cli(&h, &["docs", "scan", "--repo", "r"]);
     assert_eq!(code, 0, "{err}");

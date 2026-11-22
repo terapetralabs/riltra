@@ -16,6 +16,7 @@ mod changes;
 mod checks;
 mod concept;
 mod context;
+mod docs;
 mod doctor;
 mod edges;
 mod expand;

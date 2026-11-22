@@ -1832,6 +1832,14 @@ fn binding_reports_stale_record_evidence_after_doc_edit() {
         "{before}"
     );
 
+    let packet_before = packet_binding(&f);
+    assert_eq!(
+        packet_before["record_evidence"],
+        json!({"total": 1, "fresh": 1, "stale": 0, "unresolved": 0}),
+        "{packet_before}"
+    );
+    assert_eq!(packet_before["freshness"], "fresh", "{packet_before}");
+
     f.write("docs/adr/0001.md", &DOC.replace("Add uses", "Add is used"));
     let after = f.at("pkg/calc.py", &line, &col);
     assert_eq!(
@@ -1843,6 +1851,37 @@ fn binding_reports_stale_record_evidence_after_doc_edit() {
         after["result"]["bindings"][0]["freshness"], "fresh",
         "{after}"
     );
+    let packet_after = packet_binding(&f);
+    assert_eq!(
+        packet_after["record_evidence"],
+        json!({"total": 1, "fresh": 0, "stale": 1, "unresolved": 0}),
+        "{packet_after}"
+    );
+    assert_eq!(packet_after["freshness"], "fresh", "{packet_after}");
+}
+
+/// The single knowledge binding under the packet anchor at the binding name (line 1, col 5). Fails loudly when
+/// the anchor, its context, or the bindings path is absent.
+fn packet_binding(f: &Fixture) -> Value {
+    let out = cli(
+        &f.home,
+        &words(&[
+            "packet",
+            "--repo",
+            "r",
+            "--anchors",
+            r#"[{"path":"pkg/calc.py","line":1,"col":5}]"#,
+        ]),
+    );
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("packet prints JSON");
+    let anchor = &doc["anchors"][0];
+    assert_eq!(anchor["status"], "resolved", "{doc}");
+    let bindings = anchor["context"]["data"]["knowledge"]["bindings"]["bindings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("packet anchor has no knowledge bindings path: {doc}"));
+    assert_eq!(bindings.len(), 1, "{doc}");
+    bindings[0].clone()
 }
 
 #[test]

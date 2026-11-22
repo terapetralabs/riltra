@@ -22,6 +22,28 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   the read-only path and creates and migrates nothing; SQLite may create `-wal`/`-shm`
   sidecars beside an existing index. See [capabilities](docs/guide/capabilities.md#area-map-read-only).
 
+- `watch` (CLI only): opt-in polling process that rebuilds the code index through the same
+  incremental `index` after source, ignore, config, HEAD or branch changes, with one JSON event
+  per line (`started`, `built`, `failed`, `busy`, `stopped`). One watcher per index; a
+  contending rebuild or import reports `index-busy:`. It never runs project builds, language
+  servers, SCIP imports or semantic providers, and there is no MCP tool for it. See
+  [capabilities](docs/guide/capabilities.md#automatic-index-updates-opt-in).
+
+- `start` and `overview` (CLI) and MCP tool `riltra_project_overview`: guided project
+  orientation. `overview --repo <name>` and the MCP tool print a read-only summary from bounded
+  index and document evidence (freshness and reasons, languages, source directories,
+  build and test documents, candidate entry points, definitions). `start` is an interactive
+  wizard: registration and indexing each need a separate default-no approval, and a selected
+  definition becomes a packet without typing coordinates. With `--json` or without a terminal,
+  `start` only prints the overview. See the [agent setup guide](docs/guide/agent-setup.md#guided-first-use).
+
+- `packet` (CLI) and MCP tool `riltra_code_packet`: one to five explicitly selected anchors
+  (position or name selectors) resolved on one pinned snapshot, with per-anchor outcomes,
+  explicit knowledge bindings and bounded source snippets under one response-byte budget
+  (`max_bytes` 32768 by default). Ambiguous names are never chosen automatically, and packet runs
+  no lexical or semantic knowledge retrieval. Packet response schema 1 is separate from the
+  database schemas. See [capabilities](docs/guide/capabilities.md#selected-anchor-packets).
+
 - `agent-block` (CLI): prints the Markdown instruction block for an agent's instruction file
   (`AGENTS.md` or `CLAUDE.md`), naming the graph tools and when to call them. It is plain
   Markdown text, not JSON, like `--help` and `--version`. It takes no arguments, reads no

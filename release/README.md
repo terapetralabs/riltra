@@ -1,8 +1,8 @@
 # Release candidate packaging
 
 How a Riltra release candidate is built, checked and verified. Nothing here
-publishes a release, creates a tag or signs anything: the `v0.1.0` release is a
-separate maintainer action.
+publishes a release, creates a tag or signs anything: publishing a release, such
+as the `v0.1.0` pre-release, is a separate maintainer action.
 
 ## What the workflow does
 
@@ -73,5 +73,5 @@ tooling; it does not make application inference download a model or runtime.
 
 ## Gates
 
-The [changelog](../CHANGELOG.md#unreleased) records the verified scope and
-limits of the post-release workflow run.
+The [changelog](../CHANGELOG.md#020-rc1---2026-11-10) records the verified scope
+and limits of the post-release workflow run (its "Evidence status" section).

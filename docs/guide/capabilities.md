@@ -149,8 +149,10 @@ they do not create or migrate databases, and a missing code index returns a
 
 `riltra index` also stores three more kinds of syntax fact and a word index for
 concept search. `context` reports the containment and heritage facts (see
-[context fact sections](#context-fact-sections)); no other command or MCP tool
-reports the doc-comment and concept-word facts yet, and `scan` output is unchanged.
+[context fact sections](#context-fact-sections)). `query` ranks definitions by
+the concept words, which include the doc-comment text (see [search,
+relationships, and freshness](#search-relationships-and-freshness)); no command
+prints the doc-comment text itself, and `scan` output is unchanged.
 
 - **Heritage**: the supertypes a declaration names. Python base classes (not
   keyword arguments or `*splat` bases), JavaScript `extends`, TypeScript and

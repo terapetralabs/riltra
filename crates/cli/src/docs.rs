@@ -4,11 +4,19 @@
 //! Pure: reads nothing from disk. The rules are the Stage 7 plan's D2
 //! (sections and links) and D3 (suggested record id).
 
-use crate::store;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use rusqlite::Connection;
+use serde::Serialize;
+
+use crate::index::{self, AnchorKind, EdgeAnchor, GraphQueryError};
+use crate::knowledge::{self, EvidenceFreshness};
+use crate::{edges, git, knowledge_store, paths, registry, scan, semantic, store};
 
 /// One section of a Markdown document: a heading and the bytes up to the
 /// next heading of any level, or the end of the file.
-#[allow(dead_code)] // Task 2 consumes this
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Section {
     pub section_id: String,
@@ -24,7 +32,6 @@ pub(crate) struct Section {
 }
 
 /// One inline link found outside fences and code spans.
-#[allow(dead_code)] // Task 2 consumes this
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Link {
     pub line: usize,
@@ -34,7 +41,6 @@ pub(crate) struct Link {
 }
 
 /// What a link target points at. Only `Path` links are resolved further.
-#[allow(dead_code)] // Task 2 consumes this
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LinkKind {
     External,
@@ -50,7 +56,6 @@ pub(crate) enum LinkKind {
 }
 
 /// Splits a document into sections and collects its inline links.
-#[allow(dead_code)] // Task 2 consumes this
 pub(crate) fn parse_document(doc_path: &str, text: &str) -> Vec<Section> {
     struct Head {
         line: usize,
@@ -156,7 +161,6 @@ pub(crate) fn parse_document(doc_path: &str, text: &str) -> Vec<Section> {
 }
 
 /// The suggested knowledge record id for one section (D3).
-#[allow(dead_code)] // Task 2 consumes this
 pub(crate) fn suggested_record_id(
     doc_path: &str,
     heading: Option<&str>,
@@ -471,6 +475,1482 @@ fn parse_line_number(s: &str) -> Option<usize> {
         return None;
     }
     s.parse::<usize>().ok().filter(|&v| v >= 1)
+}
+
+// ---------------------------------------------------------------------------
+// `riltra docs scan` (Stage 7, Task 2): D0, D1, D3, D4, D5, D8 and D9.
+// ---------------------------------------------------------------------------
+
+const SCHEMA_VERSION: u32 = 1;
+const MAX_DOCUMENTS: usize = 200;
+const MAX_SECTIONS: usize = 500;
+const MAX_LINKS: usize = 50;
+const MAX_PROPOSALS: usize = 500;
+const MAX_STALE: usize = 20;
+const MAX_CANDIDATES: usize = 5;
+const MAX_PATHS: usize = 20;
+const MAX_REPORT_BYTES: usize = 262_144;
+/// Binding provenance cap (`docs-ingest:<doc>#<section_id>@<digest>`), D4.
+const PROVENANCE_MAX: usize = 4_096;
+const DEF_ROLE: u32 = 1;
+const DISCLAIMER: &str = "Document sections are the author's claims. Proposals come only from explicit links to indexed definitions; riltra wrote nothing, and a proposal or binding is not a verified relationship.";
+const LINK_STATUSES: [&str; 12] = [
+    "outside-repo",
+    "no-index",
+    "not-indexed",
+    "source-changed",
+    "file",
+    "no-definition-at-line",
+    "ambiguous-line",
+    "definition",
+    "anchor-unproven",
+    "anchor-unavailable",
+    "external",
+    "same-document",
+];
+
+/// A failure with its exit code (2 usage, 3 repository, data or storage).
+type Fail = (i32, String);
+
+fn storage(e: impl std::fmt::Display) -> Fail {
+    (3, e.to_string())
+}
+
+fn is_markdown(path: &str) -> bool {
+    path.ends_with(".md") || path.ends_with(".markdown")
+}
+
+/// A document to scan: its validated relative path and whether it was named with `--path`.
+struct DocIn {
+    path: String,
+    explicit: bool,
+}
+
+/// The documents to read (D0). Walked documents are capped at 200; the rest are counted.
+fn discover(root: &Path, paths_in: &[String]) -> Result<(Vec<DocIn>, usize), Fail> {
+    if paths_in.is_empty() {
+        let (plan, _) = scan::plan_walk(root).map_err(storage)?;
+        let mut found: Vec<String> = plan
+            .into_iter()
+            .filter(|f| matches!(f.action, scan::PlanAction::Unsupported(_)) && is_markdown(&f.rel))
+            .map(|f| f.rel)
+            .collect();
+        found.sort();
+        let omitted = found.len().saturating_sub(MAX_DOCUMENTS);
+        found.truncate(MAX_DOCUMENTS);
+        let docs = found
+            .into_iter()
+            .map(|path| DocIn {
+                path,
+                explicit: false,
+            })
+            .collect();
+        return Ok((docs, omitted));
+    }
+    if paths_in.len() > MAX_PATHS {
+        return Err((2, format!("at most {MAX_PATHS} --path values")));
+    }
+    let mut set = BTreeSet::new();
+    for raw in paths_in {
+        if !is_markdown(raw) {
+            return Err((
+                2,
+                format!("--path must name a Markdown file (.md or .markdown): '{raw}'"),
+            ));
+        }
+        let rel = semantic::validate_snapshot_rel(raw)
+            .map_err(|m| (2, format!("invalid --path: {m}")))?;
+        set.insert(rel);
+    }
+    let docs = set
+        .into_iter()
+        .map(|path| DocIn {
+            path,
+            explicit: true,
+        })
+        .collect();
+    Ok((docs, 0))
+}
+
+/// What the file system holds at a document path (D0).
+enum Content {
+    Read(Vec<u8>),
+    Missing,
+    TooLarge,
+    Unreadable(String),
+}
+
+fn read_doc(root: &Path, doc: &DocIn) -> Result<Content, Fail> {
+    match semantic::confined_read_classified(root, &doc.path, scan::MAX_FILE_BYTES) {
+        Ok(bytes) => Ok(Content::Read(bytes)),
+        Err(semantic::ConfinedReadError::NotFound(_)) => Ok(Content::Missing),
+        Err(semantic::ConfinedReadError::Path(m)) if doc.explicit => {
+            Err((2, format!("invalid --path: {m}")))
+        }
+        Err(semantic::ConfinedReadError::Path(m)) => Ok(Content::Unreadable(m)),
+        Err(semantic::ConfinedReadError::Io(m)) => {
+            let big = root
+                .join(&doc.path)
+                .metadata()
+                .map(|meta| meta.len() > scan::MAX_FILE_BYTES)
+                .unwrap_or(false);
+            Ok(if big {
+                Content::TooLarge
+            } else {
+                Content::Unreadable(m)
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proof of a definition anchor (D3). Shared with ingest (Task 3).
+// ---------------------------------------------------------------------------
+
+/// The result of proving one syntax definition against the semantic facts.
+pub(crate) enum Proof {
+    /// The anchor resolves to the definition's own occurrence.
+    Proven(EdgeAnchor),
+    /// No proof: the reason becomes the link's `anchor-unproven` reason.
+    Unproven(String),
+}
+
+/// The unqualified part of a stored definition name (after the last `::` or `.`).
+fn unqualified(name: &str) -> &str {
+    let last = name.rsplit("::").next().unwrap_or(name);
+    last.rsplit('.').next().unwrap_or(last)
+}
+
+/// 0-based line and byte column of a byte offset in the live source.
+fn position(source: &[u8], offset: usize) -> (u32, u32) {
+    let before = &source[..offset];
+    let line = before.iter().filter(|b| **b == b'\n').count();
+    let line_start = before
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    (
+        u32::try_from(line).unwrap_or(u32::MAX),
+        u32::try_from(offset - line_start).unwrap_or(u32::MAX),
+    )
+}
+
+/// Whether the import behind a fact belongs to this snapshot and passes the provenance rules.
+fn import_usable(
+    conn: &Connection,
+    snapshot_id: i64,
+    import_id: i64,
+    cache: &mut BTreeMap<i64, bool>,
+) -> Result<bool, GraphQueryError> {
+    if let Some(known) = cache.get(&import_id) {
+        return Ok(*known);
+    }
+    let usable = store::semantic_import_by_id(conn, import_id)?.is_some_and(|(_, import)| {
+        import.snapshot_id == snapshot_id && edges::import_provenance_ok(&import)
+    });
+    cache.insert(import_id, usable);
+    Ok(usable)
+}
+
+/// Proves that `definition` (a syntax row of `validated`) owns one occurrence, as D3 states.
+/// The resolver is never called at the definition's own start, where a return-type reference
+/// can be the narrowest occurrence. Scan and ingest both call this on the same transaction.
+pub(crate) fn prove_anchor(
+    conn: &Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    validated: &str,
+    definition: &store::SymbolRow,
+    source: &[u8],
+) -> Result<Proof, GraphQueryError> {
+    let Some(name) = definition
+        .name
+        .as_deref()
+        .map(unqualified)
+        .filter(|n| !n.is_empty())
+    else {
+        return Ok(Proof::Unproven("the definition has no name".to_string()));
+    };
+    let defs = store::symbols_at(conn, snapshot_id, validated)?;
+    let facts = store::semantic_facts_at(conn, snapshot_id, validated)?;
+    let width = definition.byte_end.saturating_sub(definition.byte_start);
+    let descendants: Vec<(usize, usize)> = defs
+        .iter()
+        .filter(|d| {
+            d.byte_start >= definition.byte_start
+                && d.byte_end <= definition.byte_end
+                && d.byte_end.saturating_sub(d.byte_start) < width
+        })
+        .map(|d| (d.byte_start, d.byte_end))
+        .collect();
+    let mut usable = BTreeMap::new();
+    let mut owned = Vec::new();
+    let mut nested_same_name = false;
+    for fact in &facts {
+        if fact.roles & DEF_ROLE == 0 || fact.symbol_uri.is_none() {
+            continue;
+        }
+        if source.get(fact.byte_start..fact.byte_end) != Some(name.as_bytes()) {
+            continue;
+        }
+        if !(definition.byte_start <= fact.byte_start && fact.byte_end <= definition.byte_end) {
+            continue;
+        }
+        if !import_usable(conn, snapshot_id, fact.import_id, &mut usable)? {
+            continue;
+        }
+        let nested = descendants
+            .iter()
+            .any(|(s, e)| *s <= fact.byte_start && fact.byte_end <= *e);
+        if nested {
+            nested_same_name = true;
+        } else {
+            owned.push(fact);
+        }
+    }
+    if owned.len() > 1 {
+        return Ok(Proof::Unproven(
+            "two or more occurrences own this definition".to_string(),
+        ));
+    }
+    if let Some(fact) = owned.first() {
+        let (line0, col0) = position(source, fact.byte_start);
+        let anchor = index::resolve_edge_anchor_classified(
+            conn,
+            snapshot_id,
+            canon,
+            validated,
+            line0,
+            col0,
+            None,
+            Some(source),
+        )?;
+        let same = anchor.kind == AnchorKind::Semantic
+            && anchor.span_bytes == Some((fact.byte_start, fact.byte_end))
+            && anchor.symbol_uri == fact.symbol_uri;
+        return Ok(if same {
+            Proof::Proven(anchor)
+        } else {
+            Proof::Unproven("the occurrence does not resolve to itself".to_string())
+        });
+    }
+    if nested_same_name {
+        return Ok(Proof::Unproven(
+            "a same-named occurrence sits in a nested definition; the import does not cover this one"
+                .to_string(),
+        ));
+    }
+    let anchor = index::resolve_edge_anchor_classified(
+        conn,
+        snapshot_id,
+        canon,
+        validated,
+        definition.start_line.saturating_sub(1),
+        definition.start_col.saturating_sub(1),
+        None,
+        Some(source),
+    )?;
+    if anchor.kind == AnchorKind::SyntaxFallback
+        && anchor.span_bytes == Some((definition.byte_start, definition.byte_end))
+    {
+        Ok(Proof::Proven(anchor))
+    } else {
+        Ok(Proof::Unproven(
+            "no occurrence owns this definition, and its position is not a syntax fallback"
+                .to_string(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Existing records (D5) and the per-document facts.
+// ---------------------------------------------------------------------------
+
+/// One stored evidence row of a record, on the document being scanned.
+struct Row {
+    byte_start: Option<i64>,
+    byte_end: Option<i64>,
+    digest: String,
+    freshness: &'static str,
+}
+
+/// A head record that cites the document.
+struct Hit {
+    id: String,
+    revision: u64,
+    kind: String,
+    title: String,
+    status: String,
+    rows: Vec<Row>,
+}
+
+struct Knowledge {
+    status: String,
+    reason: Option<String>,
+    generation: Option<u64>,
+    hits: BTreeMap<String, Vec<Hit>>,
+}
+
+fn freshness_name(state: &EvidenceFreshness) -> &'static str {
+    match state {
+        EvidenceFreshness::Fresh => "fresh",
+        EvidenceFreshness::Stale { .. } => "stale",
+        EvidenceFreshness::Unresolved { .. } => "unresolved",
+    }
+}
+
+/// Head records citing each document, read in one transaction (D5). A store that cannot be
+/// opened is a status, not a failure; a read that fails once it is open is exit 3.
+fn read_knowledge(
+    home: &Path,
+    repo: &str,
+    root: &Path,
+    docs: &[String],
+) -> Result<Knowledge, Fail> {
+    let mut hits = BTreeMap::new();
+    if !knowledge_store::knowledge_db_path(home, repo).is_file() {
+        return Ok(Knowledge {
+            status: "no-store".to_string(),
+            reason: None,
+            generation: None,
+            hits,
+        });
+    }
+    let reg = registry::load(&home.join("registry.json")).map_err(storage)?;
+    let Some(entry) = registry::find(&reg, repo) else {
+        return Err((3, format!("unknown repository: '{repo}'")));
+    };
+    let mut conn = match knowledge_store::open_knowledge_at(home, entry, false) {
+        Ok(conn) => conn,
+        Err(e) if e.starts_with("forward knowledge schema version") => {
+            return Ok(Knowledge {
+                status: "schema-ahead".to_string(),
+                reason: None,
+                generation: None,
+                hits,
+            })
+        }
+        Err(e) => {
+            return Ok(Knowledge {
+                status: "unavailable".to_string(),
+                reason: Some(e),
+                generation: None,
+                hits,
+            })
+        }
+    };
+    let tx = conn.transaction().map_err(storage)?;
+    let generation = knowledge_store::read_generation(&tx).map_err(storage)?;
+    for doc in docs {
+        let mut list = Vec::new();
+        for record in knowledge_store::records_citing_path(&tx, doc).map_err(storage)? {
+            let rows: Vec<Row> = record
+                .evidence
+                .iter()
+                .filter(|e| e.path == *doc)
+                .map(|e| Row {
+                    byte_start: e.byte_start,
+                    byte_end: e.byte_end,
+                    digest: e.digest.clone(),
+                    freshness: freshness_name(&knowledge_store::evidence_freshness(e, root)),
+                })
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            list.push(Hit {
+                id: record.id,
+                revision: record.revision,
+                kind: record.kind,
+                title: record.title,
+                status: record.status,
+                rows,
+            });
+        }
+        if !list.is_empty() {
+            hits.insert(doc.clone(), list);
+        }
+    }
+    tx.commit().map_err(storage)?;
+    Ok(Knowledge {
+        status: "ready".to_string(),
+        reason: None,
+        generation: Some(generation),
+        hits,
+    })
+}
+
+/// D4: whether a section can be ingested, and the first reason it cannot.
+fn ingest_refusal(doc: &str, section: &Section) -> Option<&'static str> {
+    let title = match &section.heading {
+        Some(heading) => heading.as_str(),
+        None => doc.rsplit('/').next().unwrap_or(doc),
+    };
+    if title.is_empty() {
+        return Some("empty-heading");
+    }
+    if title.len() > knowledge::MAX_TITLE_BYTES {
+        return Some("heading-too-long");
+    }
+    if section.byte_end - section.byte_start > knowledge::MAX_BODY_BYTES {
+        return Some("section-too-large");
+    }
+    let provenance = format!(
+        "docs-ingest:{doc}#{}@{}",
+        section.section_id, section.digest
+    );
+    if provenance.len() > PROVENANCE_MAX {
+        return Some("provenance-too-long");
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Report shapes (D9). Field order is key order.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct Report {
+    schema_version: u32,
+    repo: String,
+    snapshot: Option<SnapshotOut>,
+    index_freshness: Freshness,
+    knowledge: KnowledgeOut,
+    documents: Vec<DocOut>,
+    proposals: Vec<Proposal>,
+    omissions: Vec<Omission>,
+    next_actions: Vec<NextAction>,
+    bounds: Bounds,
+    disclaimer: &'static str,
+}
+
+#[derive(Serialize)]
+struct SnapshotOut {
+    nonce: String,
+    /// The snapshot row id. The store keeps no other per-snapshot counter.
+    generation: i64,
+}
+
+#[derive(Serialize)]
+struct Freshness {
+    status: String,
+    reasons: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct KnowledgeOut {
+    status: String,
+    reason: Option<String>,
+    generation: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct DocOut {
+    path: String,
+    status: &'static str,
+    reason: Option<String>,
+    bytes: Option<usize>,
+    digest: Option<String>,
+    git_head: Option<String>,
+    git_branch: Option<String>,
+    link_counts: BTreeMap<&'static str, usize>,
+    sections: Vec<SectionOut>,
+    stale_records: Vec<StaleOut>,
+}
+
+#[derive(Serialize)]
+struct SectionOut {
+    section_id: String,
+    heading: Option<String>,
+    level: u8,
+    line: usize,
+    byte_start: usize,
+    byte_end: usize,
+    bytes: usize,
+    digest: String,
+    ingest_refusal: Option<&'static str>,
+    recorded: Option<RecordedOut>,
+    links: Vec<LinkOut>,
+}
+
+#[derive(Serialize, Clone)]
+struct RecordedOut {
+    id: String,
+    revision: u64,
+}
+
+#[derive(Serialize, Clone)]
+struct LinkOut {
+    line: usize,
+    text: String,
+    target: String,
+    path: Option<String>,
+    fragment: Option<String>,
+    target_line: Option<usize>,
+    target_end_line: Option<usize>,
+    status: &'static str,
+    reason: Option<String>,
+    exists: Option<bool>,
+    definition: Option<DefOut>,
+    anchor: Option<AnchorOut>,
+    candidates: Vec<CandOut>,
+}
+
+#[derive(Serialize, Clone)]
+struct DefOut {
+    name: Option<String>,
+    kind: String,
+    line: u32,
+    col: u32,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+#[derive(Serialize, Clone)]
+struct AnchorOut {
+    kind: &'static str,
+    precision: String,
+    line: u32,
+    col: u32,
+    byte_start: usize,
+    byte_end: usize,
+    symbol_uri: Option<String>,
+    display_name: Option<String>,
+    source_digest: String,
+}
+
+#[derive(Serialize, Clone)]
+struct CandOut {
+    name: Option<String>,
+    kind: String,
+    line: u32,
+    col: u32,
+}
+
+#[derive(Serialize, Clone)]
+struct TargetOut {
+    path: String,
+    symbol: Option<String>,
+    definition: DefOut,
+    anchor: AnchorOut,
+}
+
+#[derive(Serialize, Clone)]
+struct Proposal {
+    doc: String,
+    section_id: String,
+    section_digest: String,
+    suggested_record_id: String,
+    target: TargetOut,
+    relation: &'static str,
+    state: &'static str,
+    ingest_refusal: Option<&'static str>,
+}
+
+#[derive(Serialize, Clone)]
+struct StaleOut {
+    id: String,
+    revision: u64,
+    kind: String,
+    title: String,
+    status: String,
+    evidence: Vec<EvidenceOut>,
+}
+
+#[derive(Serialize, Clone)]
+struct EvidenceOut {
+    byte_start: Option<i64>,
+    byte_end: Option<i64>,
+    freshness: &'static str,
+}
+
+#[derive(Serialize)]
+struct Omission {
+    section: &'static str,
+    reason: &'static str,
+    omitted_count: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct NextAction {
+    reason: &'static str,
+    command: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Bounds {
+    documents: usize,
+    sections_per_document: usize,
+    links_per_section: usize,
+    proposals: usize,
+    stale_records_per_document: usize,
+    candidates_per_link: usize,
+    report_bytes: usize,
+}
+
+/// Omission counts by (list, reason). Every count here is known, so none is `null`.
+#[derive(Default)]
+struct Omissions(BTreeMap<(&'static str, &'static str), usize>);
+
+impl Omissions {
+    fn add(&mut self, section: &'static str, reason: &'static str, count: usize) {
+        if count > 0 {
+            *self.0.entry((section, reason)).or_insert(0) += count;
+        }
+    }
+
+    fn rows(&self) -> Vec<Omission> {
+        self.0
+            .iter()
+            .map(|((section, reason), count)| Omission {
+                section,
+                reason,
+                omitted_count: Some(*count),
+            })
+            .collect()
+    }
+}
+
+fn json_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, String> {
+    serde_json::to_string(value)
+        .map(|s| s.len())
+        .map_err(|e| format!("docs scan report cannot be serialized: {e}"))
+}
+
+/// Running size of the report, kept exact by subtracting each removed item's own length.
+struct Budget {
+    size: usize,
+    om: usize,
+}
+
+impl Budget {
+    fn refresh(&mut self, omissions: &Omissions) -> Result<(), String> {
+        let rows = json_len(&omissions.rows())?;
+        self.size = self.size.saturating_sub(self.om) + rows;
+        self.om = rows;
+        Ok(())
+    }
+}
+
+/// Removes the last item of a list and counts it as a `json_budget` omission (D8).
+fn drop_last<T: Serialize>(
+    list: &mut Vec<T>,
+    budget: &mut Budget,
+    omissions: &mut Omissions,
+    section: &'static str,
+) -> Result<(), String> {
+    let Some(item) = list.pop() else {
+        return Ok(());
+    };
+    let comma = usize::from(!list.is_empty());
+    budget.size = budget.size.saturating_sub(json_len(&item)? + comma);
+    omissions.add(section, "json_budget", 1);
+    budget.refresh(omissions)
+}
+
+/// Fits the report to `max_bytes` (D8), removing in the fixed order and counting each removal.
+fn fit_with(
+    mut report: Report,
+    mut omissions: Omissions,
+    max_bytes: usize,
+) -> Result<Report, String> {
+    report.omissions = omissions.rows();
+    let mut budget = Budget {
+        size: json_len(&report)?,
+        om: json_len(&report.omissions)?,
+    };
+    // 1. Links of sections: last document first, last link first.
+    for doc in report.documents.iter_mut().rev() {
+        for section in doc.sections.iter_mut().rev() {
+            while budget.size > max_bytes && !section.links.is_empty() {
+                drop_last(&mut section.links, &mut budget, &mut omissions, "links")?;
+            }
+        }
+    }
+    // 2. Proposals, last first.
+    while budget.size > max_bytes && !report.proposals.is_empty() {
+        drop_last(
+            &mut report.proposals,
+            &mut budget,
+            &mut omissions,
+            "proposals",
+        )?;
+    }
+    // 3. Sections, last document first.
+    for doc in report.documents.iter_mut().rev() {
+        while budget.size > max_bytes && !doc.sections.is_empty() {
+            drop_last(&mut doc.sections, &mut budget, &mut omissions, "sections")?;
+        }
+    }
+    // 4. Stale records.
+    for doc in report.documents.iter_mut().rev() {
+        while budget.size > max_bytes && !doc.stale_records.is_empty() {
+            drop_last(
+                &mut doc.stale_records,
+                &mut budget,
+                &mut omissions,
+                "stale_records",
+            )?;
+        }
+    }
+    // 5. Documents after the first, last first.
+    while budget.size > max_bytes && report.documents.len() > 1 {
+        drop_last(
+            &mut report.documents,
+            &mut budget,
+            &mut omissions,
+            "documents",
+        )?;
+    }
+    // 6. The remainder: at most three next actions.
+    report.omissions = omissions.rows();
+    if json_len(&report)? > max_bytes {
+        report.next_actions.truncate(3);
+    }
+    report.omissions = omissions.rows();
+    if json_len(&report)? > max_bytes {
+        return Err("docs scan report exceeds byte budget".to_string());
+    }
+    Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// The scan itself.
+// ---------------------------------------------------------------------------
+
+/// The index as the scan reads it: an open read transaction with a snapshot, or nothing.
+struct Index<'c> {
+    conn: Option<&'c Connection>,
+    snapshot: Option<store::Snapshot>,
+    freshness: Freshness,
+}
+
+/// A link target's index facts, read once per path.
+struct Target {
+    exists: bool,
+    indexed: Option<String>,
+    live: Result<Vec<u8>, String>,
+    symbols: Vec<store::SymbolRow>,
+}
+
+struct Ctx<'c> {
+    canon: PathBuf,
+    index: Option<(&'c Connection, i64)>,
+    targets: HashMap<String, Rc<Target>>,
+}
+
+/// One evaluated link: its listed form, and the proposal it earns.
+struct LinkEval {
+    out: LinkOut,
+    proposal: Option<TargetOut>,
+    omitted_candidates: usize,
+}
+
+fn bare_link(link: &Link) -> LinkOut {
+    LinkOut {
+        line: link.line,
+        text: link.text.clone(),
+        target: link.target.clone(),
+        path: None,
+        fragment: None,
+        target_line: None,
+        target_end_line: None,
+        status: "",
+        reason: None,
+        exists: None,
+        definition: None,
+        anchor: None,
+        candidates: Vec::new(),
+    }
+}
+
+fn settle(mut out: LinkOut, status: &'static str, reason: Option<String>) -> LinkEval {
+    out.status = status;
+    out.reason = reason;
+    LinkEval {
+        out,
+        proposal: None,
+        omitted_candidates: 0,
+    }
+}
+
+fn def_out(def: &store::SymbolRow) -> DefOut {
+    DefOut {
+        name: def.name.clone(),
+        kind: def.kind.clone(),
+        line: def.start_line,
+        col: def.start_col,
+        byte_start: def.byte_start,
+        byte_end: def.byte_end,
+    }
+}
+
+fn anchor_out(anchor: &EdgeAnchor, digest: &str) -> AnchorOut {
+    let (byte_start, byte_end) = anchor.span_bytes.unwrap_or((0, 0));
+    AnchorOut {
+        kind: anchor.kind.as_str(),
+        precision: anchor.precision.clone(),
+        line: anchor.line1,
+        col: anchor.col1,
+        byte_start,
+        byte_end,
+        symbol_uri: anchor.symbol_uri.clone(),
+        display_name: anchor.display.clone(),
+        source_digest: digest.to_string(),
+    }
+}
+
+impl Ctx<'_> {
+    /// The index facts of one path, read once and shared by every link to it.
+    fn target(&mut self, path: &str) -> Result<Rc<Target>, Fail> {
+        if let Some(found) = self.targets.get(path) {
+            return Ok(Rc::clone(found));
+        }
+        let (conn, sid) = self
+            .index
+            .ok_or_else(|| (3, "internal: target read without an index".to_string()))?;
+        let indexed = store::file_identity(conn, sid, path)
+            .map_err(storage)?
+            .map(|(_, digest)| digest);
+        let symbols = if indexed.is_some() {
+            store::symbols_at(conn, sid, path).map_err(storage)?
+        } else {
+            Vec::new()
+        };
+        let live = semantic::confined_read_classified(&self.canon, path, scan::MAX_FILE_BYTES)
+            .map_err(semantic::ConfinedReadError::into_message);
+        let exists = paths::contains(&self.canon, &self.canon.join(path));
+        let found = Rc::new(Target {
+            exists,
+            indexed,
+            live,
+            symbols,
+        });
+        self.targets.insert(path.to_string(), Rc::clone(&found));
+        Ok(found)
+    }
+
+    /// D3: one link's status, and the proposal it earns when proven.
+    fn evaluate(&mut self, link: &Link) -> Result<LinkEval, Fail> {
+        let (path, fragment, line, end_line) = match &link.kind {
+            LinkKind::External => return Ok(settle(bare_link(link), "external", None)),
+            LinkKind::SameDocument => return Ok(settle(bare_link(link), "same-document", None)),
+            LinkKind::OutsideRepo => {
+                return Ok(settle(
+                    bare_link(link),
+                    "outside-repo",
+                    Some("path leaves the repository root".to_string()),
+                ))
+            }
+            LinkKind::Path {
+                path,
+                fragment,
+                line,
+                end_line,
+            } => (path, fragment, line, end_line),
+        };
+        let mut out = bare_link(link);
+        out.path = Some(path.clone());
+        out.fragment = fragment.clone();
+        out.target_line = *line;
+        out.target_end_line = *end_line;
+        if let Err(reason) = semantic::validate_snapshot_rel(path) {
+            return Ok(settle(out, "outside-repo", Some(reason)));
+        }
+        let Some((conn, sid)) = self.index else {
+            return Ok(settle(out, "no-index", None));
+        };
+        let target = self.target(path)?;
+        let Some(digest) = target.indexed.clone() else {
+            out.exists = Some(target.exists);
+            return Ok(settle(out, "not-indexed", None));
+        };
+        let source: &[u8] = match &target.live {
+            Err(m) => return Ok(settle(out, "source-changed", Some(m.clone()))),
+            Ok(bytes) if store::content_digest(bytes) != digest => {
+                return Ok(settle(
+                    out,
+                    "source-changed",
+                    Some("source changed since the index; reindex".to_string()),
+                ))
+            }
+            Ok(bytes) => bytes.as_slice(),
+        };
+        let Some(line) = *line else {
+            return Ok(settle(out, "file", None));
+        };
+        let line1 = u32::try_from(line).unwrap_or(u32::MAX);
+        let defs: Vec<&store::SymbolRow> = target
+            .symbols
+            .iter()
+            .filter(|s| s.start_line == line1)
+            .collect();
+        match defs.len() {
+            0 => Ok(settle(out, "no-definition-at-line", None)),
+            n if n > 1 => {
+                out.candidates = defs
+                    .iter()
+                    .take(MAX_CANDIDATES)
+                    .map(|s| CandOut {
+                        name: s.name.clone(),
+                        kind: s.kind.clone(),
+                        line: s.start_line,
+                        col: s.start_col,
+                    })
+                    .collect();
+                let mut evaluated = settle(out, "ambiguous-line", None);
+                evaluated.omitted_candidates = n.saturating_sub(MAX_CANDIDATES);
+                Ok(evaluated)
+            }
+            _ => {
+                let def = defs[0];
+                match prove_anchor(conn, sid, &self.canon, path, def, source) {
+                    Err(GraphQueryError::Anchor(reason)) => {
+                        Ok(settle(out, "anchor-unavailable", Some(reason)))
+                    }
+                    Err(GraphQueryError::Store(m)) => Err(storage(m)),
+                    Ok(Proof::Unproven(reason)) => Ok(settle(out, "anchor-unproven", Some(reason))),
+                    Ok(Proof::Proven(anchor)) => {
+                        let definition = def_out(def);
+                        let anchor = anchor_out(&anchor, &digest);
+                        let symbol = anchor.symbol_uri.clone();
+                        out.definition = Some(definition.clone());
+                        out.anchor = Some(anchor.clone());
+                        let mut evaluated = settle(out, "definition", None);
+                        evaluated.proposal = Some(TargetOut {
+                            path: path.clone(),
+                            symbol,
+                            definition,
+                            anchor,
+                        });
+                        Ok(evaluated)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Accumulators shared across documents.
+#[derive(Default)]
+struct Acc {
+    omissions: Omissions,
+    pending: Vec<Pending>,
+    source_changed: bool,
+    stale: bool,
+}
+
+struct Pending {
+    key: (String, usize, usize, String),
+    proposal: Proposal,
+}
+
+fn recorded_for(hits: &[Hit], section: &Section) -> Option<RecordedOut> {
+    hits.iter().find_map(|hit| {
+        hit.rows
+            .iter()
+            .any(|r| {
+                r.freshness == "fresh"
+                    && r.byte_start == Some(section.byte_start as i64)
+                    && r.byte_end == Some(section.byte_end as i64)
+                    && r.digest == section.digest
+            })
+            .then(|| RecordedOut {
+                id: hit.id.clone(),
+                revision: hit.revision,
+            })
+    })
+}
+
+fn scan_document(
+    ctx: &mut Ctx<'_>,
+    acc: &mut Acc,
+    knowledge: &Knowledge,
+    doc: &DocIn,
+    content: Content,
+    git_info: &git::GitInfo,
+) -> Result<DocOut, Fail> {
+    let hits: &[Hit] = match knowledge.hits.get(&doc.path) {
+        Some(found) => found.as_slice(),
+        None => &[],
+    };
+    let mut stale_all: Vec<StaleOut> = hits
+        .iter()
+        .filter(|h| h.rows.iter().any(|r| r.freshness != "fresh"))
+        .map(|h| StaleOut {
+            id: h.id.clone(),
+            revision: h.revision,
+            kind: h.kind.clone(),
+            title: h.title.clone(),
+            status: h.status.clone(),
+            evidence: h
+                .rows
+                .iter()
+                .map(|r| EvidenceOut {
+                    byte_start: r.byte_start,
+                    byte_end: r.byte_end,
+                    freshness: r.freshness,
+                })
+                .collect(),
+        })
+        .collect();
+    if !stale_all.is_empty() {
+        acc.stale = true;
+    }
+    acc.omissions.add(
+        "stale_records",
+        "item_limit",
+        stale_all.len().saturating_sub(MAX_STALE),
+    );
+    stale_all.truncate(MAX_STALE);
+
+    let (status, reason, bytes, digest, text): (
+        &'static str,
+        Option<String>,
+        Option<usize>,
+        Option<String>,
+        Option<String>,
+    ) = match content {
+        Content::Read(raw) => match String::from_utf8(raw) {
+            Ok(text) => (
+                "ok",
+                None,
+                Some(text.len()),
+                Some(store::content_digest(text.as_bytes())),
+                Some(text),
+            ),
+            Err(_) => ("not-utf8", None, None, None, None),
+        },
+        Content::Missing => ("missing", None, None, None, None),
+        Content::TooLarge => ("too-large", None, None, None, None),
+        Content::Unreadable(m) => ("unreadable", Some(m), None, None, None),
+    };
+
+    let mut counts: BTreeMap<&'static str, usize> =
+        LINK_STATUSES.iter().map(|s| (*s, 0usize)).collect();
+    let mut sections_out = Vec::new();
+    if let Some(text) = &text {
+        let parsed = parse_document(&doc.path, text);
+        for (idx, section) in parsed.iter().enumerate() {
+            let mut evaluated = Vec::with_capacity(section.links.len());
+            for link in &section.links {
+                let eval = ctx.evaluate(link)?;
+                *counts.entry(eval.out.status).or_insert(0) += 1;
+                if eval.out.status == "source-changed" {
+                    acc.source_changed = true;
+                }
+                evaluated.push(eval);
+            }
+            if idx >= MAX_SECTIONS {
+                continue;
+            }
+            let refusal = ingest_refusal(&doc.path, section);
+            let total_links = evaluated.len();
+            let mut links = Vec::new();
+            for eval in evaluated.into_iter().take(MAX_LINKS) {
+                acc.omissions
+                    .add("candidates", "item_limit", eval.omitted_candidates);
+                let LinkEval { out, proposal, .. } = eval;
+                if let Some(target) = proposal {
+                    let suggested = suggested_record_id(
+                        &doc.path,
+                        section.heading.as_deref(),
+                        &section.section_id,
+                    );
+                    acc.pending.push(Pending {
+                        key: (
+                            doc.path.clone(),
+                            section.byte_start,
+                            out.line,
+                            target.path.clone(),
+                        ),
+                        proposal: Proposal {
+                            doc: doc.path.clone(),
+                            section_id: section.section_id.clone(),
+                            section_digest: section.digest.clone(),
+                            suggested_record_id: suggested,
+                            target,
+                            relation: "documents",
+                            state: "proposed",
+                            ingest_refusal: refusal,
+                        },
+                    });
+                }
+                links.push(out);
+            }
+            acc.omissions
+                .add("links", "item_limit", total_links.saturating_sub(MAX_LINKS));
+            sections_out.push(SectionOut {
+                section_id: section.section_id.clone(),
+                heading: section.heading.clone(),
+                level: section.level,
+                line: section.line,
+                byte_start: section.byte_start,
+                byte_end: section.byte_end,
+                bytes: section.byte_end - section.byte_start,
+                digest: section.digest.clone(),
+                ingest_refusal: refusal,
+                recorded: recorded_for(hits, section),
+                links,
+            });
+        }
+        acc.omissions.add(
+            "sections",
+            "item_limit",
+            parsed.len().saturating_sub(MAX_SECTIONS),
+        );
+    }
+
+    Ok(DocOut {
+        path: doc.path.clone(),
+        status,
+        reason,
+        bytes,
+        digest,
+        git_head: git_info.head.clone(),
+        git_branch: git_info.branch.clone(),
+        link_counts: counts,
+        sections: sections_out,
+        stale_records: stale_all,
+    })
+}
+
+/// Builds the report from the documents and one index view (D1 to D9).
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    home: &Path,
+    repo: &str,
+    root: &Path,
+    docs: &[DocIn],
+    contents: Vec<Content>,
+    doc_omitted: usize,
+    git_info: &git::GitInfo,
+    index: Index<'_>,
+) -> Result<Report, Fail> {
+    let doc_paths: Vec<String> = docs.iter().map(|d| d.path.clone()).collect();
+    let knowledge = read_knowledge(home, repo, root, &doc_paths)?;
+    let mut acc = Acc::default();
+    acc.omissions.add("documents", "item_limit", doc_omitted);
+    let snapshot_out = index.snapshot.as_ref().map(|s| SnapshotOut {
+        nonce: s.nonce.clone(),
+        generation: s.id,
+    });
+    let link_index = match (index.conn, index.snapshot.as_ref()) {
+        (Some(conn), Some(snapshot)) => Some((conn, snapshot.id)),
+        _ => None,
+    };
+    let mut ctx = Ctx {
+        canon: root.to_path_buf(),
+        index: link_index,
+        targets: HashMap::new(),
+    };
+    let mut documents = Vec::with_capacity(docs.len());
+    for (doc, content) in docs.iter().zip(contents) {
+        documents.push(scan_document(
+            &mut ctx, &mut acc, &knowledge, doc, content, git_info,
+        )?);
+    }
+
+    let mut pending = std::mem::take(&mut acc.pending);
+    pending.sort_by(|a, b| a.key.cmp(&b.key));
+    acc.omissions.add(
+        "proposals",
+        "item_limit",
+        pending.len().saturating_sub(MAX_PROPOSALS),
+    );
+    pending.truncate(MAX_PROPOSALS);
+    let proposals: Vec<Proposal> = pending.into_iter().map(|p| p.proposal).collect();
+
+    let mut next_actions = Vec::new();
+    if index.snapshot.is_none() || acc.source_changed {
+        next_actions.push(NextAction {
+            reason: "no usable index, or a linked source changed: reindex",
+            command: Some(format!("riltra index --repo {repo}")),
+        });
+    }
+    if acc.stale {
+        next_actions.push(NextAction {
+            reason:
+                "a stored record cites bytes that changed: re-ingest it with its expected revision",
+            command: Some(format!("riltra docs ingest --repo {repo} --input -")),
+        });
+    }
+    next_actions.push(NextAction {
+        reason: "review each proposal; riltra wrote nothing and verified nothing",
+        command: None,
+    });
+
+    let report = Report {
+        schema_version: SCHEMA_VERSION,
+        repo: repo.to_string(),
+        snapshot: snapshot_out,
+        index_freshness: index.freshness,
+        knowledge: KnowledgeOut {
+            status: knowledge.status,
+            reason: knowledge.reason,
+            generation: knowledge.generation,
+        },
+        documents,
+        proposals,
+        omissions: Vec::new(),
+        next_actions,
+        bounds: Bounds {
+            documents: MAX_DOCUMENTS,
+            sections_per_document: MAX_SECTIONS,
+            links_per_section: MAX_LINKS,
+            proposals: MAX_PROPOSALS,
+            stale_records_per_document: MAX_STALE,
+            candidates_per_link: MAX_CANDIDATES,
+            report_bytes: MAX_REPORT_BYTES,
+        },
+        disclaimer: DISCLAIMER,
+    };
+    fit_with(report, acc.omissions, MAX_REPORT_BYTES).map_err(|m| (3, m))
+}
+
+/// The `docs scan` document for one registered repository (D0 to D9). Storage is opened
+/// read-only; a missing or unusable index is reported, never created. Exit 2 for a usage
+/// error, 3 for a repository, data or storage failure.
+pub fn scan(
+    home: &Path,
+    repo: &str,
+    root: &Path,
+    paths_in: &[String],
+) -> Result<String, (i32, String)> {
+    let canon = paths::canonical_root(root).map_err(storage)?;
+    let (docs, doc_omitted) = discover(&canon, paths_in)?;
+    let mut contents = Vec::with_capacity(docs.len());
+    for doc in &docs {
+        contents.push(read_doc(&canon, doc)?);
+    }
+    let git_info = git::fingerprint(&canon);
+    let report = match store::open_read(&store::db_path(home, repo)) {
+        store::IndexRead::Missing => assemble(
+            home,
+            repo,
+            &canon,
+            &docs,
+            contents,
+            doc_omitted,
+            &git_info,
+            Index {
+                conn: None,
+                snapshot: None,
+                freshness: Freshness {
+                    status: "no-index".to_string(),
+                    reasons: Vec::new(),
+                },
+            },
+        )?,
+        store::IndexRead::Outdated(_) => assemble(
+            home,
+            repo,
+            &canon,
+            &docs,
+            contents,
+            doc_omitted,
+            &git_info,
+            Index {
+                conn: None,
+                snapshot: None,
+                freshness: Freshness {
+                    status: "unknown".to_string(),
+                    reasons: vec!["schema-outdated".to_string()],
+                },
+            },
+        )?,
+        store::IndexRead::Ahead(_) => assemble(
+            home,
+            repo,
+            &canon,
+            &docs,
+            contents,
+            doc_omitted,
+            &git_info,
+            Index {
+                conn: None,
+                snapshot: None,
+                freshness: Freshness {
+                    status: "unknown".to_string(),
+                    reasons: vec!["schema-ahead".to_string()],
+                },
+            },
+        )?,
+        store::IndexRead::Error(message) => {
+            return Err((3, format!("cannot read index: {message}")))
+        }
+        store::IndexRead::Ready(mut conn) => {
+            let tx = conn.transaction().map_err(storage)?;
+            let snapshot = store::latest_snapshot(&tx).map_err(storage)?;
+            let freshness = match &snapshot {
+                Some(s) => {
+                    let (status, reasons) = index::evaluate_snapshot(&tx, repo, &canon, s);
+                    Freshness { status, reasons }
+                }
+                None => Freshness {
+                    status: "unknown".to_string(),
+                    reasons: vec!["no-snapshot".to_string()],
+                },
+            };
+            let built = assemble(
+                home,
+                repo,
+                &canon,
+                &docs,
+                contents,
+                doc_omitted,
+                &git_info,
+                Index {
+                    conn: Some(&*tx),
+                    snapshot,
+                    freshness,
+                },
+            )?;
+            tx.commit().map_err(storage)?;
+            built
+        }
+    };
+    serde_json::to_string(&report).map_err(storage)
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    fn doc_out(path: &str) -> DocOut {
+        DocOut {
+            path: path.to_string(),
+            status: "ok",
+            reason: None,
+            bytes: Some(1),
+            digest: Some("d".repeat(64)),
+            git_head: None,
+            git_branch: None,
+            link_counts: BTreeMap::new(),
+            sections: Vec::new(),
+            stale_records: Vec::new(),
+        }
+    }
+
+    fn link(n: usize) -> LinkOut {
+        LinkOut {
+            line: n,
+            text: "x".repeat(200),
+            target: "pkg/calc.py".to_string(),
+            path: Some("pkg/calc.py".to_string()),
+            fragment: None,
+            target_line: None,
+            target_end_line: None,
+            status: "file",
+            reason: None,
+            exists: None,
+            definition: None,
+            anchor: None,
+            candidates: Vec::new(),
+        }
+    }
+
+    fn section(id: usize, links: usize) -> SectionOut {
+        SectionOut {
+            section_id: format!("S{id}@1"),
+            heading: Some(format!("S{id}")),
+            level: 1,
+            line: 1,
+            byte_start: 0,
+            byte_end: 10,
+            bytes: 10,
+            digest: "e".repeat(64),
+            ingest_refusal: None,
+            recorded: None,
+            links: (0..links).map(link).collect(),
+        }
+    }
+
+    fn report(documents: Vec<DocOut>) -> Report {
+        Report {
+            schema_version: SCHEMA_VERSION,
+            repo: "r".to_string(),
+            snapshot: None,
+            index_freshness: Freshness {
+                status: "fresh".to_string(),
+                reasons: Vec::new(),
+            },
+            knowledge: KnowledgeOut {
+                status: "no-store".to_string(),
+                reason: None,
+                generation: None,
+            },
+            documents,
+            proposals: Vec::new(),
+            omissions: Vec::new(),
+            next_actions: Vec::new(),
+            bounds: Bounds {
+                documents: MAX_DOCUMENTS,
+                sections_per_document: MAX_SECTIONS,
+                links_per_section: MAX_LINKS,
+                proposals: MAX_PROPOSALS,
+                stale_records_per_document: MAX_STALE,
+                candidates_per_link: MAX_CANDIDATES,
+                report_bytes: MAX_REPORT_BYTES,
+            },
+            disclaimer: DISCLAIMER,
+        }
+    }
+
+    fn two_docs() -> Report {
+        let mut first = doc_out("docs/a.md");
+        first.sections = vec![section(0, 1), section(1, 1)];
+        let mut second = doc_out("docs/b.md");
+        second.sections = vec![section(0, 1), section(1, 2)];
+        report(vec![first, second])
+    }
+
+    #[test]
+    fn json_budget_trims_in_fixed_order() {
+        let full = report_size(two_docs());
+        // One byte under the full size: the first thing removed is the last link of the
+        // last section of the last document, and nothing else is removed.
+        let fitted = fit_with(two_docs(), Omissions::default(), full - 1).unwrap();
+        assert_eq!(fitted.documents[1].sections[1].links.len(), 1);
+        assert_eq!(fitted.documents[1].sections.len(), 2);
+        assert_eq!(fitted.documents[0].sections[0].links.len(), 1);
+        assert_eq!(fitted.documents[0].sections[1].links.len(), 1);
+        assert_eq!(fitted.documents[0].sections.len(), 2);
+        let rows = fitted.omissions;
+        assert!(rows
+            .iter()
+            .any(|r| r.section == "links" && r.reason == "json_budget"));
+        assert!(rows.iter().all(|r| r.section == "links"));
+    }
+
+    #[test]
+    fn json_budget_remainder_is_small() {
+        let long = format!("docs/{}/{}.md", "d".repeat(180), "p".repeat(40));
+        let documents: Vec<DocOut> = (0..200)
+            .map(|d| {
+                let mut doc = doc_out(&format!("{long}{d}"));
+                doc.sections = (0..500).map(|s| section(s, 0)).collect();
+                doc
+            })
+            .collect();
+        let fitted = fit_with(report(documents), Omissions::default(), 16_384).unwrap();
+        assert!(json_len(&fitted).unwrap() < 16_384);
+    }
+
+    #[test]
+    fn validate_doc_path_refuses_absent_file() {
+        // Pins why `docs scan --path` does not call `validate_doc_path`: it refuses an
+        // absent file as an escape, while the scan must report that file as missing.
+        let root = std::env::temp_dir();
+        assert!(semantic::validate_doc_path(&root, "docs/gone-riltra-test.md").is_err());
+        assert!(semantic::validate_snapshot_rel("docs/gone-riltra-test.md").is_ok());
+    }
+
+    fn report_size(report: Report) -> usize {
+        let mut report = report;
+        report.omissions = Omissions::default().rows();
+        json_len(&report).unwrap()
+    }
 }
 
 #[cfg(test)]

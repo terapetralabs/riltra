@@ -1639,7 +1639,7 @@ pub(crate) fn resolve_edge_anchor_with_source(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_edge_anchor_classified(
+pub(crate) fn resolve_edge_anchor_classified(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
     canon: &Path,

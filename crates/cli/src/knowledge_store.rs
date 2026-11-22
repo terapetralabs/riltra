@@ -992,6 +992,99 @@ fn write_evidence(
     Ok(())
 }
 
+/// Head revisions of every record whose head-revision evidence names `path` (D5), sorted by id,
+/// each with its evidence. Superseded and retracted heads are returned too; the caller decides.
+pub(crate) fn records_citing_path(
+    conn: &Connection,
+    path: &str,
+) -> Result<Vec<crate::knowledge::RecordVersion>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT r.id, r.revision, r.kind, r.title, r.body, r.status, r.author, r.created_unix
+             FROM records AS r
+             JOIN heads AS h ON h.id = r.id AND h.current_revision = r.revision
+             WHERE EXISTS (SELECT 1 FROM evidence AS e
+                           WHERE e.id = r.id AND e.revision = r.revision AND e.path = ?1)
+             ORDER BY r.id COLLATE BINARY",
+        )
+        .map_err(|e| format!("cannot read records: {e}"))?;
+    let mut records = statement
+        .query_map(rusqlite::params![path], record_from_row)
+        .map_err(|e| format!("cannot read records: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot read records: {e}"))?;
+    for record in &mut records {
+        let revision = i64::try_from(record.revision)
+            .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
+        record.evidence = read_evidence(conn, &record.id, revision)?;
+    }
+    Ok(records)
+}
+
+#[cfg(test)]
+mod records_citing_path_tests {
+    use super::{records_citing_path, SCHEMA_SQL};
+    use rusqlite::{params, Connection};
+
+    fn record(conn: &Connection, id: &str, revision: i64) {
+        conn.execute(
+            "INSERT INTO records (id, revision, kind, title, body, status, author, created_unix)
+             VALUES (?1, ?2, 'decision', 't', 'b', 'active', 'a', 0)",
+            params![id, revision],
+        )
+        .unwrap();
+    }
+
+    fn cite(conn: &Connection, id: &str, revision: i64, path: &str) {
+        conn.execute(
+            "INSERT INTO evidence (id, revision, seq, path, byte_start, byte_end, digest, git_head, git_branch)
+             VALUES (?1, ?2, (SELECT COUNT(*) FROM evidence WHERE id = ?1 AND revision = ?2), ?3, NULL, NULL, 'd', NULL, NULL)",
+            params![id, revision, path],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn records_citing_path_returns_head_revisions_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        // `a` cites docs/x.md in revision 1 only; its head (revision 2) cites another path.
+        record(&conn, "a", 1);
+        record(&conn, "a", 2);
+        conn.execute(
+            "INSERT INTO heads (id, current_revision) VALUES ('a', 2)",
+            [],
+        )
+        .unwrap();
+        cite(&conn, "a", 1, "docs/x.md");
+        cite(&conn, "a", 2, "docs/other.md");
+        // `b` cites docs/x.md in its head.
+        record(&conn, "b", 1);
+        conn.execute(
+            "INSERT INTO heads (id, current_revision) VALUES ('b', 1)",
+            [],
+        )
+        .unwrap();
+        cite(&conn, "b", 1, "docs/x.md");
+
+        let ids: Vec<String> = records_citing_path(&conn, "docs/x.md")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec!["b".to_string()]);
+
+        // Control: once the head of `a` cites the path, `a` is returned too.
+        cite(&conn, "a", 2, "docs/x.md");
+        let ids: Vec<String> = records_citing_path(&conn, "docs/x.md")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+}
+
 fn read_evidence(
     conn: &Connection,
     id: &str,

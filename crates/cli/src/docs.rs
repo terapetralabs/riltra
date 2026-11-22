@@ -2123,6 +2123,15 @@ fn head_revision(conn: &Connection, id: &str) -> Result<Option<u64>, Fail> {
     .transpose()
 }
 
+fn stored_status(conn: &Connection, id: &str, revision: u64) -> Result<String, Fail> {
+    conn.query_row(
+        "SELECT status FROM records WHERE id = ?1 AND revision = ?2",
+        rusqlite::params![id, revision as i64],
+        |row| row.get(0),
+    )
+    .map_err(|e| storage(format!("cannot read record status: {e}")))
+}
+
 fn stored_kind(conn: &Connection, id: &str, revision: u64) -> Result<String, Fail> {
     conn.query_row(
         "SELECT kind FROM records WHERE id = ?1 AND revision = ?2",
@@ -2341,6 +2350,10 @@ fn prepare_item(
                 ));
             }
             if let Some(conn) = existing {
+                let status = stored_status(conn, &record_id, head)?;
+                if status != "active" {
+                    return Err((2, format!("record-not-active: {record_id} is {status}")));
+                }
                 let stored = stored_kind(conn, &record_id, head)?;
                 if stored != kind {
                     return Err((2, format!("kind-mismatch: {record_id} is {stored}")));

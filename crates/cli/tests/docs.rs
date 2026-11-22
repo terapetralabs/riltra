@@ -1319,6 +1319,81 @@ fn ingest_refuses_kind_mismatch_on_update() {
 }
 
 #[test]
+fn ingest_refuses_update_of_non_active_record() {
+    let Some(f) = fixture(
+        "ingest-not-active",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    for id in ["doc-retracted", "doc-archived", "doc-active"] {
+        let out = f.ingest(&input_of(vec![item_of(id, &p, "constraint", Vec::new())]));
+        assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    }
+    // Retract one record and archive another, through the knowledge update path.
+    let retract = r#"{"title":"Storage","body":"Add uses add.","status":"retracted","author":"a","evidence":[],"reason":"no longer true"}"#;
+    let out = f.stdin_cli(
+        &[
+            "knowledge",
+            "update",
+            "--repo",
+            "r",
+            "--id",
+            "doc-retracted",
+            "--expected-revision",
+            "1",
+            "--input",
+            "-",
+        ],
+        retract,
+    );
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let archive = r#"{"title":"Storage","body":"Add uses add.","status":"archived","author":"a","evidence":[]}"#;
+    let out = f.stdin_cli(
+        &[
+            "knowledge",
+            "update",
+            "--repo",
+            "r",
+            "--id",
+            "doc-archived",
+            "--expected-revision",
+            "1",
+            "--input",
+            "-",
+        ],
+        archive,
+    );
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let before = f.generation();
+    for (id, status) in [("doc-retracted", "retracted"), ("doc-archived", "archived")] {
+        // The lifecycle write made revision 2, the head this update names.
+        let mut update = item_of(id, &p, "constraint", Vec::new());
+        update["expected_revision"] = json!(2);
+        let out = f.ingest(&input_of(vec![update]));
+        assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+        assert!(
+            stderr_of(&out).contains(&format!("record-not-active: {id} is {status}")),
+            "{}",
+            stderr_of(&out)
+        );
+        assert_eq!(f.show(id).unwrap()["result"]["revision"], 2, "{id}");
+        assert!(f.show_revision(id, 3).is_none(), "{id} gained a revision");
+        assert_eq!(f.generation(), before, "{id} moved the generation");
+    }
+    // Control: the same update on an active record succeeds.
+    let mut control = item_of("doc-active", &p, "constraint", Vec::new());
+    control["expected_revision"] = json!(1);
+    let out = f.ingest(&input_of(vec![control]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(f.show("doc-active").unwrap()["result"]["revision"], 2);
+}
+
+#[test]
 fn ingest_without_bindings_reads_candidate_on_new_and_v1_store() {
     // New home: no store exists before the ingest.
     let Some(f) = fixture(

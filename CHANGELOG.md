@@ -116,7 +116,7 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Changed
 
-- `knowledge at`, `context`, `packet` and the other binding objects gain an appended `record_evidence` key (`total`, `fresh`, `stale`, `unresolved`) that counts the evidence rows of the bound record revision. It is read-only and does not change any existing key.
+- `knowledge at`, `riltra_knowledge_at_anchor`, `context` and `packet` gain an appended `record_evidence` key (`total`, `fresh`, `stale`, `unresolved`) that counts the evidence rows of the bound record revision. It is read-only and does not change any existing key. The `knowledge bind` write response does not carry it.
 - The code-index schema is now 6 and `PARSER_VERSION` is 14. After upgrading,
   every code-index read answers `schema_outdated` until `riltra index` is run,
   and `riltra changes` keeps its symbols but reports caller counts as

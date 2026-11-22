@@ -565,7 +565,8 @@ Markdown subset. The parser handles only what is listed here; anything else is p
   and a target that starts with `#` is `same-document`; neither is resolved. A `#L<n>` or
   `#L<n>-L<m>` fragment gives a line range; other fragments are kept as text. A leading `/`
   is relative to the repository root, and any other path is relative to the document's
-  directory.
+  directory. A link is recognised only when it lies within one line: the parser scans one
+  line at a time, so a link that breaks across lines is plain text.
 - Percent-encoding is not decoded, so a link whose target is percent-encoded does not
   match its file.
 - No PDF, no media and no LLM extraction. Markdown only.
@@ -593,11 +594,15 @@ share an id.
 
 Anchors. A proposal has two identities. `definition` is the syntax definition as the
 index stores it. `anchor` is the position the binding resolver uses, and it is where a
-binding is anchored. With a SCIP import, the anchor is the definition's name occurrence:
-for `def add` on line 1 the anchor is column 5. Without one, the anchor is the syntax
-definition at column 1. `knowledge at`, `context` and `packet` find a binding by its exact
-anchor span or cursor position, so to find an ingested binding, query at the proposal's
-`target.anchor` line and column. A name selector does not find it.
+binding is anchored. Which position that is depends on the code index. With a SCIP import
+that covers the definition, the anchor is the definition's name occurrence: for `def add`
+on line 1 the anchor is column 5. A `packet` or `context` name selector resolves at the
+definition start, so it does not find such a binding. Without a covering import, the
+anchor is the syntax definition at its own start line and column. That is column 1 only
+when the definition is not indented; an indented method starts further in. A name selector
+finds such a binding. In every case, query `knowledge at`, `context` or `packet` at the
+proposal's `target.anchor` line and column, which matches the binding's exact anchor span
+or cursor position.
 
 Existing records. Knowledge records that cite a document are matched by the document's
 path. A section is shown as `recorded` only when a stored evidence row has exactly that
@@ -616,7 +621,10 @@ unchanged, with a relation and a rationale. The relations are `documents`, `cons
 Ingest validates every item before it writes. It re-reads each document and checks that
 each section still has the digest the user reviewed (`section-changed`, exit 2). It runs
 the record and binding validators, re-proves each anchor against the current index, and
-checks the expected revision and kind of an existing record. A changed target gives
+checks the expected revision and kind of an existing record. An update item whose head
+revision is not `active` is refused before any write (exit 2) with the message
+`record-not-active: <id> is <status>`. An `archived`, `superseded` or `retracted` record is
+never reactivated by an ingest. A changed target gives
 `binding-target-changed` (exit 2). An anchor the resolver cannot place, including one in
 a file that changed since indexing, gives "anchor unresolved: source changed; reindex
 before creating a binding" (exit 3). After validation, each item is written in its own
@@ -641,7 +649,7 @@ and records each drop. A count the scan cannot know is `null`.
 Exit codes. `docs scan` exits `0` for a report, including `no-index` and `no-store`. It
 exits `2` for a usage error or an invalid `--path`, and `3` for an unknown repository, a
 moved repository root or a storage read error. `docs ingest` exits `2` for invalid input,
-`section-changed`, `binding-target-changed`, a kind mismatch and a duplicate code binding.
+`section-changed`, `binding-target-changed`, `record-not-active`, a kind mismatch and a duplicate code binding.
 It exits `3` for storage errors, a missing code index and an anchor that needs a reindex.
 MCP maps `2` to `invalid_input` and `3` to `store_error`.
 

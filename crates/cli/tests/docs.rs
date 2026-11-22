@@ -903,6 +903,49 @@ impl Fixture {
         let v: Value = serde_json::from_slice(&out.stdout).expect("at prints JSON");
         v["generation"].as_u64().unwrap_or(0)
     }
+
+    /// `knowledge create` from JSON on stdin.
+    fn knowledge_create(&self, input: &str) -> Output {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+            .args(["knowledge", "create", "--repo", "r", "--input", "-"])
+            .env("RILTRA_HOME", &self.home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn riltra");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().expect("wait for riltra")
+    }
+
+    /// `knowledge show` of one revision, or `None` when that revision does not exist.
+    fn show_revision(&self, id: &str, revision: u64) -> Option<Value> {
+        let rev = revision.to_string();
+        let out = cli(
+            &self.home,
+            &words(&[
+                "knowledge",
+                "show",
+                "--repo",
+                "r",
+                "--id",
+                id,
+                "--revision",
+                &rev,
+            ]),
+        );
+        if !out.status.success() {
+            return None;
+        }
+        Some(serde_json::from_slice(&out.stdout).expect("show prints JSON"))
+    }
 }
 
 /// The scan proposal for one section and one definition name.
@@ -1217,6 +1260,41 @@ fn ingest_refuses_kind_mismatch_on_update() {
     let out = f.ingest(&input_of(vec![same]));
     assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
     assert_eq!(f.show("doc-storage").unwrap()["result"]["revision"], 2);
+
+    // A benchmark record (made with `knowledge create`) is never overwritten by an ingest update.
+    let bench = r#"{"id":"bench-one","kind":"benchmark","title":"Perf","body":"measured","status":"active","author":"a","evidence":[],"measurement":{"method":"m","environment":"e","sample_count":3,"metrics":{"latency":{"value":1.5,"unit":"ms"}}}}"#;
+    let created = f.knowledge_create(bench);
+    assert_eq!(code_of(&created), Some(0), "{}", stderr_of(&created));
+    let mut onto_bench = item_of("bench-one", &p, "decision", Vec::new());
+    onto_bench["expected_revision"] = json!(1);
+    let out = f.ingest(&input_of(vec![onto_bench]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("kind-mismatch: bench-one is benchmark"),
+        "{}",
+        stderr_of(&out)
+    );
+    let bench_head = f.show("bench-one").unwrap();
+    assert_eq!(bench_head["result"]["revision"], 1);
+    assert!(
+        f.show_revision("bench-one", 2).is_none(),
+        "no revision 2: the measurement is not carried into a new revision"
+    );
+    assert!(bench_head.to_string().contains("latency"), "{bench_head}");
+
+    // Control: a decision record of matching kind takes the same update.
+    let out = f.ingest(&input_of(vec![item_of(
+        "dec-one",
+        &p,
+        "decision",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let mut matching = item_of("dec-one", &p, "decision", Vec::new());
+    matching["expected_revision"] = json!(1);
+    let out = f.ingest(&input_of(vec![matching]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(f.show("dec-one").unwrap()["result"]["revision"], 2);
 }
 
 #[test]
@@ -1285,22 +1363,41 @@ fn ingest_rejects_confirm_and_unknown_keys() {
     confirm["confirm"] = json!(true);
     let out = f.ingest(&input_of(vec![confirm]));
     assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("unknown field `items[0].confirm`"),
+        "{}",
+        stderr_of(&out)
+    );
 
-    let mut unknown_top = json!({"items": [good.clone()], "extra": 1});
-    unknown_top["items"][0]["record_id"] = json!("doc-b");
+    let unknown_top = json!({"items": [good.clone()], "extra": 1});
     let out = f.ingest(&unknown_top.to_string());
     assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("unknown field `$.extra`"),
+        "{}",
+        stderr_of(&out)
+    );
 
     let dup_a = item_of("doc-same", &p, "decision", Vec::new());
     let dup_b = item_of("doc-same", &p, "decision", Vec::new());
     let out = f.ingest(&input_of(vec![dup_a, dup_b]));
     assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("duplicate record id in input: 'doc-same'"),
+        "{}",
+        stderr_of(&out)
+    );
 
     let many: Vec<Value> = (0..51)
         .map(|i| item_of(&format!("doc-{i}"), &p, "decision", Vec::new()))
         .collect();
     let out = f.ingest(&input_of(many));
     assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("items must hold 1..=50 entries"),
+        "{}",
+        stderr_of(&out)
+    );
 
     let mut no_digest = item_of(
         "doc-nodigest",
@@ -1314,7 +1411,24 @@ fn ingest_rejects_confirm_and_unknown_keys() {
         .remove("source_digest");
     let out = f.ingest(&input_of(vec![no_digest]));
     assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out)
+            .contains("missing required field `items[0].bindings[0].target.anchor.source_digest`"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(f.show("doc-a").is_none());
+    assert!(f.show("doc-nodigest").is_none());
+
+    // Control: the same good base item with a fresh id is written.
+    let out = f.ingest(&input_of(vec![item_of(
+        "doc-control",
+        &p,
+        "decision",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert!(f.show("doc-control").is_some());
 }
 
 #[test]

@@ -2397,7 +2397,11 @@ fn prepare_item(
 
 /// Writes one item in its own transaction (D6, step 2). Returns the rendered item and the
 /// generation after its commit.
-fn write_item(conn: &mut Connection, canon: &Path, item: &Prepared) -> Result<(String, u64), Fail> {
+fn write_item(
+    conn: &mut Connection,
+    canon: &Path,
+    item: &Prepared,
+) -> Result<(String, u64, u64), Fail> {
     knowledge_store::revalidate_open_paths(conn).map_err(storage)?;
     let evidence = [knowledge::EvidenceRef {
         path: item.doc.clone(),
@@ -2518,7 +2522,7 @@ fn write_item(conn: &mut Connection, canon: &Path, item: &Prepared) -> Result<(S
         binding_ids.join(","),
         earlier,
     );
-    Ok((rendered, generation))
+    Ok((rendered, generation, revision))
 }
 
 /// Writes every prepared item, one transaction each, and returns the rendered items with
@@ -2535,10 +2539,10 @@ fn write_all(
     let mut generation = 0;
     for item in prepared {
         match write_item(&mut conn, canon, item) {
-            Ok((json, gen)) => {
+            Ok((json, gen, revision)) => {
                 rendered.push(json);
                 generation = gen;
-                committed.push(item.record_id.clone());
+                committed.push(format!("{}@{}", item.record_id, revision));
             }
             Err((code, message)) => {
                 let message = if committed.is_empty() {
@@ -3124,5 +3128,63 @@ mod ingest_tests {
         assert!(err.1.contains("section-changed"), "{}", err.1);
         assert!(knowledge_store::show_record(&conn, "a-rec", None).is_err());
         assert_eq!(knowledge_store::read_generation(&conn).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod ingest_partial_tests {
+    use super::*;
+    use crate::testutil::tmpdir;
+
+    /// Preflight for one single-section document, as `ingest` runs it.
+    fn prepare_for(
+        home: &Path,
+        root: &Path,
+        canon: &Path,
+        entry: &registry::RepoEntry,
+        doc: &str,
+        record: &str,
+    ) -> Prepared {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap();
+        let section = parse_document(doc, &text).remove(0);
+        let item = IngestItem {
+            doc: doc.to_string(),
+            section_id: section.section_id.clone(),
+            section_digest: section.digest.clone(),
+            record_id: record.to_string(),
+            kind: "decision".to_string(),
+            author: "tester".to_string(),
+            expected_revision: None,
+            bindings: Vec::new(),
+        };
+        prepare_item(home, entry, canon, None, item).unwrap()
+    }
+
+    #[test]
+    fn write_all_names_committed_items_when_a_later_item_fails() {
+        let home = tmpdir("ingest-partial-home");
+        let root = tmpdir("ingest-partial-root");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "# A\nalpha\n").unwrap();
+        std::fs::write(root.join("docs/b.md"), "# B\nbravo\n").unwrap();
+        let canon = paths::canonical_root(&root).unwrap();
+        let entry = registry::RepoEntry {
+            name: "r".to_string(),
+            root: canon.to_string_lossy().into_owned(),
+            added_unix: 1,
+        };
+        let first = prepare_for(&home, &root, &canon, &entry, "docs/a.md", "a-rec");
+        let second = prepare_for(&home, &root, &canon, &entry, "docs/b.md", "b-rec");
+        // Item 2's section changes after preflight: its expected digest refuses the capture
+        // inside its own write transaction, after item 1 has committed.
+        std::fs::write(root.join("docs/b.md"), "# B\nchanged\n").unwrap();
+        let err = write_all(&home, &entry, &canon, &[first, second]).unwrap_err();
+        assert_eq!(err.0, 2, "{}", err.1);
+        assert!(err.1.contains("section-changed"), "{}", err.1);
+        assert!(err.1.contains("committed: a-rec@1"), "{}", err.1);
+        let conn = knowledge_store::open_knowledge_at(&home, &entry, false).unwrap();
+        assert!(knowledge_store::show_record(&conn, "a-rec", None).is_ok());
+        assert!(knowledge_store::show_record(&conn, "b-rec", None).is_err());
+        assert_eq!(knowledge_store::read_generation(&conn).unwrap(), 1);
     }
 }

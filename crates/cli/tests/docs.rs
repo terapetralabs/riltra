@@ -2282,7 +2282,9 @@ fn name_selector_rejects_same_span_wrong_uri_or_kind() {
     );
     assert_eq!(refused["total"], 0, "{refused}");
     set_doc_storage_binding_column(&f, "symbol_uri", &original_uri);
-    assert_only_doc_storage(&packet_bindings(&f, ADD_SELECTOR));
+    let restored = packet_bindings(&f, ADD_SELECTOR);
+    assert_eq!(restored["total"], 1, "{restored}");
+    assert_only_doc_storage(&restored);
 
     let Some(g) = name_selector_fixture("name-sel-wrong-kind") else {
         return;
@@ -2302,5 +2304,7 @@ fn name_selector_rejects_same_span_wrong_uri_or_kind() {
     );
     assert_eq!(refused["total"], 0, "{refused}");
     set_doc_storage_binding_column(&g, "anchor_kind", &original_kind);
-    assert_only_doc_storage(&packet_bindings(&g, ADD_SELECTOR));
+    let restored = packet_bindings(&g, ADD_SELECTOR);
+    assert_eq!(restored["total"], 1, "{restored}");
+    assert_only_doc_storage(&restored);
 }

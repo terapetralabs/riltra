@@ -116,6 +116,11 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Changed
 
+- A `packet` or `context` name selector (`target`, also on the MCP tool `riltra_context`) now also
+  lists the bindings on the definition's SCIP name occurrence, such as those written by
+  `docs ingest`, when the ownership proof used by `docs scan` and `docs ingest` establishes that
+  occurrence. It is never a name match; an unproven definition lists what it listed before.
+  Position selectors and `knowledge at` are unchanged, and no JSON key changes.
 - `knowledge at`, `riltra_knowledge_at_anchor`, `context` and `packet` gain an appended `record_evidence` key (`total`, `fresh`, `stale`, `unresolved`) that counts the evidence rows of the bound record revision. It is read-only and does not change any existing key. The `knowledge bind` write response does not carry it.
 - The code-index schema is now 6 and `PARSER_VERSION` is 14. After upgrading,
   every code-index read answers `schema_outdated` until `riltra index` is run,

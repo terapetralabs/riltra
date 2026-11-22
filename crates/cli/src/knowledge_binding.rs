@@ -1393,13 +1393,25 @@ pub(crate) fn at(
     })
 }
 
+/// The one WHERE clause of the pinned binding count and page queries. `?4,?5` and
+/// `?6,?7` are the primary anchor's span and cursor; `?8..?11` are the span,
+/// symbol and kind of an alternate anchor (bound to values that match nothing
+/// when there is none). A row also has to pass `binding_matches_pinned_anchor`.
+const PINNED_BINDING_WHERE: &str = "b.repo=?1 AND b.repo_root_digest=?2 AND b.path=?3
+               AND ((b.byte_start=?4 AND b.byte_end=?5)
+                    OR (b.cursor_line=?6 AND b.cursor_col=?7)
+                    OR (b.byte_start=?8 AND b.byte_end=?9 AND b.symbol_uri IS ?10 AND b.anchor_kind=?11))";
+
 /// Read bindings for a code anchor already resolved from a pinned code snapshot.
 /// The first knowledge read pins this deferred transaction; the code snapshot is
-/// intentionally independent from this knowledge generation.
+/// intentionally independent from this knowledge generation. `alternate` is a
+/// second valid identity of the same target (the proven SCIP name occurrence of a
+/// definition the name selector resolved); the page still reports `anchor`.
 pub(crate) fn at_pinned(
     conn: &Connection,
     entry: &registry::RepoEntry,
     anchor: &CodeAnchor,
+    alternate: Option<&CodeAnchor>,
     limit: usize,
     generation: Option<u64>,
 ) -> Result<AtPage, String> {
@@ -1410,6 +1422,17 @@ pub(crate) fn at_pinned(
         || !(1..=knowledge::SEARCH_LIMIT_MAX).contains(&limit)
     {
         return Err("invalid pinned knowledge-at anchor or page bounds".to_string());
+    }
+    if let Some(alt) = alternate {
+        if alt.repo != anchor.repo
+            || alt.path != anchor.path
+            || alt.repo_root_digest != anchor.repo_root_digest
+            || alt.byte_start >= alt.byte_end
+            || alt.cursor_line == 0
+            || alt.cursor_col == 0
+        {
+            return Err("invalid pinned knowledge-at alternate anchor".to_string());
+        }
     }
     let tx = conn
         .unchecked_transaction()
@@ -1446,15 +1469,29 @@ pub(crate) fn at_pinned(
     let current_source = semantic::confined_read(&root, &anchor.path, crate::scan::MAX_FILE_BYTES)
         .map_err(|e| format!("anchor source unavailable: {e}"));
     let mut unresolved_reason = pinned_anchor_unresolved_reason(anchor, &current_source);
+    if let Some(alt) = alternate {
+        if let Some(reason) = pinned_anchor_unresolved_reason(alt, &current_source) {
+            unresolved_reason.get_or_insert(reason);
+        }
+    }
     let selection = i64::try_from(anchor.byte_start)
         .map_err(|_| "code anchor start is out of range".to_string())?;
     let selection_end = i64::try_from(anchor.byte_end)
         .map_err(|_| "code anchor end is out of range".to_string())?;
+    let (alt_start, alt_end, alt_symbol, alt_kind) = match alternate {
+        Some(alt) => (
+            i64::try_from(alt.byte_start)
+                .map_err(|_| "code anchor start is out of range".to_string())?,
+            i64::try_from(alt.byte_end)
+                .map_err(|_| "code anchor end is out of range".to_string())?,
+            alt.symbol_uri.clone(),
+            alt.anchor_kind.clone(),
+        ),
+        None => (-1, -1, None, String::new()),
+    };
     let total: i64 = tx
         .query_row(
-            "SELECT count(*) FROM code_bindings b WHERE b.repo=?1 AND b.repo_root_digest=?2 AND b.path=?3
-             AND ((b.byte_start=?4 AND b.byte_end=?5)
-                  OR (b.cursor_line=?6 AND b.cursor_col=?7))",
+            &format!("SELECT count(*) FROM code_bindings b WHERE {PINNED_BINDING_WHERE}"),
             params![
                 entry.name,
                 anchor.repo_root_digest,
@@ -1462,7 +1499,11 @@ pub(crate) fn at_pinned(
                 selection,
                 selection_end,
                 anchor.cursor_line,
-                anchor.cursor_col
+                anchor.cursor_col,
+                alt_start,
+                alt_end,
+                alt_symbol,
+                alt_kind
             ],
             |row| row.get(0),
         )
@@ -1470,7 +1511,7 @@ pub(crate) fn at_pinned(
     let limit_i64 =
         i64::try_from(limit).map_err(|_| "knowledge-at limit out of range".to_string())?;
     let mut stmt = tx
-        .prepare(
+        .prepare(&format!(
             "SELECT b.binding_id,b.repo,b.snapshot_id,b.snapshot_nonce,b.snapshot_digest,b.source_digest,
                     b.path,b.byte_start,b.byte_end,b.cursor_line,b.cursor_col,b.symbol_uri,b.display_name,
                     b.anchor_kind,b.precision,b.record_id,b.record_revision,r.kind,r.title,r.body,r.status,
@@ -1479,11 +1520,9 @@ pub(crate) fn at_pinned(
              FROM code_bindings b
              JOIN records r ON r.id=b.record_id AND r.revision=b.record_revision
              LEFT JOIN code_binding_retractions t USING(binding_id)
-             WHERE b.repo=?1 AND b.repo_root_digest=?2 AND b.path=?3
-               AND ((b.byte_start=?4 AND b.byte_end=?5)
-                    OR (b.cursor_line=?6 AND b.cursor_col=?7))
-             ORDER BY b.binding_id LIMIT ?8",
-        )
+             WHERE {PINNED_BINDING_WHERE}
+             ORDER BY b.binding_id LIMIT ?12"
+        ))
         .map_err(|e| format!("cannot prepare code binding read: {e}"))?;
     let mut rows = stmt
         .query_map(
@@ -1495,6 +1534,10 @@ pub(crate) fn at_pinned(
                 selection_end,
                 anchor.cursor_line,
                 anchor.cursor_col,
+                alt_start,
+                alt_end,
+                alt_symbol,
+                alt_kind,
                 limit_i64
             ],
             |row| binding_from_row(row, &current_source),
@@ -1511,7 +1554,9 @@ pub(crate) fn at_pinned(
         return Err("corrupt knowledge store: binding count does not match readable rows".into());
     }
     for binding in &mut rows {
-        if !binding_matches_pinned_anchor(binding, anchor) {
+        if !binding_matches_pinned_anchor(binding, anchor)
+            && !alternate.is_some_and(|alt| binding_matches_pinned_anchor(binding, alt))
+        {
             binding.freshness = "unresolved".to_string();
             binding.freshness_reason =
                 Some("stored binding identity does not match pinned code anchor".to_string());

@@ -2061,3 +2061,106 @@ fn binding_without_record_evidence_reports_zero_total() {
         "{page}"
     );
 }
+
+/// Ingests the `add` proposal as `doc-storage` (bound on the SCIP name occurrence)
+/// and binds a separate control record `other` to `sub` at its name.
+fn name_selector_fixture(tag: &str) -> Option<Fixture> {
+    let f = fixture(tag, &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)])?;
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let input = input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    )]);
+    let out = f.ingest(&input);
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let created = f.knowledge_create(
+        r#"{"id":"other","kind":"decision","title":"Other","body":"no evidence","status":"active","author":"a"}"#,
+    );
+    assert_eq!(code_of(&created), Some(0), "{}", stderr_of(&created));
+    let bound = f.stdin_cli(
+        &[
+            "knowledge", "bind", "--repo", "r", "--path", "pkg/calc.py", "--line", "4", "--col",
+            "5", "--input", "-",
+        ],
+        r#"{"record_id":"other","record_revision":1,"relation":"documents","author":"a","rationale":"r","provenance":"p"}"#,
+    );
+    assert_eq!(code_of(&bound), Some(0), "{}", stderr_of(&bound));
+    Some(f)
+}
+
+fn packet_bindings(f: &Fixture, anchors: &str) -> Value {
+    let out = cli(
+        &f.home,
+        &words(&["packet", "--repo", "r", "--anchors", anchors]),
+    );
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("packet prints JSON");
+    assert_eq!(doc["anchors"][0]["status"], "resolved", "{doc}");
+    doc["anchors"][0]["context"]["data"]["knowledge"]["bindings"].clone()
+}
+
+fn assert_only_doc_storage(page: &Value) {
+    assert_eq!(page["status"], "linked", "{page}");
+    let bindings = page["bindings"].as_array().expect("bindings array");
+    assert_eq!(bindings.len(), 1, "{page}");
+    assert_eq!(bindings[0]["record_id"], "doc-storage", "{page}");
+    assert_eq!(bindings[0]["freshness"], "fresh", "{page}");
+    assert_eq!(
+        bindings[0]["record_evidence"],
+        json!({"total": 1, "fresh": 1, "stale": 0, "unresolved": 0}),
+        "{page}"
+    );
+}
+
+#[test]
+fn name_selector_packet_lists_binding_on_scip_name_occurrence() {
+    let Some(f) = name_selector_fixture("name-sel-packet") else {
+        return;
+    };
+    let page = packet_bindings(
+        &f,
+        r#"[{"target":"add","in":"pkg/calc.py","kind":"function"}]"#,
+    );
+    assert_only_doc_storage(&page);
+}
+
+#[test]
+fn name_selector_context_lists_binding_on_scip_name_occurrence() {
+    let Some(f) = name_selector_fixture("name-sel-context") else {
+        return;
+    };
+    let out = cli(
+        &f.home,
+        &words(&[
+            "context",
+            "--repo",
+            "r",
+            "--target",
+            "add",
+            "--in",
+            "pkg/calc.py",
+            "--kind",
+            "function",
+        ]),
+    );
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("context prints JSON");
+    assert_only_doc_storage(&doc["knowledge"]["bindings"]);
+}
+
+#[test]
+fn position_selector_at_definition_start_keeps_old_behaviour() {
+    let Some(f) = name_selector_fixture("name-sel-position") else {
+        return;
+    };
+    let start = packet_bindings(&f, r#"[{"path":"pkg/calc.py","line":1,"col":1}]"#);
+    assert_eq!(start["status"], "no-link-proven", "{start}");
+    assert_eq!(start["bindings"].as_array().unwrap().len(), 0, "{start}");
+    let name = packet_bindings(&f, r#"[{"path":"pkg/calc.py","line":1,"col":5}]"#);
+    assert_only_doc_storage(&name);
+}

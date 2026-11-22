@@ -1896,6 +1896,7 @@ fn context_doc(input: &ContextInput) -> CallToolResult {
     ) {
         return context_query_error(e);
     }
+    let by_name = matches!(anchor, Anchor::Name(_));
     let (path, line, col) = match anchor {
         Anchor::At { path, line, col } => (path.to_string(), line, col),
         Anchor::Name(query) => match resolve_name(&home, &input.repo, &query) {
@@ -1916,6 +1917,7 @@ fn context_doc(input: &ContextInput) -> CallToolResult {
         symbol: input.symbol.as_deref(),
         query: input.query.as_deref(),
         semantic: input.semantic.unwrap_or(false),
+        by_name,
         depth,
         limit,
         max_bytes,

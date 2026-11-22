@@ -1434,6 +1434,7 @@ fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i
         symbol: args.symbol.as_deref(),
         query: args.query.as_deref(),
         semantic: args.semantic,
+        by_name: args.target.is_some(),
         depth,
         limit,
         max_bytes,

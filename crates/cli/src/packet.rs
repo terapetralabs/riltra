@@ -472,6 +472,7 @@ fn query_conn_inner(
                             symbol: selector.symbol.as_deref(),
                             query: None,
                             semantic: false,
+                            by_name: selector.target.is_some(),
                             depth: request.depth,
                             limit: request.limit,
                             max_bytes: request.max_bytes,

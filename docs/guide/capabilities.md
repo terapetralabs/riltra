@@ -597,12 +597,15 @@ index stores it. `anchor` is the position the binding resolver uses, and it is w
 binding is anchored. Which position that is depends on the code index. With a SCIP import
 that covers the definition, the anchor is the definition's name occurrence: for `def add`
 on line 1 the anchor is column 5. A `packet` or `context` name selector resolves at the
-definition start, so it does not find such a binding. Without a covering import, the
+definition start, and it also lists the bindings on that name occurrence, when the same
+ownership proof as `docs scan` and `docs ingest` establishes the occurrence as the
+definition's own; it never matches by name. Position selectors are unchanged: a position
+at the definition start does not list such a binding. Without a covering import, the
 anchor is the syntax definition at its own start line and column. That is column 1 only
 when the definition is not indented; an indented method starts further in. A name selector
 finds such a binding. In every case, query `knowledge at`, `context` or `packet` at the
 proposal's `target.anchor` line and column, which matches the binding's exact anchor span
-or cursor position.
+or cursor position. `knowledge at` still matches only that exact position or span.
 
 Existing records. Knowledge records that cite a document are matched by the document's
 path. A section is shown as `recorded` only when a stored evidence row has exactly that

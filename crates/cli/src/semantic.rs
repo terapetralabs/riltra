@@ -456,6 +456,24 @@ pub fn confined_path(root: &Path, rel: &str) -> Result<(std::path::PathBuf, bool
 /// before validation — an identity-preserving mapping — while `..`, drive
 /// qualification, and escapes are still rejected afterwards.
 pub fn validate_doc_path(root: &Path, rel: &str) -> Result<String, String> {
+    let normalized = validate_snapshot_rel(rel)?;
+    let mut candidate = root.to_path_buf();
+    for part in normalized.split('/') {
+        candidate.push(part);
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("repository root unavailable: {e}"))?;
+    if !paths::contains(&canonical_root, &candidate) {
+        return Err(format!("document path escapes repository: '{rel}'"));
+    }
+    Ok(normalized)
+}
+
+/// The lexical half of `validate_doc_path`: no file is read or stat'ed, so a path
+/// deleted from the worktree still passes, which is what a snapshot identity needs.
+/// Returns the normalized `/`-separated path.
+pub(crate) fn validate_snapshot_rel(rel: &str) -> Result<String, String> {
     if rel.is_empty() {
         return Err("empty document path".to_string());
     }
@@ -474,16 +492,6 @@ pub fn validate_doc_path(root: &Path, rel: &str) -> Result<String, String> {
             return Err(format!("absolute document path: '{rel}'"));
         }
         parts.push(part);
-    }
-    let mut candidate = root.to_path_buf();
-    for part in &parts {
-        candidate.push(part);
-    }
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|e| format!("repository root unavailable: {e}"))?;
-    if !paths::contains(&canonical_root, &candidate) {
-        return Err(format!("document path escapes repository: '{rel}'"));
     }
     Ok(parts.join("/"))
 }
@@ -726,6 +734,40 @@ mod tests {
             return; // OS refused symlinks here; nothing to prove.
         }
         assert!(validate_doc_path(&dir, "escape.py").is_err());
+    }
+
+    #[test]
+    fn snapshot_rel_accepts_missing_file_and_refuses_unsafe_paths() {
+        let dir = tmpdir("sem-snapshot-rel");
+        // Lexical only: the file need not exist, so a snapshot path survives its deletion.
+        assert_eq!(validate_snapshot_rel("src/gone.py").unwrap(), "src/gone.py");
+        assert_eq!(
+            validate_snapshot_rel("src\x5cgone.py").unwrap(),
+            "src/gone.py"
+        );
+        // Drive-qualified inputs are built at run time so the source holds no drive-path text.
+        let drive = format!("{}:/x", 'C');
+        let nested_drive = format!("a/{drive}");
+        for bad in [
+            "",
+            "/x",
+            "../x",
+            "a/../x",
+            "a//b",
+            "a/./b",
+            &drive,
+            &nested_drive,
+            "a\0b",
+        ] {
+            let want = validate_doc_path(&dir, bad).unwrap_err();
+            assert_eq!(
+                validate_snapshot_rel(bad).unwrap_err(),
+                want,
+                "must refuse {bad:?} with the same message"
+            );
+        }
+        // Control: the containment half still refuses a missing file for the existing callers.
+        assert!(validate_doc_path(&dir, "src/gone.py").is_err());
     }
 
     #[test]

@@ -346,36 +346,36 @@ fn parse_raw(out: &[u8]) -> Result<Vec<Change>, String> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Answer {
+pub(crate) enum Answer {
     Count(usize),
     Reason(&'static str),
 }
 
 /// Path, definition kind and name: the key of one index caller lookup.
-type Key = (String, String, &'static str);
+pub(crate) type Key = (String, String, &'static str);
 
-struct DefOut {
-    name: String,
-    kind: &'static str,
-    change: &'static str,
-    header_touched: bool,
-    old_span: Option<Span>,
-    new_span: Option<Span>,
-    lookup: Option<Key>,
-    sort_line: u32,
+pub(crate) struct DefOut {
+    pub(crate) name: String,
+    pub(crate) kind: &'static str,
+    pub(crate) change: &'static str,
+    pub(crate) header_touched: bool,
+    pub(crate) old_span: Option<Span>,
+    pub(crate) new_span: Option<Span>,
+    pub(crate) lookup: Option<Key>,
+    pub(crate) sort_line: u32,
 }
 
-struct FileOut {
-    path: String,
-    old_path: Option<String>,
-    status: &'static str,
-    change: &'static str,
-    reason: Option<&'static str>,
-    language: Option<&'static str>,
-    established: bool,
-    defs: Vec<DefOut>,
-    outside: Vec<Hunk>,
-    hunks: usize,
+pub(crate) struct FileOut {
+    pub(crate) path: String,
+    pub(crate) old_path: Option<String>,
+    pub(crate) status: &'static str,
+    pub(crate) change: &'static str,
+    pub(crate) reason: Option<&'static str>,
+    pub(crate) language: Option<&'static str>,
+    pub(crate) established: bool,
+    pub(crate) defs: Vec<DefOut>,
+    pub(crate) outside: Vec<Hunk>,
+    pub(crate) hunks: usize,
 }
 
 enum Read {
@@ -1097,9 +1097,9 @@ fn analyse(ctx: &Ctx, change: &Change) -> Result<FileOut, Failure> {
 
 /// Index-side answers for every lookup key. Any failure here is `unavailable`,
 /// which degrades only the caller counts (the structure never depends on it).
-struct Freshness {
-    status: String,
-    reasons: Vec<String>,
+pub(crate) struct Freshness {
+    pub(crate) status: String,
+    pub(crate) reasons: Vec<String>,
 }
 
 fn index_answers(
@@ -1153,8 +1153,22 @@ fn count_callers(
         .map_err(|_| "store-error")?
         .ok_or("no-snapshot")?;
     store::require_graph_proof(&tx, snapshot.id).map_err(|e| index_reason(&e))?;
-    let (status, reasons) =
-        index::evaluate_snapshot_with(&tx, repo, canon, &snapshot, &|root| git.fingerprint(root));
+    count_callers_tx(&tx, repo, canon, &snapshot, keys, &|root| {
+        git.fingerprint(root)
+    })
+}
+
+/// The freshness verdict and one caller answer per key, on a read transaction whose
+/// snapshot and graph proof the caller has already checked.
+pub(crate) fn count_callers_tx(
+    tx: &rusqlite::Transaction<'_>,
+    repo: &str,
+    canon: &Path,
+    snapshot: &store::Snapshot,
+    keys: &BTreeSet<Key>,
+    fingerprint: &dyn Fn(&Path) -> git::GitInfo,
+) -> Result<(Freshness, BTreeMap<Key, Answer>), &'static str> {
+    let (status, reasons) = index::evaluate_snapshot_with(tx, repo, canon, snapshot, fingerprint);
     let mut answers = BTreeMap::new();
     for key in keys {
         // A data member is never called, so no count is looked up for it.
@@ -1162,12 +1176,12 @@ fn count_callers(
             answers.insert(key.clone(), Answer::Reason("data-member"));
             continue;
         }
-        let symbols = symbol_rows(&tx, snapshot.id, key).map_err(|_| "store-error")?;
+        let symbols = symbol_rows(tx, snapshot.id, key).map_err(|_| "store-error")?;
         let answer = match symbols.as_slice() {
             [] => Answer::Reason("not-in-index"),
             [(byte_start, byte_end)] => Answer::Count(
                 index::indexed_inbound_total(
-                    &tx,
+                    tx,
                     snapshot.id,
                     &key.0,
                     &key.1,
@@ -1184,7 +1198,7 @@ fn count_callers(
 }
 
 /// Byte ranges of the index symbols with this path, name and kind in one snapshot.
-fn symbol_rows(
+pub(crate) fn symbol_rows(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
     key: &Key,
@@ -1245,11 +1259,19 @@ fn resolve_commit(git: &DiffGit, root: &Path, rev: &str) -> Result<Option<String
     ))
 }
 
-/// The `changes` document for one registered repository (CLI and MCP share it).
-/// Every git call that reads repository content or state runs through the hardened
-/// `DiffGit` posture, including the index freshness check. `git --version` and the
-/// read of filter driver names run no repository code and are not hardened.
-pub fn document(home: &Path, repo: &str, root: &Path, req: &Request) -> Result<String, Failure> {
+/// The git side of one change: head, listed files with their definitions, and totals.
+/// Plain data, so that the output code can be tested without git.
+pub(crate) struct Structure {
+    pub(crate) head: String,
+    pub(crate) files: Vec<FileOut>,
+    pub(crate) total_files: usize,
+    pub(crate) truncated: bool,
+    pub(crate) canon: PathBuf,
+}
+
+/// Everything `document` computes from git, up to and including `analyse`. The
+/// hardened runner comes back too, because the index side fingerprints through it.
+pub(crate) fn structure(root: &Path, req: &Request) -> Result<(Structure, DiffGit), Failure> {
     require_git_version()?;
     let canon = paths::canonical_root(root)
         .map_err(|e| Failure::new(3, format!("repository root unavailable: {e}")))?;
@@ -1348,22 +1370,45 @@ pub fn document(home: &Path, repo: &str, root: &Path, req: &Request) -> Result<S
         .iter()
         .map(|change| analyse(&ctx, change))
         .collect::<Result<Vec<FileOut>, Failure>>()?;
-    let keys: BTreeSet<Key> = files
+    Ok((
+        Structure {
+            head,
+            files,
+            total_files: total,
+            truncated,
+            canon,
+        },
+        diff_git,
+    ))
+}
+
+/// The `changes` document for one registered repository (CLI and MCP share it).
+/// Every git call that reads repository content or state runs through the hardened
+/// `DiffGit` posture, including the index freshness check. `git --version` and the
+/// read of filter driver names run no repository code and are not hardened.
+pub fn document(home: &Path, repo: &str, root: &Path, req: &Request) -> Result<String, Failure> {
+    let (structure, diff_git) = structure(root, req)?;
+    let keys: BTreeSet<Key> = structure
+        .files
         .iter()
         .flat_map(|f| f.defs.iter().filter_map(|d| d.lookup.clone()))
         .collect();
-    let (freshness, answers) = index_answers(home, repo, &canon, &keys, &diff_git);
-    let files_json: Vec<String> = files.iter().map(|f| file_json(f, &answers)).collect();
+    let (freshness, answers) = index_answers(home, repo, &structure.canon, &keys, &diff_git);
+    let files_json: Vec<String> = structure
+        .files
+        .iter()
+        .map(|f| file_json(f, &answers))
+        .collect();
     Ok(format!(
         "{{\"schema_version\":1,\"repo\":\"{}\",\"scope\":\"{}\",\"base\":{},\"head\":\"{}\",\"index_freshness\":{},\"total_files\":{},\"files\":[{}],\"truncated\":{},\"limits\":{{\"limit\":{}}},\"disclaimer\":\"{DISCLAIMER}\"}}",
         escape(repo),
         req.scope.name(),
         opt_str(req.base.as_deref()),
-        escape(&head),
+        escape(&structure.head),
         freshness_json(&freshness),
-        total,
+        structure.total_files,
         files_json.join(","),
-        truncated,
+        structure.truncated,
         req.limit
     ))
 }

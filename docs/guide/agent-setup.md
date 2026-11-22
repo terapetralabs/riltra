@@ -75,6 +75,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | Where is a symbol defined? | `riltra_code_search` | `query` is the symbol text. `limit` (default 50, maximum 1000) and `offset` page the results. `occurrences: true` adds a name census for C++ only. |
 | Which definitions match a description in words? | `riltra_code_query` | Lexical ranking over names, paths and doc comments. Results carry `path` and `line` but no column; pass `name` as `target` and `path` as `in`. |
 | Which definitions does my git change touch? | `riltra_code_changes` | Live parse of the changed files: definitions added, removed or modified. A map of structure, not an impact verdict. |
+| Which tests and areas should I check for my git change? | `riltra_change_checks` | Suggestions from git changes, stored relations and file names. Riltra runs no test, and an empty list does not mean no test is needed; run the checks your project requires. |
 | What calls this? | `riltra_code_callers` | Anchor with `path`, `line` and `col`. Heuristic edges stay `POTENTIAL_CALL`. |
 | What does this call? | `riltra_code_callees` | Same anchor. |
 | How might A reach B? | `riltra_code_trace` | Optional `to` (`PATH:LINE:COL`) and `depth` (default 3, 1 to 6). Paths are plausible traversal, not execution. |

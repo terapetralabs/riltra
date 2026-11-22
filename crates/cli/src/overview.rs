@@ -728,7 +728,7 @@ fn unavailable_document(path: String, manifest: bool, reason: &str) -> SourceEvi
         text: None,
     }
 }
-fn is_manifest(p: &str) -> bool {
+pub(crate) fn is_manifest(p: &str) -> bool {
     matches!(
         Path::new(p).file_name().and_then(|s| s.to_str()),
         Some(

@@ -382,6 +382,140 @@ written.
 
 The output is the structure of a change, not an impact verdict.
 
+## Change checks (read-only)
+
+`riltra checks --repo <name> [--scope unstaged|staged|all|compare] [--base <ref>] [--limit <n>]`
+and the MCP tool `riltra_change_checks` (input `repo`, `scope`, `base`, `limit`)
+print one JSON document of test candidates and coverage limits for a git change.
+The scopes, the `--limit` default and maximum, and the refusals are those of
+[changed definitions](#changed-definitions). The document is a suggestion. Riltra
+runs no test and no project tool, so an empty `test_candidates` list does not mean
+that no test is needed, and the project's required checks still apply. The CLI
+and the MCP tool return the same JSON document; the CLI's stdout adds one trailing
+newline.
+
+Reads and writes. The index is opened once, read-only, in one transaction. A
+missing index is reported as `no-index` and is not created. An older index schema
+is reported as `schema-outdated` and is not migrated, and a newer one is reported as
+`schema-ahead` and not read. The registry, every `.db` file and the repository stay unchanged.
+The only writes are the temporary directory that `changes` uses for duplicate paths
+and SQLite's `-wal` and `-shm` sidecars beside an existing index. Git runs only as
+read-only plumbing. There is no network call, no provider, no language server, no
+project tool and no test runner.
+
+Exit codes. `0` prints the report, including for a missing index and an unsupported
+schema. `2` is a usage error or an unknown `--base` ref. `3` is every refusal that
+`changes` gives with exit 3, an unknown repository, and a storage read error, including
+one inside a traversal (for example a failed read of a SCIP owner mapping, which is
+never read as "no mapping"). MCP answers exit 2 as `invalid_input` and exit 3 as `store_error`.
+
+Bases. Each reason keeps its own basis. A candidate's basis is its strongest
+reason, in this order:
+
+- `proven-edge`: a stored call or reference edge with proven evidence, reached from
+  the changed definition in the index snapshot.
+- `unproven-edge`: a stored edge reached through a path whose evidence is not proven.
+- `name-candidate`: a syntax-only name match. It is recorded as written and is not
+  resolved to a definition.
+- `path-convention`: a file-name rule (below), from the changed file.
+
+A quoted instruction is not a candidate. It has basis `explicit-instruction` and its
+own state, described below.
+
+File-name rule. For each changed file `dir/stem.ext` in a language riltra parses,
+whether or not a definition in it changed, a snapshot file `p` is a candidate when
+`p` is a test path (a file under a `test`, `tests`, `__tests__` or `spec` directory,
+or a file named `test_*.py`, `*_test.go`, `*.test.ts`, `*.spec.ts` or `*Test.java`)
+and its file name without extension is exactly one of `stem`, `test_stem`,
+`stem_test`, `stem.test`, `stem.spec` or `stemTest` (case-sensitive). The reason's
+source is the changed file, and its detail is `same-stem`. The rule works only on
+file names. Without an index there is no file list, so it gives nothing, and the
+`no-index` limit says so.
+
+Repository instructions. Riltra reads `README.md`, `AGENTS.md`, `CLAUDE.md`,
+`CONTRIBUTING.md`, `BUILDING.md` and `TESTING.md` at the root and in every ancestor
+directory of a changed file, at most 20 files, each read up to 262,144 bytes. A
+quoted line is a line inside a fenced code block that contains `test` as a whole
+word, case-insensitively. A fence opens on a line that starts with three backticks
+or three tildes, and the fence lines themselves are never quoted. Each quoted line
+is trimmed and cut to 200 bytes on a character boundary. Quoted lines are data:
+riltra never runs them, and a quoted line is not permission to run anything.
+
+Traversal. For each changed definition that resolves to one indexed symbol, riltra
+walks the stored graph from the definition's snapshot row to depth 3. The walk
+does not look the definition up again by line and column, so a definition edited
+after indexing is still traversed. Its freshness and verification labels come from
+the same evaluation as `impact`. A traversed definition carries the uncertainty
+`snapshot definition: resolved from the index, not from the live source`, so its
+impact verdict stays `UNKNOWN`. A dependent file whose path is a test path becomes a
+candidate reason. Any other dependent file is listed as a dependent reason of its
+review area.
+
+`dependent_count` counts what the traversed definitions reached. When definitions
+were not traversed, because of a cap or the time limit, or when the graph is partial,
+the count is a lower bound. The `definitions-not-analysed`, `traversal-time-budget` and
+`partial-graph` limits say so.
+
+Statuses. A changed definition is `analysed`, `added` (no index key yet),
+`not-in-index`, `ambiguous-in-index`, `data-member`, `not-traversed` (beyond the
+traversal cap, or no graph proof), `time-budget`, `anchor-unavailable` or
+`index-unavailable`. A removed file's definitions are traversed from their snapshot
+rows; a removed file is listed in `changed`, and the `index-stale` limit is set. A
+changed test file is kept in the report, and it can be a candidate.
+
+Coverage limits. `coverage_limits` lists the limits that apply, in this fixed order.
+Each has a count and at most 20 paths, sorted, with the rest counted:
+
+1. `no-index`, `schema-outdated`, `schema-ahead`, `no-snapshot`: no graph or file list was read.
+2. `index-stale`: the index is older than the worktree; its reasons are listed.
+3. `graph-proof-incompatible`: edges are withheld; only the file-name rule ran.
+4. `no-semantic-import`: the snapshot has no semantic import, so no edge can be proven.
+5. `partial-graph`: a traversal is partial or its verdict is `UNKNOWN`.
+6. `configuration-changed`: a changed build, manifest or configuration file, or a file under `.github/`.
+7. `file-not-analysed`: a changed file that riltra does not parse (unsupported, binary, too large, unreadable, a submodule, a symlink, unmerged or a parse error).
+8. `hunks-outside-definitions`: a file has a hunk outside every definition.
+9. `added-definitions`: added definitions have no indexed dependents yet.
+10. `definitions-not-analysed`: a changed definition was not analysed or was not traversed.
+11. `traversal-time-budget`: a traversal reached its 2,000 ms limit, or no traversal started
+    after the 10,000 ms total. Each such definition is `time-budget` and contributes nothing.
+12. `changes-truncated`: `changes` listed fewer files than it found.
+13. `no-test-candidates`: the list of test candidates is empty. An empty list is not "no test is needed".
+
+Bounds. The default is 50 changed files (`--limit` takes 1 to 1000). The report
+lists at most 200 definitions, traverses at most 20 definitions, walks depth 3,
+lists at most 50 test candidates with 5 reasons each, reads at most 20 instruction
+files and quotes at most 20 lines, and lists at most 30 review areas, each with at
+most 20 changed files and 10 dependent files, with at most 3 reasons each. Each
+traversal has 2,000 ms, and once 10,000 ms of traversal time has passed no new
+traversal starts; the definitions that were not started are `time-budget`. Every
+dropped item is counted in `omissions` with its section, reason, and count (`null`
+when riltra cannot know it). The JSON is at most 262,144 bytes. When it would be
+larger, riltra drops quoted instructions first, then extra reasons, dependent files,
+test candidates, listed definitions and changed files per area, and last the limit
+paths, and counts each dropped item under `json_budget`.
+
+Time limit. The output is deterministic: two runs on the same index revision,
+worktree and git state are byte-identical, unless a traversal reaches the
+2,000 ms limit or the 10,000 ms total in one run and not in the other. A timed-out
+definition contributes nothing and is listed under `traversal-time-budget`, however
+far it got.
+
+Next actions. The document ends with fixed suggestions, each at most once. A stale or
+missing index suggests `riltra index --repo <name>`. A graph proof that is
+incompatible suggests `riltra semantic import` or `riltra index --full`. A missing
+semantic import suggests `riltra semantic setup`. The last action has no command:
+run the checks your project requires. riltra does not run tests.
+
+Accepted limits. There is no import of coverage reports yet; a coverage import
+would be a later extension. riltra keeps no runtime data about which tests exercise
+which code. The file-name rule covers only the forms listed above. Inline Rust
+`#[cfg(test)]` modules are not detected. The traversal depth is 3. An instruction
+fence closes on the next line that starts with the same three-character marker, so
+a line such as a backtick fence with a language name (for example three backticks
+followed by `sh`) closes the block early. A
+missing instruction file is skipped silently, and an unreadable one is counted in
+`omissions` as `instructions` with reason `unreadable`.
+
 ## Area map (read-only)
 
 `riltra map --repo <name> [--depth 1..4] [--format json|markdown]` and the MCP
@@ -564,8 +698,8 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves nineteen local stdio tools. Eighteen read repository,
-index, code, knowledge, project overview, area map, and selected-anchor packet data. The remaining tool,
+`riltra mcp` serves twenty local stdio tools. Nineteen read repository,
+index, code, knowledge, project overview, area map, selected-anchor packet, and change-check data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the
 network. The MCP handlers themselves do not create, migrate, or replace a

@@ -17632,7 +17632,7 @@
         "pkg:cargo/tree-sitter-typescript@0.23.2",
         "pkg:cargo/tree-sitter@0.25.10"
       ],
-      "ref": "pkg:cargo/riltra@0.2.0-rc.1"
+      "ref": "pkg:cargo/riltra@0.2.0"
     },
     {
       "dependsOn": [
@@ -19005,16 +19005,16 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "pkg:cargo/riltra@0.2.0-rc.1",
+      "bom-ref": "pkg:cargo/riltra@0.2.0",
       "licenses": [
         {
           "expression": "Apache-2.0"
         }
       ],
       "name": "riltra",
-      "purl": "pkg:cargo/riltra@0.2.0-rc.1",
+      "purl": "pkg:cargo/riltra@0.2.0",
       "type": "application",
-      "version": "0.2.0-rc.1"
+      "version": "0.2.0"
     }
   },
   "specVersion": "1.5",

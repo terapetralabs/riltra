@@ -33,6 +33,8 @@ Limits, stated plainly:
 - The mirror protects only the main repository. Submodules and `cmake/deps.txt` downloads still come from their own upstreams.
 - `microsoft/onnxruntime-extensions` is also unavailable. It is believed unused, because extensions are not enabled by the build options. A green `native-inference` run must confirm this.
 
+**2026-11-20 validation update:** The [PR #80 native-inference run](https://github.com/terapetralabs/riltra/actions/runs/44669579398) built the pinned runtime and passed the isolated native query and lexical-fallback steps on Windows x64, Ubuntu x64, and macOS Intel. This establishes that those tested builds did not require the unavailable extensions repository; it does not establish that every ONNX Runtime build configuration can omit it.
+
 ## Alternatives considered
 
 - (a) Prebuilt binaries from NuGet `Microsoft.ML.OnnxRuntime` or PyPI. Rejected for now: Riltra builds with `onnxruntime_USE_TELEMETRY=OFF`, and `inference.rs` refuses the official Windows 1.24.4 `onnxruntime.dll` (SHA-256 `b95efb2113b603bbbf3f191061c5516a871ed546893c820e4f3b7b6c358dbf2a`) as telemetry-enabled.

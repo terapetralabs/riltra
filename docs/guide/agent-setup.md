@@ -72,10 +72,13 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 |---|---|---|
 | Is Riltra working, and which repositories are registered? | `riltra_health`, `riltra_repo_list` | Read-only; they create and open no storage. |
 | Is this repository indexed, and is the index current? | `riltra_repo_status` | Includes `index_status`. A missing index answers `no-index`; nothing is created. |
+| Where do I start in this project? | `riltra_project_overview` | Read-only summary from index and document evidence. Entry points are candidates, not proof of a runtime flow. |
+| Which areas does the project have, and how are they linked? | `riltra_project_map` | Directory areas, proven links and bounded static flows. Areas are navigation hints, not architecture boundaries. |
 | Where is a symbol defined? | `riltra_code_search` | `query` is the symbol text. `limit` (default 50, maximum 1000) and `offset` page the results. `occurrences: true` adds a name census for C++ only. |
 | Which definitions match a description in words? | `riltra_code_query` | Lexical ranking over names, paths and doc comments. Results carry `path` and `line` but no column; pass `name` as `target` and `path` as `in`. |
 | Which definitions does my git change touch? | `riltra_code_changes` | Live parse of the changed files: definitions added, removed or modified. A map of structure, not an impact verdict. |
 | Which tests and areas should I check for my git change? | `riltra_change_checks` | Suggestions from git changes, stored relations and file names. Riltra runs no test, and an empty list does not mean no test is needed; run the checks your project requires. |
+| Which documented rules and decisions point at this code? | `riltra_docs_scan` | Read-only. Lists Markdown sections, explicit links to indexed definitions, and the records that cite each document. Proposals are not verified; ingest is CLI-only and needs your approval. |
 | What calls this? | `riltra_code_callers` | Anchor with `path`, `line` and `col`. Heuristic edges stay `POTENTIAL_CALL`. |
 | What does this call? | `riltra_code_callees` | Same anchor. |
 | How might A reach B? | `riltra_code_trace` | Optional `to` (`PATH:LINE:COL`) and `depth` (default 3, 1 to 6). Paths are plausible traversal, not execution. |
@@ -86,7 +89,9 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | What does that record say, and what is it linked to? | `riltra_knowledge_show`, `riltra_knowledge_related`, `riltra_knowledge_search` | `show` reads one revision with its evidence freshness; `related` follows links one hop (`direction` is `outbound` or `inbound`); `search` matches literal text or an exact stored evidence path by default. Set `semantic: true` for optional local vector search; when unavailable it reports the FTS5 fallback reason. |
 | Definition or references from a language server | `riltra_code_semantic` | Opt-in; see below. |
 
-The MCP tools cannot write. Decisions and their bindings to code are recorded with the CLI (`riltra knowledge ...`, see the [README](../../README.md#available-today)).
+The MCP tools cannot write. Decisions and their bindings to code are recorded with the CLI (`riltra knowledge create`, `update`, `bind` and the other `riltra knowledge` commands that `riltra --help` lists).
+
+Agents may run `riltra docs scan` and propose items for ingest, but `riltra docs ingest` writes records and needs the user's approval.
 
 To choose where to look before tracing a feature across components, an agent may call `riltra_project_map` for the area map, then `riltra_code_trace` for per-hop evidence.
 

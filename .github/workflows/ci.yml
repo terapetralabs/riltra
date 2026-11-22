@@ -306,14 +306,18 @@ jobs:
           run_exact mcp_modern_metadata_reaches_list_tools_handler --test mcp
           run_exact project_overview_mcp_matches_cli_document --test mcp
           run_exact project_overview_mcp_2026_07_28_matches_cli_document --test mcp
-          run_exact mcp_tools_list_advertises_the_twenty_tools --test mcp
-          run_exact mcp_tools_list_2026_07_28_advertises_twenty_tools_with_cache_hints --test mcp
+          run_exact mcp_tools_list_advertises_the_twenty_one_tools --test mcp
+          run_exact mcp_tools_list_2026_07_28_advertises_twenty_one_tools_with_cache_hints --test mcp
           run_exact mcp_project_map_matches_cli --test mcp
           run_exact mcp_project_map_rejects_bad_input --test mcp
           run_exact mcp_project_map_no_index_creates_nothing --test mcp
           run_exact change_checks_mcp_matches_cli_document --test mcp
           run_exact change_checks_mcp_no_index_is_read_only --test mcp
           run_exact change_checks_mcp_rejects_unknown_field --test mcp
+          run_exact docs_scan_mcp_matches_cli_document --test mcp
+          run_exact docs_scan_mcp_creates_no_store --test mcp
+          run_exact docs_scan_mcp_rejects_unknown_field --test mcp
+          run_exact docs_scan_mcp_refuses_a_path_outside_the_repository --test mcp
           run_exact start::tests::terminal_policy_requires_both_streams --bin riltra
           run_exact start::tests::client_selection_does_not_authorize_writes --bin riltra
           run_exact start::tests::registration_and_index_require_confirmation --bin riltra

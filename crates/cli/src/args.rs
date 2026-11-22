@@ -86,6 +86,16 @@ pub enum Command {
     ChangesRefused(String),
     Checks(ChangesArgs),
     ChecksRefused(String),
+    /// `docs scan`: paths are validated in `docs::scan` (exit 2 on a bad one).
+    DocsScan {
+        repo: String,
+        paths: Vec<String>,
+    },
+    /// `docs ingest`: the input is read by the dispatcher, validated in `docs::ingest`.
+    DocsIngest {
+        repo: String,
+        input: String,
+    },
     Knowledge {
         op: KnowledgeOp,
     },
@@ -680,6 +690,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "packet" => parse_packet_args(args).map(Command::Packet),
         "changes" => parse_changes_args(args),
         "checks" => parse_checks_args(args),
+        "docs" => parse_docs_args(args),
         "knowledge" => match args.get(1).map(String::as_str) {
             Some(sub) => parse_knowledge_op(sub, args).map(|op| Command::Knowledge { op }),
             None => Err(crate::usage()),
@@ -731,6 +742,47 @@ fn parse_changes_args(args: &[String]) -> Result<Command, String> {
     match parse_change_flags(args)? {
         Ok(parsed) => Ok(Command::Changes(parsed)),
         Err(message) => Ok(Command::ChangesRefused(message)),
+    }
+}
+
+/// `docs scan --repo <name> [--path <rel.md>]...` and `docs ingest --repo <name> --input -`.
+/// Every refusal here is a usage error (exit 2).
+fn parse_docs_args(args: &[String]) -> Result<Command, String> {
+    match args.get(1).map(String::as_str) {
+        Some("scan") => {
+            let mut repo = None;
+            let mut paths = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--path") {
+                    paths.push(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            let repo = repo.ok_or_else(crate::usage)?;
+            Ok(Command::DocsScan { repo, paths })
+        }
+        Some("ingest") => {
+            let mut repo = None;
+            let mut input = None;
+            let mut i = 2;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--input") {
+                    input = Some(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            let repo = repo.ok_or_else(crate::usage)?;
+            let input = input.ok_or_else(crate::usage)?;
+            Ok(Command::DocsIngest { repo, input })
+        }
+        _ => Err(crate::usage()),
     }
 }
 

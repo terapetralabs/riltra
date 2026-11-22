@@ -463,6 +463,9 @@ pub struct EvidenceRef {
     pub path: String,
     pub byte_start: Option<i64>,
     pub byte_end: Option<i64>,
+    /// Digest the reviewed bytes had (docs ingest). `capture_evidence` refuses a
+    /// different digest. Parsers leave it `None`.
+    pub expected_digest: Option<String>,
 }
 
 /// An observed source binding captured at write time: repository-relative
@@ -609,6 +612,7 @@ fn parse_evidence(value: &JVal, path: &str) -> Result<Vec<EvidenceRef>, String> 
             path: rel,
             byte_start,
             byte_end,
+            expected_digest: None,
         });
     }
     Ok(refs)

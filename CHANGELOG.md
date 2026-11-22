@@ -6,6 +6,14 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Added
 
+- `docs scan` and `docs ingest` (CLI), and MCP tool `riltra_docs_scan`: link local Markdown
+  sections to indexed definitions. `docs scan` is one read-only JSON document of the sections,
+  the explicit links with their status, the proposed bindings (`state: proposed`), and the records
+  that already cite each document with their freshness; it creates no index or store. `docs ingest`
+  reads items the user reviewed and writes candidate records and their code bindings, all
+  `Unverified`, in one transaction per item; it is CLI only. See
+  [capabilities](docs/guide/capabilities.md#documents-linked-to-code).
+
 - `checks` (CLI) and MCP tool `riltra_change_checks`: test candidates and coverage limits
   for one git change, as one read-only JSON document. Each candidate and each reason carries
   its basis (`proven-edge`, `unproven-edge`, `name-candidate`, `path-convention`), and quoted
@@ -21,6 +29,28 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   database revision, the named bounds and omission counts. It reads the code index through
   the read-only path and creates and migrates nothing; SQLite may create `-wal`/`-shm`
   sidecars beside an existing index. See [capabilities](docs/guide/capabilities.md#area-map-read-only).
+
+- `watch` (CLI only): opt-in polling process that rebuilds the code index through the same
+  incremental `index` after source, ignore, config, HEAD or branch changes, with one JSON event
+  per line (`started`, `built`, `failed`, `busy`, `stopped`). One watcher per index; a
+  contending rebuild or import reports `index-busy:`. It never runs project builds, language
+  servers, SCIP imports or semantic providers, and there is no MCP tool for it. See
+  [capabilities](docs/guide/capabilities.md#automatic-index-updates-opt-in).
+
+- `start` and `overview` (CLI) and MCP tool `riltra_project_overview`: guided project
+  orientation. `overview --repo <name>` and the MCP tool print a read-only summary from bounded
+  index and document evidence (freshness and reasons, languages, source directories,
+  build and test documents, candidate entry points, definitions). `start` is an interactive
+  wizard: registration and indexing each need a separate default-no approval, and a selected
+  definition becomes a packet without typing coordinates. With `--json` or without a terminal,
+  `start` only prints the overview. See the [agent setup guide](docs/guide/agent-setup.md#guided-first-use).
+
+- `packet` (CLI) and MCP tool `riltra_code_packet`: one to five explicitly selected anchors
+  (position or name selectors) resolved on one pinned snapshot, with per-anchor outcomes,
+  explicit knowledge bindings and bounded source snippets under one response-byte budget
+  (`max_bytes` 32768 by default). Ambiguous names are never chosen automatically, and packet runs
+  no lexical or semantic knowledge retrieval. Packet response schema 1 is separate from the
+  database schemas. See [capabilities](docs/guide/capabilities.md#selected-anchor-packets).
 
 - `agent-block` (CLI): prints the Markdown instruction block for an agent's instruction file
   (`AGENTS.md` or `CLAUDE.md`), naming the graph tools and when to call them. It is plain
@@ -86,6 +116,7 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Changed
 
+- `knowledge at`, `riltra_knowledge_at_anchor`, `context` and `packet` gain an appended `record_evidence` key (`total`, `fresh`, `stale`, `unresolved`) that counts the evidence rows of the bound record revision. It is read-only and does not change any existing key. The `knowledge bind` write response does not carry it.
 - The code-index schema is now 6 and `PARSER_VERSION` is 14. After upgrading,
   every code-index read answers `schema_outdated` until `riltra index` is run,
   and `riltra changes` keeps its symbols but reports caller counts as

@@ -149,8 +149,10 @@ they do not create or migrate databases, and a missing code index returns a
 
 `riltra index` also stores three more kinds of syntax fact and a word index for
 concept search. `context` reports the containment and heritage facts (see
-[context fact sections](#context-fact-sections)); no other command or MCP tool
-reports the doc-comment and concept-word facts yet, and `scan` output is unchanged.
+[context fact sections](#context-fact-sections)). `query` ranks definitions by
+the concept words, which include the doc-comment text (see [search,
+relationships, and freshness](#search-relationships-and-freshness)); no command
+prints the doc-comment text itself, and `scan` output is unchanged.
 
 - **Heritage**: the supertypes a declaration names. Python base classes (not
   keyword arguments or `*splat` bases), JavaScript `extends`, TypeScript and
@@ -516,6 +518,157 @@ followed by `sh`) closes the block early. A
 missing instruction file is skipped silently, and an unreadable one is counted in
 `omissions` as `instructions` with reason `unreadable`.
 
+## Documents linked to code
+
+`riltra docs scan --repo <name> [--path <rel.md>]...` prints one JSON document about
+the Markdown documents of a registered repository. `riltra docs ingest --repo <name>
+--input -` records reviewed items from that document. The MCP tool `riltra_docs_scan`
+(input `repo` and `paths`) returns the same scan document, byte for byte, as the CLI
+stdout without its trailing newline. There is no MCP tool for ingest.
+
+Reads and writes. `docs scan` reads the documents, then opens the code index once,
+read-only, in one transaction, and opens the knowledge store read-only once. It writes
+nothing: a missing index answers `no-index` and a missing knowledge store answers
+`no-store`, and neither is created. An older index or knowledge schema is reported and
+not migrated; a newer one is not read. The registry, every `.db` file and the repository
+stay unchanged, apart from SQLite's `-wal` and `-shm` sidecars beside an existing
+database. Neither command makes a network call or starts a provider, a language server
+or a project tool.
+
+`docs ingest` writes candidate records and their code bindings to the knowledge store,
+through the same write paths as `knowledge create` and `knowledge bind`. It writes
+nothing else: not the code index, not the registry, not the repository. The MCP server
+never ingests.
+
+Which Markdown is read. Without `--path`, the scan reads every `.md` or `.markdown` file
+(matched case-sensitively) that the repository walk lists as unsupported text. Files
+matched by `.riltraignore`, `.git` and symbolic links are skipped. At most 200 documents
+are read; the rest are counted in `omissions`. With `--path`, give 1 to 20 Markdown paths
+relative to the repository root; a path that leaves the repository is a usage error (exit
+2). A document reported as `missing` does not exist. `too-large` means it is over the
+per-file size limit, and `not-utf8` means it is not UTF-8. `unreadable` carries the error
+text in `reason`. A document that is not `ok` has no sections.
+
+Markdown subset. The parser handles only what is listed here; anything else is plain text.
+
+- Fenced code blocks: three or more backticks or tildes, indented by at most three spaces.
+  Nothing inside a fence is a heading or a link. A fence closes only on the same character,
+  at least as long, followed by whitespace.
+- ATX headings only: one to six `#` followed by a space, a tab or the end of the line.
+  Setext headings (underlined with `===` or `---`) are not recognized.
+- Sections run from one heading to the next heading of any level, or to the end of the
+  file. Text before the first heading is a preamble section, kept only when it holds
+  non-whitespace. `section_id` is the heading path joined with ` / `, then `@` and the
+  occurrence number, so repeated headings stay distinct.
+- Inline links `[text](target)` outside fences and inline code spans. Images,
+  reference-style links and bare URLs are not links. A target with a scheme is `external`
+  and a target that starts with `#` is `same-document`; neither is resolved. A `#L<n>` or
+  `#L<n>-L<m>` fragment gives a line range; other fragments are kept as text. A leading `/`
+  is relative to the repository root, and any other path is relative to the document's
+  directory. A link is recognised only when it lies within one line: the parser scans one
+  line at a time, so a link that breaks across lines is plain text.
+- Percent-encoding is not decoded, so a link whose target is percent-encoded does not
+  match its file.
+- No PDF, no media and no LLM extraction. Markdown only.
+
+Link statuses. Each non-external, non-same-document link has one status, from the first
+rule that applies:
+
+- `outside-repo`: the resolved path leaves the repository.
+- `no-index`: there is no usable code index. The path is not looked up further.
+- `not-indexed`: the code index has no file at that path. `exists` says whether the file is in the worktree.
+- `source-changed`: the file changed since the index was built. No proposal is made; reindex first.
+- `file`: the link has no line fragment, so no definition is named and no proposal is made.
+- `no-definition-at-line`: no definition starts on the linked line.
+- `ambiguous-line`: two or more definitions start on the linked line. Up to five candidates are listed and no proposal is made.
+- `definition`: exactly one definition starts on the linked line, and it is proven to be the same entity. A proposal is made.
+- `anchor-unproven`: a definition starts on the line, but its position could not be proven, so no proposal is made. The reason is named.
+- `anchor-unavailable`: the code resolver refused the position. The reason is named.
+
+Proposals. A proposal is made only for a `definition` link, and its `state` is always
+`proposed`. A proposal is not a binding and is not verified. Text similarity, heading
+names, symbol names in prose and backticked identifiers never create a proposal. Each
+proposal carries `suggested_record_id`, built from the document path, the heading and a
+hash of the document path and section id, so two documents with similar names do not
+share an id.
+
+Anchors. A proposal has two identities. `definition` is the syntax definition as the
+index stores it. `anchor` is the position the binding resolver uses, and it is where a
+binding is anchored. Which position that is depends on the code index. With a SCIP import
+that covers the definition, the anchor is the definition's name occurrence: for `def add`
+on line 1 the anchor is column 5. A `packet` or `context` name selector resolves at the
+definition start, so it does not find such a binding. Without a covering import, the
+anchor is the syntax definition at its own start line and column. That is column 1 only
+when the definition is not indented; an indented method starts further in. A name selector
+finds such a binding. In every case, query `knowledge at`, `context` or `packet` at the
+proposal's `target.anchor` line and column, which matches the binding's exact anchor span
+or cursor position.
+
+Existing records. Knowledge records that cite a document are matched by the document's
+path. A section is shown as `recorded` only when a stored evidence row has exactly that
+section's byte span and digest and is `fresh`. A record with `stale` or `unresolved`
+evidence on that document is listed under the document's `stale_records`, with the state
+of each evidence row. Riltra never guesses which current section a stale record meant.
+
+Ingest order and atomicity. The input is one JSON object of at most one megabyte. Every
+key is checked at every level, so unknown or duplicate keys are refused. It holds 1 to 50
+items, each with 0 to 20 bindings. An item names a document, a section, the section digest
+from the scan, a record id, a kind of `decision` or `constraint`, an author and, for an
+existing record, its expected revision. Each binding copies the proposal's `target` object
+unchanged, with a relation and a rationale. The relations are `documents`, `constrains`,
+`implements`, `tests`, `motivates` and `observes`.
+
+Ingest validates every item before it writes. It re-reads each document and checks that
+each section still has the digest the user reviewed (`section-changed`, exit 2). It runs
+the record and binding validators, re-proves each anchor against the current index, and
+checks the expected revision and kind of an existing record. An update item whose head
+revision is not `active` is refused before any write (exit 2) with the message
+`record-not-active: <id> is <status>`. An `archived`, `superseded` or `retracted` record is
+never reactivated by an ingest. A changed target gives
+`binding-target-changed` (exit 2). An anchor the resolver cannot place, including one in
+a file that changed since indexing, gives "anchor unresolved: source changed; reindex
+before creating a binding" (exit 3). After validation, each item is written in its own
+transaction, in input order. An item that fails is rolled back alone. The items before it
+stay written, and stderr names them as `committed: <id>@<revision>`. Nothing is confirmed:
+a new record is a candidate, its bindings are `Unverified`, and an existing record keeps
+its earlier bindings where they were.
+
+Stale bindings. The `record_evidence` object on a binding (`knowledge at`, `context`,
+`packet`) counts the evidence rows of the record revision the binding is pinned to, as
+`total`, `fresh`, `stale` and `unresolved`. A stale count means the quoted document text
+changed; the binding was not moved. `total: 0` means the record cites nothing, which is no
+claim about the code. The binding's own code `freshness` is separate.
+
+Bounds. Documents: 200. Sections per document: 500. Links per section: 50. Proposals: 500.
+Stale records per document: 20. Candidates per ambiguous link: 5. The JSON report is at
+most 262,144 bytes. Anything over a cap is dropped and counted in `omissions`. Link counts
+per status are taken before the caps. When the report is over the byte limit, the scan drops
+links, then proposals, then sections, then stale records, then documents after the first,
+and records each drop. A count the scan cannot know is `null`.
+
+Exit codes. `docs scan` exits `0` for a report, including `no-index` and `no-store`. It
+exits `2` for a usage error or an invalid `--path`, and `3` for an unknown repository, a
+moved repository root or a storage read error. `docs ingest` exits `2` for invalid input,
+`section-changed`, `binding-target-changed`, `record-not-active`, a kind mismatch and a duplicate code binding.
+It exits `3` for storage errors, a missing code index and an anchor that needs a reindex.
+MCP maps `2` to `invalid_input` and `3` to `store_error`.
+
+Snapshot. `snapshot.generation` is the semantic-import generation of the code snapshot,
+the counter that `checks` and `map` report. It moves when a SCIP import commits, and that
+can change which anchors a scan proves. `knowledge.generation` is the knowledge store's
+generation.
+
+Not done. Riltra does not capture conversations, does not confirm records, does not
+rebind a binding that a document change moved, and does not match records to text by
+similarity. A document's text is the author's claim, not a verified fact.
+
+Example. After you review a proposal, copy its `suggested_record_id`, `section_id`,
+`section_digest` and `target` into an item, then run:
+
+```text
+riltra docs ingest --repo <name> --input - < items.json
+```
+
 ## Area map (read-only)
 
 `riltra map --repo <name> [--depth 1..4] [--format json|markdown]` and the MCP
@@ -698,8 +851,8 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves twenty local stdio tools. Nineteen read repository,
-index, code, knowledge, project overview, area map, selected-anchor packet, and change-check data. The remaining tool,
+`riltra mcp` serves twenty-one local stdio tools. Twenty read repository,
+index, code, knowledge, project overview, area map, selected-anchor packet, change-check, and documents-linked-to-code data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the
 network. The MCP handlers themselves do not create, migrate, or replace a

@@ -511,7 +511,7 @@ Cargo metadata with `--all-features` resolves the complete locked graph. The row
 | flatbuffers | 25.12.19 | Apache-2.0 | https://github.com/google/flatbuffers |
 | flate2 | 1.1.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
 | fnv | 1.0.7 | Apache-2.0 / MIT | https://github.com/servo/rust-fnv |
-| form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
+| form_urlencoded | 1.2.3 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | frostem | 1.20260821.8 | BSD-3-Clause | https://github.com/Xuanwo/frostem |
 | fsst | 14.0.2 | Apache-2.0 | https://github.com/lance-format/lance |
 | fst | 0.4.7 | Unlicense/MIT | https://github.com/BurntSushi/fst |
@@ -787,7 +787,7 @@ Cargo metadata with `--all-features` resolves the complete locked graph. The row
 | unicode-width | 0.2.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
 | unsafe-libyaml | 0.2.11 | MIT | https://github.com/dtolnay/unsafe-libyaml |
 | untrusted | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
-| url | 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
+| url | 2.5.9 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | utf_types | 1.0.0 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf_types |
 | utf8_iter | 1.1.0 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf8_iter |
 | utf8-ranges | 1.0.5 | Unlicense/MIT | https://github.com/BurntSushi/utf8-ranges |

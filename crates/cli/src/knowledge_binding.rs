@@ -537,7 +537,7 @@ fn snapshot_digest(files: &std::collections::BTreeMap<String, (i64, String)>) ->
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_code_anchor(
+pub(crate) fn resolve_code_anchor(
     home: &Path,
     entry: &registry::RepoEntry,
     path: &str,
@@ -655,7 +655,7 @@ pub(crate) fn anchor_from_trace(
     })
 }
 
-fn validate_binding_input(input: &BindingInput) -> Result<(), String> {
+pub(crate) fn validate_binding_input(input: &BindingInput) -> Result<(), String> {
     knowledge::validate_id(&input.record_id)?;
     if input.record_revision == 0 || input.record_revision > i64::MAX as u64 {
         return Err("record_revision must be in the positive SQLite integer range".to_string());
@@ -750,6 +750,31 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Validates one binding and inserts it inside the caller's transaction, pinned
+/// to `anchor`, with the source checked before and after the insert. It bumps no
+/// generation: the caller bumps it once for everything it wrote.
+pub(crate) fn insert_in_tx(
+    tx: &Transaction,
+    root: &Path,
+    anchor: &CodeAnchor,
+    input: &BindingInput,
+) -> Result<i64, String> {
+    validate_binding_input(input)?;
+    if anchor.repo.is_empty()
+        || anchor.byte_start >= anchor.byte_end
+        || anchor.byte_end > i64::MAX as usize
+        || anchor.snapshot_id <= 0
+        || anchor.cursor_line == 0
+        || anchor.cursor_col == 0
+    {
+        return Err("invalid code anchor".to_string());
+    }
+    check_anchor_source(root, anchor)?;
+    let binding_id = insert_binding(tx, anchor, input)?;
+    check_anchor_source(root, anchor)?;
+    Ok(binding_id)
+}
+
 fn insert_binding(
     tx: &Transaction,
     anchor: &CodeAnchor,
@@ -840,24 +865,12 @@ fn create(
     anchor: &CodeAnchor,
     input: &BindingInput,
 ) -> Result<(i64, u64), String> {
-    validate_binding_input(input)?;
-    if anchor.repo.is_empty()
-        || anchor.byte_start >= anchor.byte_end
-        || anchor.byte_end > i64::MAX as usize
-        || anchor.snapshot_id <= 0
-        || anchor.cursor_line == 0
-        || anchor.cursor_col == 0
-    {
-        return Err("invalid code anchor".to_string());
-    }
-    check_anchor_source(root, anchor)?;
     knowledge_store::revalidate_open_paths(conn)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
     knowledge_store::ensure_code_binding_schema(&tx)?;
-    let binding_id = insert_binding(&tx, anchor, input)?;
-    check_anchor_source(root, anchor)?;
+    let binding_id = insert_in_tx(&tx, root, anchor, input)?;
     let generation = knowledge_store::bump_generation(&tx)?;
     tx.commit()
         .map_err(|e| format!("cannot commit code binding: {e}"))?;
@@ -1522,7 +1535,7 @@ fn position(value: &str, flag: &str, err: &mut String) -> Result<u32, i32> {
     }
 }
 
-fn write_error_code(error: &str) -> i32 {
+pub(crate) fn write_error_code(error: &str) -> i32 {
     if error.starts_with("invalid ")
         || error.starts_with("duplicate ")
         || error.starts_with("unknown knowledge revision")

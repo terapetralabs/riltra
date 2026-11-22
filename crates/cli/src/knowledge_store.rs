@@ -531,7 +531,7 @@ CREATE TABLE IF NOT EXISTS relation_lifecycle (
 /// shares the caller's transaction, any later failure (or a failure here)
 /// rolls back the tables and both version stamps together; a crash after
 /// commit leaves a consistent v2 store and never a partial migration.
-fn ensure_lifecycle_schema(tx: &Transaction) -> Result<(), String> {
+pub(crate) fn ensure_lifecycle_schema(tx: &Transaction) -> Result<(), String> {
     ensure_lifecycle_schema_inner(tx, false)
 }
 
@@ -924,7 +924,7 @@ fn capture_root(conn: &Connection) -> Result<PathBuf, String> {
 /// mutation before a write transaction starts. Digests cover the cited span
 /// slice, or the whole file when no span is given. Git HEAD/branch is a
 /// best-effort observation, never a failure.
-fn capture_evidence(
+pub(crate) fn capture_evidence(
     conn: &Connection,
     refs: &[crate::knowledge::EvidenceRef],
 ) -> Result<Vec<crate::knowledge::CapturedEvidence>, String> {
@@ -952,11 +952,20 @@ fn capture_evidence(
             ));
         }
         let cited = &bytes[start as usize..end as usize];
+        let digest = crate::store::content_digest(cited);
+        if let Some(expected) = &item.expected_digest {
+            if *expected != digest {
+                return Err(format!(
+                    "cannot capture evidence '{}': digest changed since review",
+                    item.path
+                ));
+            }
+        }
         out.push(crate::knowledge::CapturedEvidence {
             path: item.path.clone(),
             byte_start: item.byte_start,
             byte_end: item.byte_end,
-            digest: crate::store::content_digest(cited),
+            digest,
             git_head: git.head.clone(),
             git_branch: git.branch.clone(),
         });
@@ -1239,6 +1248,26 @@ fn create_inner(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    create_in_tx(&tx, input, measurement, &captured)?;
+    if inject_fault {
+        // Test hook: drop the transaction here to prove partial writes roll
+        // back fully (no head, FTS, evidence, measurement or generation survives).
+        return Err("injected write failure".to_string());
+    }
+    let generation = bump_generation(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("cannot commit record creation: {e}"))?;
+    Ok((1, generation))
+}
+
+/// Writes revision 1 of a new record inside the caller's transaction. It
+/// bumps no generation: the caller bumps it once, after every row it writes.
+pub(crate) fn create_in_tx(
+    tx: &Transaction,
+    input: &NewRecord,
+    measurement: Option<&crate::knowledge::BenchmarkData>,
+    captured: &[crate::knowledge::CapturedEvidence],
+) -> Result<u64, String> {
     let exists: i64 = tx
         .query_row(
             "SELECT count(*) FROM heads WHERE id = ?1",
@@ -1263,27 +1292,16 @@ fn create_inner(
         ],
     )
     .map_err(|e| format!("cannot insert record revision: {e}"))?;
-    // Evidence rows precede the fault hook so the injector proves they roll
-    // back with everything else; heads, FTS, measurement and generation join
-    // the same transaction below.
-    write_evidence(&tx, &input.id, 1, &captured)?;
-    if inject_fault {
-        // Test hook: drop the transaction here to prove partial writes roll
-        // back fully (no head, FTS, evidence, measurement or generation survives).
-        return Err("injected write failure".to_string());
-    }
+    write_evidence(tx, &input.id, 1, captured)?;
     tx.execute(
         "INSERT INTO heads (id, current_revision) VALUES (?1, 1)",
         [&input.id],
     )
     .map_err(|e| format!("cannot advance record head: {e}"))?;
     if let Some(data) = measurement {
-        write_measurement(&tx, &input.id, 1, data)?;
+        write_measurement(tx, &input.id, 1, data)?;
     }
-    let generation = bump_generation(&tx)?;
-    tx.commit()
-        .map_err(|e| format!("cannot commit record creation: {e}"))?;
-    Ok((1, generation))
+    Ok(1)
 }
 
 /// Append a new immutable revision. The expected head is verified inside the
@@ -1363,6 +1381,15 @@ fn carry_measurement(tx: &Transaction, id: &str, from_rev: i64, to_rev: i64) -> 
     Ok(())
 }
 
+/// What one update did inside its transaction.
+pub(crate) enum UpdateOutcome {
+    /// A new revision was written; the caller bumps the generation once.
+    Written(u64),
+    /// The identical confirmed head was re-confirmed: nothing was written and no
+    /// generation bump is due. Carries the head revision.
+    Unchanged(u64),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_inner(
     conn: &mut Connection,
@@ -1381,12 +1408,42 @@ fn update_inner(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    match update_in_tx(&tx, id, expected_revision, input, measurement, &captured)? {
+        UpdateOutcome::Unchanged(head) => {
+            let generation = read_generation(&tx)?;
+            tx.commit()
+                .map_err(|e| format!("cannot commit knowledge write: {e}"))?;
+            Ok((head, generation))
+        }
+        UpdateOutcome::Written(next) => {
+            if inject_fault {
+                // Test hook: the dropped transaction proves partial writes roll back.
+                return Err("injected write failure".to_string());
+            }
+            let generation = bump_generation(&tx)?;
+            tx.commit()
+                .map_err(|e| format!("cannot commit record update: {e}"))?;
+            Ok((next, generation))
+        }
+    }
+}
+
+/// Writes one update inside the caller's transaction, with every check of
+/// `update_inner`. It bumps no generation; see [`UpdateOutcome`].
+pub(crate) fn update_in_tx(
+    tx: &Transaction,
+    id: &str,
+    expected_revision: u64,
+    input: &UpdateRecord,
+    measurement: Option<&crate::knowledge::BenchmarkData>,
+    captured: &[crate::knowledge::CapturedEvidence],
+) -> Result<UpdateOutcome, String> {
     // A Full-stage transition or an explicit confirmation migrates the store
     // as the very first step of its own write transaction; every later
     // rejection rolls the migration back with it, so a failed write leaves a
     // v1 store a v1 store.
     if input.status == "superseded" || input.status == "retracted" || input.confirm {
-        ensure_lifecycle_schema(&tx)?;
+        ensure_lifecycle_schema(tx)?;
     }
     let current: Option<i64> = tx
         .query_row(
@@ -1462,7 +1519,7 @@ fn update_inner(
             }
             let target_rev = i64::try_from(target.revision)
                 .map_err(|_| "supersede target revision out of range".to_string())?;
-            if !endpoint_exists(&tx, &target.id, target_rev)? {
+            if !endpoint_exists(tx, &target.id, target_rev)? {
                 return Err(format!(
                     "unknown supersede target: '{}' rev {}",
                     target.id, target.revision
@@ -1557,13 +1614,10 @@ fn update_inner(
                 input.status.clone(),
                 input.author.clone(),
             );
-        if already != 0 && unchanged && evidence.is_empty() && measurement.is_none() {
+        if already != 0 && unchanged && captured.is_empty() && measurement.is_none() {
             let head_revision = u64::try_from(current)
                 .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
-            let generation = read_generation(&tx)?;
-            tx.commit()
-                .map_err(|e| format!("cannot commit knowledge write: {e}"))?;
-            return Ok((head_revision, generation));
+            return Ok(UpdateOutcome::Unchanged(head_revision));
         }
     }
     let next_i64 = current
@@ -1588,20 +1642,15 @@ fn update_inner(
     .map_err(|e| format!("cannot insert record revision: {e}"))?;
     // Evidence rows precede the fault hook so the injector proves they roll
     // back with everything else.
-    write_evidence(&tx, id, next_i64, &captured)?;
-    if inject_fault {
-        // Test hook: drop the transaction here to prove partial writes roll
-        // back fully (no head, FTS, evidence, measurement or generation survives).
-        return Err("injected write failure".to_string());
-    }
+    write_evidence(tx, id, next_i64, captured)?;
     tx.execute(
         "UPDATE heads SET current_revision = ?1 WHERE id = ?2",
         rusqlite::params![next_i64, id],
     )
     .map_err(|e| format!("cannot advance record head: {e}"))?;
     match measurement {
-        Some(data) => write_measurement(&tx, id, next_i64, data)?,
-        None if kind == "benchmark" => carry_measurement(&tx, id, current, next_i64)?,
+        Some(data) => write_measurement(tx, id, next_i64, data)?,
+        None if kind == "benchmark" => carry_measurement(tx, id, current, next_i64)?,
         None => {}
     }
     // Lifecycle bookkeeping joins the same transaction: the immutable event,
@@ -1679,10 +1728,7 @@ fn update_inner(
         )
         .map_err(|e| format!("cannot store confirmation event: {e}"))?;
     }
-    let generation = bump_generation(&tx)?;
-    tx.commit()
-        .map_err(|e| format!("cannot commit record update: {e}"))?;
-    Ok((next, generation))
+    Ok(UpdateOutcome::Written(next))
 }
 
 /// Measurement attached to one revision, if any. Metrics order by insertion.
@@ -9962,5 +10008,128 @@ mod port_tests {
         );
         let err = parse_import_payload(&text).unwrap_err();
         assert!(err.starts_with("invalid import payload"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tx_split_tests {
+    use super::*;
+    use crate::knowledge::{EvidenceRef, NewRecord, UpdateRecord};
+    use crate::testutil::tmpdir;
+
+    fn entry_for(root: &Path) -> RepoEntry {
+        let canonical = crate::paths::canonical_root(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        RepoEntry {
+            name: "tx".to_string(),
+            root: canonical,
+            added_unix: 1,
+        }
+    }
+
+    fn new_record(id: &str) -> NewRecord {
+        NewRecord {
+            id: id.to_string(),
+            kind: "decision".to_string(),
+            title: "T".to_string(),
+            body: "B".to_string(),
+            status: "active".to_string(),
+            author: "a".to_string(),
+        }
+    }
+
+    fn update(body: &str, confirm: bool) -> UpdateRecord {
+        UpdateRecord {
+            title: "T".to_string(),
+            body: body.to_string(),
+            status: "active".to_string(),
+            author: "a".to_string(),
+            superseded_by: None,
+            reason: None,
+            confirm,
+        }
+    }
+
+    #[test]
+    fn capture_refuses_changed_expected_digest() {
+        let home = tmpdir("tx-cap-home");
+        let root = tmpdir("tx-cap-root");
+        std::fs::write(root.join("a.rs"), b"0123456789abcdef").unwrap();
+        let repo = entry_for(&root);
+        let conn = open_knowledge_at(&home, &repo, true).unwrap();
+        let good = EvidenceRef {
+            path: "a.rs".to_string(),
+            byte_start: Some(0),
+            byte_end: Some(8),
+            expected_digest: Some(crate::store::content_digest(b"01234567")),
+        };
+        let captured = capture_evidence(&conn, std::slice::from_ref(&good)).unwrap();
+        assert_eq!(
+            captured[0].digest,
+            crate::store::content_digest(b"01234567")
+        );
+        let stale = EvidenceRef {
+            expected_digest: Some("0000000000000000".to_string()),
+            ..good
+        };
+        let err = capture_evidence(&conn, &[stale]).unwrap_err();
+        assert!(err.contains("digest changed since review"), "{err}");
+    }
+
+    #[test]
+    fn create_in_tx_rolls_back_with_its_transaction() {
+        let home = tmpdir("tx-create-home");
+        let root = tmpdir("tx-create-root");
+        let repo = entry_for(&root);
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            assert_eq!(create_in_tx(&tx, &new_record("t1"), None, &[]).unwrap(), 1);
+            // Dropped without a commit: nothing survives.
+        }
+        assert!(show_record(&conn, "t1", None).is_err());
+        assert_eq!(read_generation(&conn).unwrap(), 0);
+        let tx = conn.transaction().unwrap();
+        assert_eq!(create_in_tx(&tx, &new_record("t1"), None, &[]).unwrap(), 1);
+        tx.commit().unwrap();
+        assert!(show_record(&conn, "t1", None).is_ok());
+        assert_eq!(
+            read_generation(&conn).unwrap(),
+            0,
+            "create_in_tx bumps no generation"
+        );
+    }
+
+    #[test]
+    fn update_in_tx_reports_unchanged_reconfirm() {
+        let home = tmpdir("tx-update-home");
+        let root = tmpdir("tx-update-root");
+        let repo = entry_for(&root);
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        create_record(&mut conn, &new_record("c1")).unwrap();
+        update_record(&mut conn, "c1", 1, &update("B", true)).unwrap();
+        let before = read_generation(&conn).unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            match update_in_tx(&tx, "c1", 2, &update("B", true), None, &[]).unwrap() {
+                UpdateOutcome::Unchanged(head) => assert_eq!(head, 2),
+                UpdateOutcome::Written(rev) => panic!("identical re-confirm wrote revision {rev}"),
+            }
+        }
+        assert_eq!(read_generation(&conn).unwrap(), before);
+        {
+            let tx = conn.transaction().unwrap();
+            match update_in_tx(&tx, "c1", 2, &update("changed", true), None, &[]).unwrap() {
+                UpdateOutcome::Written(rev) => assert_eq!(rev, 3),
+                UpdateOutcome::Unchanged(_) => panic!("a changed body must write"),
+            }
+        }
+        assert_eq!(
+            read_generation(&conn).unwrap(),
+            before,
+            "a dropped transaction bumps nothing"
+        );
     }
 }

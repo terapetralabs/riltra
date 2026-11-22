@@ -11,7 +11,7 @@ mod stage2;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use stage2::Scratch;
 
 const CALC: &str = "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n";
@@ -814,4 +814,847 @@ fn scan_snapshot_generation_moves_only_on_semantic_import() {
     f.import(&[("pkg/calc.py", calc_defs())]);
     let after = f.scan_json(&[])["snapshot"]["generation"].clone();
     assert_ne!(first, after, "a semantic import must move the generation");
+}
+
+// ---------------------------------------------------------------------------
+// Task 3: `riltra docs ingest` (one transaction per item).
+// ---------------------------------------------------------------------------
+
+const STORAGE_SECTION: &str = "# Storage\nAdd uses [add](../../pkg/calc.py#L1).\n";
+
+impl Fixture {
+    fn ingest(&self, input: &str) -> Output {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+            .args(["docs", "ingest", "--repo", "r", "--input", "-"])
+            .env("RILTRA_HOME", &self.home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn riltra");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().expect("wait for riltra")
+    }
+
+    /// `knowledge show` of one record, or `None` when the record cannot be shown.
+    fn show(&self, id: &str) -> Option<Value> {
+        let out = cli(
+            &self.home,
+            &words(&["knowledge", "show", "--repo", "r", "--id", id]),
+        );
+        if !out.status.success() {
+            return None;
+        }
+        Some(serde_json::from_slice(&out.stdout).expect("show prints JSON"))
+    }
+
+    /// `knowledge at` of one line and column.
+    fn at(&self, path: &str, line: &str, col: &str) -> Value {
+        let out = cli(
+            &self.home,
+            &words(&[
+                "knowledge",
+                "at",
+                "--repo",
+                "r",
+                "--path",
+                path,
+                "--line",
+                line,
+                "--col",
+                col,
+            ]),
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("at prints JSON")
+    }
+
+    /// The store generation; 0 while no store exists.
+    fn generation(&self) -> u64 {
+        let out = cli(
+            &self.home,
+            &words(&[
+                "knowledge",
+                "at",
+                "--repo",
+                "r",
+                "--path",
+                "pkg/calc.py",
+                "--line",
+                "1",
+                "--col",
+                "1",
+            ]),
+        );
+        if !out.status.success() {
+            return 0;
+        }
+        let v: Value = serde_json::from_slice(&out.stdout).expect("at prints JSON");
+        v["generation"].as_u64().unwrap_or(0)
+    }
+}
+
+/// The scan proposal for one section and one definition name.
+fn proposal_of<'a>(report: &'a Value, section_id: &str, name: &str) -> &'a Value {
+    report["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["section_id"] == section_id && p["target"]["definition"]["name"] == name)
+        .unwrap_or_else(|| panic!("no proposal {section_id} {name}: {report}"))
+}
+
+/// One ingest item built from a scan proposal, as the reviewed values.
+fn item_of(record_id: &str, p: &Value, kind: &str, bindings: Vec<Value>) -> Value {
+    json!({
+        "doc": p["doc"],
+        "section_id": p["section_id"],
+        "section_digest": p["section_digest"],
+        "record_id": record_id,
+        "kind": kind,
+        "author": "tester",
+        "bindings": bindings,
+    })
+}
+
+fn binding_of(target: &Value, rationale: &str) -> Value {
+    json!({"target": target, "relation": "documents", "rationale": rationale})
+}
+
+fn input_of(items: Vec<Value>) -> String {
+    json!({ "items": items }).to_string()
+}
+
+fn code_of(out: &Output) -> Option<i32> {
+    out.status.code()
+}
+
+fn stderr_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn ingest_creates_record_and_binding_atomically() {
+    let Some(f) = fixture(
+        "ingest-create",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    assert_eq!(f.generation(), 0);
+    let input = input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    )]);
+    let out = f.ingest(&input);
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["operation"], "docs-ingest");
+    assert_eq!(v["generation"], 1);
+    let item = &v["result"]["items"][0];
+    assert_eq!(item["record_id"], "doc-storage");
+    assert_eq!(item["revision"], 1);
+    assert_eq!(item["action"], "created");
+    assert_eq!(item["bindings"].as_array().unwrap().len(), 1);
+    assert_eq!(v["result"]["confirm_state"], "candidate");
+    assert_eq!(v["result"]["verification"], "Unverified");
+
+    let shown = f.show("doc-storage").expect("record exists");
+    assert_eq!(shown["result"]["confirm_state"], "candidate");
+    assert_eq!(shown["result"]["verification"], "Unverified");
+    assert_eq!(shown["result"]["body"], STORAGE_SECTION);
+    let ev = &shown["result"]["evidence"][0];
+    assert_eq!(ev["path"], "docs/adr/0001.md");
+    assert_eq!(ev["byte_start"], 0);
+    assert_eq!(ev["byte_end"], STORAGE_SECTION.len());
+    assert_eq!(ev["digest"], p["section_digest"]);
+
+    let line = p["target"]["anchor"]["line"].to_string();
+    let col = p["target"]["anchor"]["col"].to_string();
+    let text = f.at("pkg/calc.py", &line, &col).to_string();
+    assert!(
+        text.contains(&format!(
+            "docs-ingest:docs/adr/0001.md#Storage@1@{}",
+            p["section_digest"].as_str().unwrap()
+        )),
+        "{text}"
+    );
+    assert_eq!(f.generation(), 1, "one bump per item");
+}
+
+#[test]
+fn ingest_refuses_changed_section_and_writes_nothing() {
+    let Some(f) = fixture(
+        "ingest-changed",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    f.write("docs/adr/0001.md", &DOC.replace("Add uses", "Put uses"));
+    let input = input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    )]);
+    let out = f.ingest(&input);
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("section-changed"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(f.generation(), 0);
+    assert!(f.show("doc-storage").is_none());
+    assert!(!f.home.join("knowledge").join("r.db").exists());
+}
+
+#[test]
+fn ingest_binds_clean_target_in_dirty_worktree() {
+    let Some(f) = fixture(
+        "ingest-dirty",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    // Only the Markdown changes, in a section the item does not cite.
+    f.write(
+        "docs/adr/0001.md",
+        &DOC.replace("See [file]", "Now see [file]"),
+    );
+    let input = input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    )]);
+    let out = f.ingest(&input);
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let shown = f.show("doc-storage").expect("record exists");
+    assert_eq!(shown["result"]["revision"], 1);
+}
+
+#[test]
+fn ingest_refuses_binding_to_edited_target() {
+    let Some(f) = fixture(
+        "ingest-edited",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    // Control: the item without a binding alone succeeds.
+    let control = f.ingest(&input_of(vec![item_of(
+        "first",
+        &p,
+        "decision",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&control), Some(0), "{}", stderr_of(&control));
+    // The target changes after the scan; the whole input is refused.
+    f.write("pkg/calc.py", &CALC.replace("a + b", "a * b"));
+    let out = f.ingest(&input_of(vec![
+        item_of("third", &p, "decision", Vec::new()),
+        item_of(
+            "second",
+            &p,
+            "decision",
+            vec![binding_of(&p["target"], "documents add")],
+        ),
+    ]));
+    assert_eq!(code_of(&out), Some(3), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("source changed; reindex before creating a binding"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(f.show("third").is_none());
+    assert!(f.show("second").is_none());
+}
+
+#[test]
+fn reingest_keeps_earlier_revision_bindings() {
+    let Some(f) = fixture(
+        "ingest-reingest",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let out = f.ingest(&input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    f.write("docs/adr/0001.md", &DOC.replace("Add uses", "Put uses"));
+    let report = f.scan_json(&[]);
+    let p2 = proposal_of(&report, "Storage@1", "add").clone();
+    let mut item = item_of(
+        "doc-storage",
+        &p2,
+        "decision",
+        vec![binding_of(&p2["target"], "documents add again")],
+    );
+    item["expected_revision"] = json!(1);
+    let out = f.ingest(&input_of(vec![item]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let item = &v["result"]["items"][0];
+    assert_eq!(item["revision"], 2);
+    assert_eq!(item["action"], "updated");
+    assert_eq!(item["earlier_revision_bindings"], 1);
+    let line = p2["target"]["anchor"]["line"].to_string();
+    let col = p2["target"]["anchor"]["col"].to_string();
+    let text = f.at("pkg/calc.py", &line, &col).to_string();
+    assert!(text.contains("\"record_revision\":1"), "{text}");
+    assert!(text.contains("\"retracted\":false"), "{text}");
+}
+
+#[test]
+fn ingest_refuses_target_replaced_and_reindexed() {
+    let Some(f) = fixture(
+        "ingest-replaced",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let old = proposal_of(&report, "Storage@1", "add").clone();
+    f.write("pkg/calc.py", "def sub(a, b):\n    return a - b\n");
+    f.index();
+    let out = f.ingest(&input_of(vec![item_of(
+        "doc-storage",
+        &old,
+        "decision",
+        vec![binding_of(&old["target"], "documents add")],
+    )]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("binding-target-changed"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(f.show("doc-storage").is_none());
+    // Control: the same item built from a fresh scan binds the new definition.
+    let fresh = f.scan_json(&[]);
+    let new = proposal_of(&fresh, "Storage@1", "sub").clone();
+    let out = f.ingest(&input_of(vec![item_of(
+        "doc-storage",
+        &new,
+        "decision",
+        vec![binding_of(&new["target"], "documents sub")],
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+}
+
+#[test]
+fn ingest_refuses_kind_mismatch_on_update() {
+    let Some(f) = fixture(
+        "ingest-kind",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let out = f.ingest(&input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "constraint",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let mut wrong = item_of("doc-storage", &p, "decision", Vec::new());
+    wrong["expected_revision"] = json!(1);
+    let out = f.ingest(&input_of(vec![wrong]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("kind-mismatch"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(f.show("doc-storage").unwrap()["result"]["revision"], 1);
+    // Control: the same kind writes revision 2.
+    let mut same = item_of("doc-storage", &p, "constraint", Vec::new());
+    same["expected_revision"] = json!(1);
+    let out = f.ingest(&input_of(vec![same]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(f.show("doc-storage").unwrap()["result"]["revision"], 2);
+}
+
+#[test]
+fn ingest_without_bindings_reads_candidate_on_new_and_v1_store() {
+    // New home: no store exists before the ingest.
+    let Some(f) = fixture(
+        "ingest-candidate-new",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let out = f.ingest(&input_of(vec![item_of(
+        "doc-new",
+        &p,
+        "decision",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let shown = f.show("doc-new").unwrap().to_string();
+    assert!(shown.contains("\"confirm_state\":\"candidate\""), "{shown}");
+
+    // Store created by `knowledge create` (schema 1, no confirm_state yet).
+    let Some(g) = fixture(
+        "ingest-candidate-v1",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    g.create_record("old-one", "docs/adr/0001.md", 0, 10);
+    let before = g.show("old-one").unwrap().to_string();
+    assert!(!before.contains("confirm_state"), "{before}");
+    g.index();
+    g.import(&[("pkg/calc.py", calc_defs())]);
+    let report = g.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let out = g.ingest(&input_of(vec![item_of(
+        "doc-v1",
+        &p,
+        "decision",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let shown = g.show("doc-v1").unwrap().to_string();
+    assert!(shown.contains("\"confirm_state\":\"candidate\""), "{shown}");
+}
+
+#[test]
+fn ingest_rejects_confirm_and_unknown_keys() {
+    let Some(f) = fixture(
+        "ingest-unknown",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let good = item_of("doc-a", &p, "decision", Vec::new());
+
+    let mut confirm = good.clone();
+    confirm["confirm"] = json!(true);
+    let out = f.ingest(&input_of(vec![confirm]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+
+    let mut unknown_top = json!({"items": [good.clone()], "extra": 1});
+    unknown_top["items"][0]["record_id"] = json!("doc-b");
+    let out = f.ingest(&unknown_top.to_string());
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+
+    let dup_a = item_of("doc-same", &p, "decision", Vec::new());
+    let dup_b = item_of("doc-same", &p, "decision", Vec::new());
+    let out = f.ingest(&input_of(vec![dup_a, dup_b]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+
+    let many: Vec<Value> = (0..51)
+        .map(|i| item_of(&format!("doc-{i}"), &p, "decision", Vec::new()))
+        .collect();
+    let out = f.ingest(&input_of(many));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+
+    let mut no_digest = item_of(
+        "doc-nodigest",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    );
+    no_digest["bindings"][0]["target"]["anchor"]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_digest");
+    let out = f.ingest(&input_of(vec![no_digest]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(f.show("doc-a").is_none());
+}
+
+#[test]
+fn ingest_rejects_nested_duplicate_and_unknown_keys() {
+    let Some(f) = fixture(
+        "ingest-nested",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let target = serde_json::to_string(&p["target"]).unwrap();
+    let section = p["section_id"].as_str().unwrap();
+    let digest = p["section_digest"].as_str().unwrap();
+    let head = format!(
+        "{{\"items\":[{{\"doc\":\"docs/adr/0001.md\",\"section_id\":\"{section}\",\"section_digest\":\"{digest}\","
+    );
+    let tail = "\"kind\":\"decision\",\"author\":\"tester\",\"bindings\":[";
+    let bound = |binding: &str| format!("{head}\"record_id\":\"doc-n\",{tail}{binding}]}}]}}");
+    let good = format!("{{\"target\":{target},\"relation\":\"documents\",\"rationale\":\"r\"}}");
+    let cases = [
+        // Two record_id keys in one item (raw text: a JSON builder would merge them).
+        format!("{head}\"record_id\":\"doc-n\",\"record_id\":\"doc-m\",{tail}]}}]}}"),
+        bound(&good.replace(
+            "\"relation\":\"documents\"",
+            "\"relation\":\"documents\",\"relation\":\"documents\"",
+        )),
+        bound(&good.replace("\"rationale\":\"r\"", "\"rationale\":\"r\",\"x\":1")),
+        bound(&good.replace("\"target\":{", "\"target\":{\"x\":1,")),
+        bound(&good.replace("\"byte_start\":", "\"byte_start\":0,\"byte_start\":")),
+    ];
+    for case in &cases {
+        let out = f.ingest(case);
+        assert_eq!(code_of(&out), Some(2), "{case}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("duplicate") || err.contains("unknown"),
+            "{err}"
+        );
+        assert!(f.show("doc-n").is_none());
+        assert!(!f.home.join("knowledge").join("r.db").exists());
+    }
+    // Control: the same input without the duplicate succeeds.
+    let out = f.ingest(&bound(&good));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+}
+
+#[test]
+fn ingest_batch_with_invalid_second_item_writes_nothing() {
+    let Some(f) = fixture(
+        "ingest-batch",
+        &[
+            ("pkg/calc.py", CALC),
+            ("docs/adr/0001.md", DOC),
+            ("docs/bare.md", "#\nSee [add](../pkg/calc.py#L1).\n"),
+        ],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let good = proposal_of(&report, "Storage@1", "add").clone();
+    let bare = report["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["doc"] == "docs/bare.md")
+        .expect("bare heading proposal")
+        .clone();
+    assert_eq!(bare["ingest_refusal"], "empty-heading");
+    let bad_rationale = item_of(
+        "bad-rationale",
+        &good,
+        "decision",
+        vec![json!({"target": good["target"], "relation": "documents", "rationale": ""})],
+    );
+    let mut long_author = item_of("bad-author", &good, "decision", Vec::new());
+    long_author["author"] = json!("a".repeat(300));
+    let second_items = [
+        item_of("bad-heading", &bare, "decision", Vec::new()),
+        bad_rationale,
+        long_author,
+    ];
+    for second in second_items {
+        let id = second["record_id"].as_str().unwrap().to_string();
+        let out = f.ingest(&input_of(vec![
+            item_of("first", &good, "decision", Vec::new()),
+            second,
+        ]));
+        assert_eq!(code_of(&out), Some(2), "{id}: {}", stderr_of(&out));
+        assert!(
+            f.show("first").is_none(),
+            "{id}: first item must not be written"
+        );
+        assert_eq!(f.generation(), 0);
+    }
+    let out = f.ingest(&input_of(vec![item_of(
+        "first",
+        &good,
+        "decision",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+}
+
+#[test]
+fn ingest_rejects_long_author_without_bindings() {
+    let Some(f) = fixture(
+        "ingest-author",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let mut create = item_of("long-create", &p, "decision", Vec::new());
+    create["author"] = json!("a".repeat(300));
+    let out = f.ingest(&input_of(vec![create]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(f.show("long-create").is_none());
+    assert_eq!(f.generation(), 0);
+    let mut at_limit = item_of("ok-author", &p, "decision", Vec::new());
+    at_limit["author"] = json!("a".repeat(256));
+    let out = f.ingest(&input_of(vec![at_limit]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let mut update = item_of("ok-author", &p, "decision", Vec::new());
+    update["author"] = json!("a".repeat(300));
+    update["expected_revision"] = json!(1);
+    let out = f.ingest(&input_of(vec![update]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert_eq!(f.show("ok-author").unwrap()["result"]["revision"], 1);
+}
+
+#[test]
+fn ingest_batch_with_duplicate_binding_writes_nothing() {
+    let Some(f) = fixture(
+        "ingest-dupbinding",
+        &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    let b = binding_of(&p["target"], "documents add");
+    let twice = item_of("second", &p, "decision", vec![b.clone(), b.clone()]);
+    let out = f.ingest(&input_of(vec![
+        item_of("first", &p, "decision", Vec::new()),
+        twice,
+    ]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("duplicate code binding in item"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(f.show("first").is_none());
+    assert_eq!(f.generation(), 0);
+    let out = f.ingest(&input_of(vec![item_of("second", &p, "decision", vec![b])]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+}
+
+#[test]
+fn crlf_section_digest_matches_evidence_capture() {
+    let crlf = "# CRLF\r\nSee [add](../pkg/calc.py#L1).\r\n";
+    let Some(f) = fixture(
+        "ingest-crlf",
+        &[("pkg/calc.py", CALC), ("docs/crlf.md", crlf)],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "CRLF@1", "add").clone();
+    let out = f.ingest(&input_of(vec![item_of(
+        "doc-crlf",
+        &p,
+        "decision",
+        Vec::new(),
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let shown = f.show("doc-crlf").unwrap();
+    assert_eq!(
+        shown["result"]["evidence"][0]["digest"],
+        p["section_digest"]
+    );
+}
+
+#[test]
+fn scan_and_ingest_scip_go_struct_target() {
+    let Some(f) = fixture(
+        "ingest-go",
+        &[
+            ("p/box.go", "package p\ntype Box struct {}\n"),
+            ("docs/go.md", "# Go\n[box](../p/box.go#L2)\n"),
+        ],
+    ) else {
+        return;
+    };
+    f.index();
+    let sym = "scip-go test pkg 1.0.0 p/Box#";
+    f.import(&[("p/box.go", vec![(sym, 1, 5, 8, DEF_ROLE)])]);
+    let report = f.scan_json(&[]);
+    let p = report["proposals"].as_array().unwrap()[0].clone();
+    assert_eq!(p["target"]["definition"]["byte_start"], 15);
+    assert_eq!(p["target"]["definition"]["byte_end"], 28);
+    assert_eq!(p["target"]["anchor"]["kind"], "semantic");
+    assert_eq!(p["target"]["anchor"]["byte_start"], 15);
+    assert_eq!(p["target"]["anchor"]["byte_end"], 18);
+    let again = f.scan_json(&[]);
+    assert_eq!(again["proposals"][0], p, "second scan repeats the proposal");
+
+    // Control: the syntax span in place of the semantic anchor is refused.
+    let mut forged = item_of(
+        "forged",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "box")],
+    );
+    forged["bindings"][0]["target"]["anchor"] = json!({
+        "kind": "syntax-fallback",
+        "precision": p["target"]["anchor"]["precision"],
+        "line": p["target"]["anchor"]["line"],
+        "col": p["target"]["anchor"]["col"],
+        "byte_start": 15,
+        "byte_end": 28,
+        "symbol_uri": p["target"]["anchor"]["symbol_uri"],
+        "display_name": p["target"]["anchor"]["display_name"],
+        "source_digest": p["target"]["anchor"]["source_digest"],
+    });
+    let out = f.ingest(&input_of(vec![forged]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("binding-target-changed"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let out = f.ingest(&input_of(vec![item_of(
+        "box",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "box")],
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+}
+
+#[test]
+fn ingest_binds_make_not_the_return_type() {
+    let src = "struct Thing {};\nThing make() { return {}; }\n";
+    let doc_text = "# Cpp\n[make](../src/thing.cpp#L2)\n";
+    let Some(f) = fixture(
+        "ingest-rettype",
+        &[("src/thing.cpp", src), ("docs/cpp.md", doc_text)],
+    ) else {
+        return;
+    };
+    f.index();
+    let thing = "scip-kt test pkg 1.0.0 src/thing.cpp/Thing#";
+    let make = "scip-kt test pkg 1.0.0 src/thing.cpp/make().";
+    f.import(&[(
+        "src/thing.cpp",
+        vec![
+            (thing, 0, 7, 12, DEF_ROLE),
+            (thing, 1, 0, 5, 0),
+            (make, 1, 6, 10, DEF_ROLE),
+        ],
+    )]);
+    let report = f.scan_json(&[]);
+    let p = report["proposals"].as_array().unwrap()[0].clone();
+    assert_eq!(p["target"]["definition"]["name"], "make");
+    let out = f.ingest(&input_of(vec![item_of(
+        "make-rec",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "make")],
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let text = f.at("src/thing.cpp", "2", "7").to_string();
+    assert!(text.contains("\"record_id\":\"make-rec\""), "{text}");
+}
+
+#[test]
+fn ingest_refuses_inner_nested_anchor_for_outer_definition() {
+    let src = "def foo():\n    def foo():\n        return 1\n    return foo\n";
+    // One document holds both links, so the inner link's reviewed section is available.
+    let doc_text = "# Nest\n[outer](../pkg/nest.py#L1)\n[inner](../pkg/nest.py#L2)\n";
+    let Some(f) = fixture(
+        "ingest-nested-anchor",
+        &[("pkg/nest.py", src), ("docs/nest.md", doc_text)],
+    ) else {
+        return;
+    };
+    f.index();
+    let inner = "scip-kt test pkg 1.0.0 pkg/nest.py/inner().";
+    f.import(&[("pkg/nest.py", vec![(inner, 1, 8, 11, DEF_ROLE)])]);
+    let report = f.scan_json(&[]);
+    let proposals = report["proposals"].as_array().unwrap();
+    assert_eq!(proposals.len(), 1, "{report}");
+    let inner_p = proposals[0].clone();
+    assert_eq!(inner_p["target"]["anchor"]["byte_start"], 19);
+
+    // The outer definition with the inner anchor: the proof refuses it.
+    let mut forged = inner_p.clone();
+    forged["target"]["definition"] = json!({
+        "name": "foo",
+        "kind": inner_p["target"]["definition"]["kind"],
+        "line": 1,
+        "col": 1,
+        "byte_start": 0,
+        "byte_end": 57,
+    });
+    let out = f.ingest(&input_of(vec![item_of(
+        "forged",
+        &forged,
+        "decision",
+        vec![binding_of(&forged["target"], "outer")],
+    )]));
+    assert_eq!(code_of(&out), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("binding-target-changed"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(f.show("forged").is_none());
+
+    // Control: the reviewed inner proposal binds.
+    let out = f.ingest(&input_of(vec![item_of(
+        "inner",
+        &inner_p,
+        "decision",
+        vec![binding_of(&inner_p["target"], "inner")],
+    )]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
 }

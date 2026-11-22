@@ -8,12 +8,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 
 use crate::index::{self, AnchorKind, EdgeAnchor, GraphQueryError};
 use crate::knowledge::{self, EvidenceFreshness};
-use crate::{edges, git, knowledge_store, paths, registry, scan, semantic, store};
+use crate::{
+    edges, git, knowledge_binding, knowledge_store, paths, registry, response, scan, semantic,
+    store,
+};
 
 /// One section of a Markdown document: a heading and the bytes up to the
 /// next heading of any level, or the end of the file.
@@ -1818,6 +1821,768 @@ pub fn scan(
     serde_json::to_string(&report).map_err(storage)
 }
 
+// ---------------------------------------------------------------------------
+// Ingest (D6): reviewed proposals become candidate records. Input is parsed and
+// every item is validated before any write; each item then commits in its own
+// transaction, in input order.
+// ---------------------------------------------------------------------------
+
+const INGEST_ITEMS_MAX: usize = 50;
+const INGEST_BINDINGS_MAX: usize = 20;
+const TOP_KEYS: [&str; 1] = ["items"];
+const ITEM_KEYS: [&str; 8] = [
+    "doc",
+    "section_id",
+    "section_digest",
+    "record_id",
+    "kind",
+    "author",
+    "expected_revision",
+    "bindings",
+];
+const BINDING_KEYS: [&str; 3] = ["target", "relation", "rationale"];
+const TARGET_KEYS: [&str; 4] = ["path", "symbol", "definition", "anchor"];
+const DEFINITION_KEYS: [&str; 6] = ["name", "kind", "line", "col", "byte_start", "byte_end"];
+const ANCHOR_KEYS: [&str; 9] = [
+    "kind",
+    "precision",
+    "line",
+    "col",
+    "byte_start",
+    "byte_end",
+    "symbol_uri",
+    "display_name",
+    "source_digest",
+];
+
+/// One item as parsed from the input, before any check against the store.
+struct IngestItem {
+    doc: String,
+    section_id: String,
+    section_digest: String,
+    record_id: String,
+    kind: String,
+    author: String,
+    expected_revision: Option<u64>,
+    bindings: Vec<IngestBinding>,
+}
+
+struct IngestBinding {
+    target: IngestTarget,
+    relation: String,
+    rationale: String,
+}
+
+/// The reviewed proposal target, copied whole from the scan (D3).
+struct IngestTarget {
+    path: String,
+    symbol: Option<String>,
+    definition: IngestDefinition,
+    anchor: IngestAnchor,
+}
+
+struct IngestDefinition {
+    name: String,
+    kind: String,
+    line: u32,
+    col: u32,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+struct IngestAnchor {
+    kind: String,
+    precision: String,
+    line: u32,
+    col: u32,
+    byte_start: usize,
+    byte_end: usize,
+    symbol_uri: Option<String>,
+    display_name: Option<String>,
+    source_digest: String,
+}
+
+/// One item that passed every check: the payloads the writers receive.
+struct Prepared {
+    record_id: String,
+    kind: String,
+    author: String,
+    expected_revision: Option<u64>,
+    title: String,
+    body: String,
+    doc: String,
+    section_id: String,
+    section_digest: String,
+    byte_start: usize,
+    byte_end: usize,
+    bindings: Vec<PreparedBinding>,
+}
+
+struct PreparedBinding {
+    anchor: knowledge_binding::CodeAnchor,
+    relation: String,
+    rationale: String,
+    provenance: String,
+}
+
+fn section_changed(doc: &str, section_id: &str) -> Fail {
+    (
+        2,
+        format!("section-changed: {doc} {section_id}; scan again"),
+    )
+}
+
+fn required<'a>(
+    obj: &'a [(String, knowledge::JVal)],
+    key: &str,
+    path: &str,
+) -> Result<&'a knowledge::JVal, String> {
+    knowledge::find(obj, key).ok_or_else(|| format!("missing required field `{path}.{key}`"))
+}
+
+fn nullable_str(
+    obj: &[(String, knowledge::JVal)],
+    key: &str,
+    path: &str,
+) -> Result<Option<String>, String> {
+    match required(obj, key, path)? {
+        knowledge::JVal::Null => Ok(None),
+        knowledge::JVal::Str(s) => Ok(Some(s.clone())),
+        _ => Err(format!(
+            "type mismatch: field `{path}.{key}` must be a string or null"
+        )),
+    }
+}
+
+fn u32_field(obj: &[(String, knowledge::JVal)], key: &str, path: &str) -> Result<u32, String> {
+    let n = knowledge::req_int_non_negative(required(obj, key, path)?, &format!("{path}.{key}"))?;
+    u32::try_from(n).map_err(|_| format!("field `{path}.{key}` is out of range"))
+}
+
+fn usize_field(obj: &[(String, knowledge::JVal)], key: &str, path: &str) -> Result<usize, String> {
+    let n = knowledge::req_int_non_negative(required(obj, key, path)?, &format!("{path}.{key}"))?;
+    usize::try_from(n).map_err(|_| format!("field `{path}.{key}` is out of range"))
+}
+
+/// Parses the whole input (D6): size, duplicate keys at every depth, unknown keys at every
+/// object level, item and binding counts, and distinct record ids across items.
+fn parse_ingest(input: &[u8]) -> Result<Vec<IngestItem>, Fail> {
+    if input.len() > knowledge::MAX_MUTATION_JSON_BYTES {
+        return Err((
+            2,
+            format!(
+                "mutation input too large: exceeds the {} byte limit",
+                knowledge::MAX_MUTATION_JSON_BYTES
+            ),
+        ));
+    }
+    let text = std::str::from_utf8(input)
+        .map_err(|_| (2, "invalid ingest input: not UTF-8".to_string()))?;
+    let value =
+        knowledge::parse_dupless(text).map_err(|e| (2, format!("invalid ingest input: {e}")))?;
+    let top = knowledge::as_obj(&value, "$").map_err(|e| (2, e))?;
+    knowledge::check_known(top, &TOP_KEYS, "$").map_err(|e| (2, e))?;
+    let items = match knowledge::find(top, "items") {
+        Some(knowledge::JVal::Arr(items)) => items,
+        Some(_) => {
+            return Err((
+                2,
+                "type mismatch: field `$.items` must be an array".to_string(),
+            ))
+        }
+        None => return Err((2, "missing required field `$.items`".to_string())),
+    };
+    if items.is_empty() || items.len() > INGEST_ITEMS_MAX {
+        return Err((2, format!("items must hold 1..={INGEST_ITEMS_MAX} entries")));
+    }
+    let mut parsed = Vec::with_capacity(items.len());
+    let mut ids = BTreeSet::new();
+    for (index, value) in items.iter().enumerate() {
+        let item = parse_item(value, index).map_err(|e| (2, e))?;
+        if !ids.insert(item.record_id.clone()) {
+            return Err((
+                2,
+                format!("duplicate record id in input: '{}'", item.record_id),
+            ));
+        }
+        parsed.push(item);
+    }
+    Ok(parsed)
+}
+
+fn parse_item(value: &knowledge::JVal, index: usize) -> Result<IngestItem, String> {
+    let path = format!("items[{index}]");
+    let obj = knowledge::as_obj(value, &path)?;
+    knowledge::check_known(obj, &ITEM_KEYS, &path)?;
+    let expected_revision = match knowledge::find(obj, "expected_revision") {
+        None => None,
+        Some(v) => {
+            let n = knowledge::req_int_non_negative(v, &format!("{path}.expected_revision"))?;
+            if n < 1 {
+                return Err(format!(
+                    "field `{path}.expected_revision` must be at least 1"
+                ));
+            }
+            Some(n as u64)
+        }
+    };
+    let bindings_value = match knowledge::find(obj, "bindings") {
+        Some(knowledge::JVal::Arr(list)) => list,
+        Some(_) => {
+            return Err(format!(
+                "type mismatch: field `{path}.bindings` must be an array"
+            ))
+        }
+        None => return Err(format!("missing required field `{path}.bindings`")),
+    };
+    if bindings_value.len() > INGEST_BINDINGS_MAX {
+        return Err(format!(
+            "field `{path}.bindings` holds at most {INGEST_BINDINGS_MAX} entries"
+        ));
+    }
+    let mut bindings = Vec::with_capacity(bindings_value.len());
+    for (b, binding) in bindings_value.iter().enumerate() {
+        bindings.push(parse_binding(binding, &format!("{path}.bindings[{b}]"))?);
+    }
+    Ok(IngestItem {
+        doc: knowledge::req_str(obj, "doc", &path)?,
+        section_id: knowledge::req_str(obj, "section_id", &path)?,
+        section_digest: knowledge::req_str(obj, "section_digest", &path)?,
+        record_id: knowledge::req_str(obj, "record_id", &path)?,
+        kind: knowledge::req_str(obj, "kind", &path)?,
+        author: knowledge::req_str(obj, "author", &path)?,
+        expected_revision,
+        bindings,
+    })
+}
+
+fn parse_binding(value: &knowledge::JVal, path: &str) -> Result<IngestBinding, String> {
+    let obj = knowledge::as_obj(value, path)?;
+    knowledge::check_known(obj, &BINDING_KEYS, path)?;
+    let target_path = format!("{path}.target");
+    let t = knowledge::as_obj(required(obj, "target", path)?, &target_path)?;
+    knowledge::check_known(t, &TARGET_KEYS, &target_path)?;
+    let def_path = format!("{target_path}.definition");
+    let d = knowledge::as_obj(required(t, "definition", &target_path)?, &def_path)?;
+    knowledge::check_known(d, &DEFINITION_KEYS, &def_path)?;
+    let anchor_path = format!("{target_path}.anchor");
+    let a = knowledge::as_obj(required(t, "anchor", &target_path)?, &anchor_path)?;
+    knowledge::check_known(a, &ANCHOR_KEYS, &anchor_path)?;
+    Ok(IngestBinding {
+        target: IngestTarget {
+            path: knowledge::req_str(t, "path", &target_path)?,
+            symbol: nullable_str(t, "symbol", &target_path)?,
+            definition: IngestDefinition {
+                name: knowledge::req_str(d, "name", &def_path)?,
+                kind: knowledge::req_str(d, "kind", &def_path)?,
+                line: u32_field(d, "line", &def_path)?,
+                col: u32_field(d, "col", &def_path)?,
+                byte_start: usize_field(d, "byte_start", &def_path)?,
+                byte_end: usize_field(d, "byte_end", &def_path)?,
+            },
+            anchor: IngestAnchor {
+                kind: knowledge::req_str(a, "kind", &anchor_path)?,
+                precision: knowledge::req_str(a, "precision", &anchor_path)?,
+                line: u32_field(a, "line", &anchor_path)?,
+                col: u32_field(a, "col", &anchor_path)?,
+                byte_start: usize_field(a, "byte_start", &anchor_path)?,
+                byte_end: usize_field(a, "byte_end", &anchor_path)?,
+                symbol_uri: nullable_str(a, "symbol_uri", &anchor_path)?,
+                display_name: nullable_str(a, "display_name", &anchor_path)?,
+                source_digest: knowledge::req_str(a, "source_digest", &anchor_path)?,
+            },
+        },
+        relation: knowledge::req_str(obj, "relation", path)?,
+        rationale: knowledge::req_str(obj, "rationale", path)?,
+    })
+}
+
+/// The knowledge store opened read-only for preflight. A missing store means no
+/// record exists yet; nothing is created here.
+fn existing_store(home: &Path, entry: &registry::RepoEntry) -> Result<Option<Connection>, Fail> {
+    if !knowledge_store::knowledge_db_path(home, &entry.name).is_file() {
+        return Ok(None);
+    }
+    knowledge_store::open_knowledge_at(home, entry, false)
+        .map(Some)
+        .map_err(storage)
+}
+
+fn head_revision(conn: &Connection, id: &str) -> Result<Option<u64>, Fail> {
+    let head: Option<i64> = conn
+        .query_row(
+            "SELECT current_revision FROM heads WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| storage(format!("cannot read record head: {e}")))?;
+    head.map(|h| {
+        u64::try_from(h).map_err(|_| storage("corrupt knowledge store: head out of range"))
+    })
+    .transpose()
+}
+
+fn stored_kind(conn: &Connection, id: &str, revision: u64) -> Result<String, Fail> {
+    conn.query_row(
+        "SELECT kind FROM records WHERE id = ?1 AND revision = ?2",
+        rusqlite::params![id, revision as i64],
+        |row| row.get(0),
+    )
+    .map_err(|e| storage(format!("cannot read record kind: {e}")))
+}
+
+/// Re-proves one binding on the latest snapshot and checks both reviewed identities (D6).
+fn prove_binding(
+    home: &Path,
+    entry: &registry::RepoEntry,
+    canon: &Path,
+    target: &IngestTarget,
+) -> Result<knowledge_binding::CodeAnchor, Fail> {
+    semantic::validate_snapshot_rel(&target.path)
+        .map_err(|m| (2, format!("invalid target path '{}': {m}", target.path)))?;
+    if target.anchor.line == 0 || target.anchor.col == 0 {
+        return Err((
+            2,
+            "invalid anchor position: line and column must be at least 1".to_string(),
+        ));
+    }
+    // The resolver checks the live source first: a changed target refuses with the
+    // resolver's own `source changed` message before any identity comparison.
+    let anchor = knowledge_binding::resolve_code_anchor(
+        home,
+        entry,
+        &target.path,
+        target.anchor.line,
+        target.anchor.col,
+        target.symbol.as_deref(),
+        true,
+        None,
+    )
+    .map_err(|e| {
+        // The reviewed symbol no longer owns the position: the target changed.
+        if e.contains("--symbol disagrees with the position identity") {
+            (
+                2,
+                format!(
+                    "binding-target-changed: {}:{}; scan again",
+                    target.path, target.anchor.line
+                ),
+            )
+        } else {
+            (knowledge_binding::write_error_code(&e), e)
+        }
+    })?;
+    let changed = || {
+        (
+            2,
+            format!(
+                "binding-target-changed: {}:{}; scan again",
+                target.path, target.definition.line
+            ),
+        )
+    };
+    let conn = match store::open_read(&store::db_path(home, &entry.name)) {
+        store::IndexRead::Ready(conn) => conn,
+        _ => return Err((3, "no code index: index the repository first".to_string())),
+    };
+    let snapshot = store::latest_snapshot(&conn)
+        .map_err(storage)?
+        .ok_or_else(|| {
+            (
+                3,
+                "no code snapshot: index the repository first".to_string(),
+            )
+        })?;
+    let defs = store::symbols_at(&conn, snapshot.id, &target.path).map_err(storage)?;
+    let starting: Vec<&store::SymbolRow> = defs
+        .iter()
+        .filter(|d| d.start_line == target.definition.line)
+        .collect();
+    if starting.len() != 1 {
+        return Err(changed());
+    }
+    let row = starting[0];
+    let def = &target.definition;
+    if row.name.as_deref() != Some(def.name.as_str())
+        || row.kind != def.kind
+        || row.start_col != def.col
+        || row.byte_start != def.byte_start
+        || row.byte_end != def.byte_end
+    {
+        return Err(changed());
+    }
+    let source =
+        semantic::confined_read(canon, &target.path, scan::MAX_FILE_BYTES).map_err(|m| (3, m))?;
+    match prove_anchor(&conn, snapshot.id, canon, &target.path, row, &source) {
+        Err(GraphQueryError::Anchor(_)) | Ok(Proof::Unproven(_)) => return Err(changed()),
+        Err(GraphQueryError::Store(m)) => return Err(storage(m)),
+        Ok(Proof::Proven(edge)) => {
+            let a = &target.anchor;
+            let same_edge = edge.kind.as_str() == a.kind
+                && edge.precision == a.precision
+                && edge.line1 == a.line
+                && edge.col1 == a.col
+                && edge.span_bytes == Some((a.byte_start, a.byte_end))
+                && edge.symbol_uri == a.symbol_uri
+                && edge.display == a.display_name;
+            let same_anchor = anchor.anchor_kind == a.kind
+                && anchor.precision == a.precision
+                && anchor.cursor_line == a.line
+                && anchor.cursor_col == a.col
+                && anchor.byte_start == a.byte_start
+                && anchor.byte_end == a.byte_end
+                && anchor.symbol_uri == a.symbol_uri
+                && anchor.display_name == a.display_name
+                && anchor.source_digest == a.source_digest;
+            if !(same_edge && same_anchor) {
+                return Err(changed());
+            }
+        }
+    }
+    Ok(anchor)
+}
+
+/// Validates one item against the read-only store and the live sources (D6, step 1).
+fn prepare_item(
+    home: &Path,
+    entry: &registry::RepoEntry,
+    canon: &Path,
+    existing: Option<&Connection>,
+    item: IngestItem,
+) -> Result<Prepared, Fail> {
+    let IngestItem {
+        doc,
+        section_id,
+        section_digest,
+        record_id,
+        kind,
+        author,
+        expected_revision,
+        bindings,
+    } = item;
+    semantic::validate_snapshot_rel(&doc)
+        .map_err(|m| (2, format!("invalid doc path '{doc}': {m}")))?;
+    if !is_markdown(&doc) {
+        return Err((2, format!("doc must be a Markdown file: '{doc}'")));
+    }
+    let raw = semantic::confined_read_classified(canon, &doc, scan::MAX_FILE_BYTES)
+        .map_err(|_| section_changed(&doc, &section_id))?;
+    let text = String::from_utf8(raw).map_err(|_| section_changed(&doc, &section_id))?;
+    let sections = parse_document(&doc, &text);
+    let section = sections
+        .iter()
+        .find(|s| s.section_id == section_id)
+        .ok_or_else(|| section_changed(&doc, &section_id))?;
+    if section.digest != section_digest {
+        return Err(section_changed(&doc, &section_id));
+    }
+    if let Some(reason) = ingest_refusal(&doc, section) {
+        return Err((2, format!("section not ingestable: {reason}")));
+    }
+    let title = match &section.heading {
+        Some(heading) => heading.clone(),
+        None => doc.rsplit('/').next().unwrap_or(&doc).to_string(),
+    };
+    let body = text
+        .get(section.byte_start..section.byte_end)
+        .ok_or_else(|| section_changed(&doc, &section_id))?
+        .to_string();
+    if kind != "decision" && kind != "constraint" {
+        return Err((2, format!("invalid record kind: '{kind}'")));
+    }
+    if author.is_empty() || author.len() > knowledge::MAX_AUTHOR_BYTES {
+        return Err((
+            2,
+            format!("author must be 1..={} bytes", knowledge::MAX_AUTHOR_BYTES),
+        ));
+    }
+    knowledge::validate_id(&record_id).map_err(|m| (2, m))?;
+    match expected_revision {
+        None => knowledge::validate_new(&knowledge::NewRecord {
+            id: record_id.clone(),
+            kind: kind.clone(),
+            title: title.clone(),
+            body: body.clone(),
+            status: "active".to_string(),
+            author: author.clone(),
+        })
+        .map_err(|m| (2, m))?,
+        Some(_) => knowledge::validate_update(&knowledge::UpdateRecord {
+            title: title.clone(),
+            body: body.clone(),
+            status: "active".to_string(),
+            author: author.clone(),
+            superseded_by: None,
+            reason: None,
+            confirm: false,
+        })
+        .map_err(|m| (2, m))?,
+    }
+    match (expected_revision, existing) {
+        (None, Some(conn)) => {
+            if head_revision(conn, &record_id)?.is_some() {
+                return Err((2, format!("duplicate record id: '{record_id}'")));
+            }
+        }
+        (None, None) => {}
+        (Some(expected), existing) => {
+            let head = match existing {
+                Some(conn) => head_revision(conn, &record_id)?,
+                None => None,
+            };
+            let Some(head) = head else {
+                return Err((3, format!("unknown record id: '{record_id}'")));
+            };
+            if head != expected {
+                return Err((
+                    3,
+                    format!("revision conflict for '{record_id}': expected {expected} but head is {head}"),
+                ));
+            }
+            if let Some(conn) = existing {
+                let stored = stored_kind(conn, &record_id, head)?;
+                if stored != kind {
+                    return Err((2, format!("kind-mismatch: {record_id} is {stored}")));
+                }
+            }
+        }
+    }
+    let provenance = format!("docs-ingest:{doc}#{section_id}@{section_digest}");
+    let mut seen = BTreeSet::new();
+    let mut prepared = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let placeholder = knowledge_binding::BindingInput {
+            record_id: record_id.clone(),
+            record_revision: 1,
+            relation: binding.relation.clone(),
+            author: author.clone(),
+            rationale: binding.rationale.clone(),
+            provenance: provenance.clone(),
+        };
+        knowledge_binding::validate_binding_input(&placeholder).map_err(|m| (2, m))?;
+        let anchor = prove_binding(home, entry, canon, &binding.target)?;
+        let key = (
+            anchor.path.clone(),
+            anchor.byte_start,
+            anchor.byte_end,
+            anchor.source_digest.clone(),
+            binding.relation.clone(),
+        );
+        if !seen.insert(key) {
+            return Err((2, format!("duplicate code binding in item {record_id}")));
+        }
+        prepared.push(PreparedBinding {
+            anchor,
+            relation: binding.relation,
+            rationale: binding.rationale,
+            provenance: provenance.clone(),
+        });
+    }
+    Ok(Prepared {
+        record_id,
+        kind,
+        author,
+        expected_revision,
+        title,
+        body,
+        doc,
+        section_id,
+        section_digest,
+        byte_start: section.byte_start,
+        byte_end: section.byte_end,
+        bindings: prepared,
+    })
+}
+
+/// Writes one item in its own transaction (D6, step 2). Returns the rendered item and the
+/// generation after its commit.
+fn write_item(conn: &mut Connection, canon: &Path, item: &Prepared) -> Result<(String, u64), Fail> {
+    knowledge_store::revalidate_open_paths(conn).map_err(storage)?;
+    let evidence = [knowledge::EvidenceRef {
+        path: item.doc.clone(),
+        byte_start: Some(item.byte_start as i64),
+        byte_end: Some(item.byte_end as i64),
+        expected_digest: Some(item.section_digest.clone()),
+    }];
+    let captured = knowledge_store::capture_evidence(conn, &evidence).map_err(|e| {
+        if e.contains("digest changed") || e.contains("binds no bytes") {
+            section_changed(&item.doc, &item.section_id)
+        } else {
+            (3, e)
+        }
+    })?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| storage(format!("cannot begin knowledge write: {e}")))?;
+    knowledge_store::ensure_lifecycle_schema(&tx).map_err(storage)?;
+    if !item.bindings.is_empty() {
+        knowledge_store::ensure_code_binding_schema(&tx).map_err(storage)?;
+    }
+    let (revision, action) = match item.expected_revision {
+        None => {
+            let record = knowledge::NewRecord {
+                id: item.record_id.clone(),
+                kind: item.kind.clone(),
+                title: item.title.clone(),
+                body: item.body.clone(),
+                status: "active".to_string(),
+                author: item.author.clone(),
+            };
+            let rev = knowledge_store::create_in_tx(&tx, &record, None, &captured)
+                .map_err(|e| (knowledge_binding::write_error_code(&e), e))?;
+            (rev, "created")
+        }
+        Some(expected) => {
+            let update = knowledge::UpdateRecord {
+                title: item.title.clone(),
+                body: item.body.clone(),
+                status: "active".to_string(),
+                author: item.author.clone(),
+                superseded_by: None,
+                reason: None,
+                confirm: false,
+            };
+            match knowledge_store::update_in_tx(
+                &tx,
+                &item.record_id,
+                expected,
+                &update,
+                None,
+                &captured,
+            )
+            .map_err(|e| (knowledge_binding::write_error_code(&e), e))?
+            {
+                knowledge_store::UpdateOutcome::Written(rev) => (rev, "updated"),
+                knowledge_store::UpdateOutcome::Unchanged(_) => {
+                    return Err((
+                        3,
+                        "internal: docs ingest re-confirmed without a write".to_string(),
+                    ))
+                }
+            }
+        }
+    };
+    let mut binding_ids = Vec::with_capacity(item.bindings.len());
+    for b in &item.bindings {
+        let input = knowledge_binding::BindingInput {
+            record_id: item.record_id.clone(),
+            record_revision: revision,
+            relation: b.relation.clone(),
+            author: item.author.clone(),
+            rationale: b.rationale.clone(),
+            provenance: b.provenance.clone(),
+        };
+        let id = knowledge_binding::insert_in_tx(&tx, canon, &b.anchor, &input)
+            .map_err(|e| (knowledge_binding::write_error_code(&e), e))?;
+        binding_ids.push(id.to_string());
+    }
+    // A store without the binding tables has no earlier bindings to count.
+    let has_bindings: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'code_bindings'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| storage(format!("cannot read store tables: {e}")))?;
+    let earlier: i64 = if has_bindings == 0 {
+        0
+    } else {
+        tx.query_row(
+            "SELECT count(*) FROM code_bindings b
+             WHERE b.record_id = ?1 AND b.record_revision < ?2
+               AND NOT EXISTS (SELECT 1 FROM code_binding_retractions r WHERE r.binding_id = b.binding_id)",
+            rusqlite::params![item.record_id, revision as i64],
+            |row| row.get(0),
+        )
+        .map_err(|e| storage(format!("cannot count earlier bindings: {e}")))?
+    };
+    let generation = knowledge_store::bump_generation(&tx).map_err(storage)?;
+    tx.commit()
+        .map_err(|e| storage(format!("cannot commit knowledge write: {e}")))?;
+    let digest = &captured[0].digest;
+    let git_head = match &captured[0].git_head {
+        Some(head) => format!("\"{}\"", crate::json::escape(head)),
+        None => "null".to_string(),
+    };
+    let rendered = format!(
+        "{{\"record_id\":\"{}\",\"revision\":{},\"action\":\"{}\",\"evidence\":{{\"path\":\"{}\",\"byte_start\":{},\"byte_end\":{},\"digest\":\"{}\",\"git_head\":{}}},\"bindings\":[{}],\"earlier_revision_bindings\":{}}}",
+        crate::json::escape(&item.record_id),
+        revision,
+        action,
+        crate::json::escape(&item.doc),
+        item.byte_start,
+        item.byte_end,
+        crate::json::escape(digest),
+        git_head,
+        binding_ids.join(","),
+        earlier,
+    );
+    Ok((rendered, generation))
+}
+
+/// Writes every prepared item, one transaction each, and returns the rendered items with
+/// the last generation. A failure names the items already committed.
+fn write_all(
+    home: &Path,
+    entry: &registry::RepoEntry,
+    canon: &Path,
+    prepared: &[Prepared],
+) -> Result<(Vec<String>, u64), Fail> {
+    let mut conn = knowledge_store::open_knowledge_at(home, entry, true).map_err(storage)?;
+    let mut rendered = Vec::with_capacity(prepared.len());
+    let mut committed: Vec<String> = Vec::new();
+    let mut generation = 0;
+    for item in prepared {
+        match write_item(&mut conn, canon, item) {
+            Ok((json, gen)) => {
+                rendered.push(json);
+                generation = gen;
+                committed.push(item.record_id.clone());
+            }
+            Err((code, message)) => {
+                let message = if committed.is_empty() {
+                    message
+                } else {
+                    format!("{message}; committed: {}", committed.join(", "))
+                };
+                return Err((code, message));
+            }
+        }
+    }
+    Ok((rendered, generation))
+}
+
+/// `riltra docs ingest --repo <name> --input -` (D6). Writes candidate records and their
+/// code bindings; nothing is confirmed or verified.
+pub fn ingest(home: &Path, repo: &str, root: &Path, input: &[u8]) -> Result<String, Fail> {
+    let items = parse_ingest(input)?;
+    let canon = paths::canonical_root(root).map_err(storage)?;
+    let entry = registry::RepoEntry {
+        name: repo.to_string(),
+        root: root.to_string_lossy().into_owned(),
+        added_unix: 0,
+    };
+    let existing = existing_store(home, &entry)?;
+    let mut prepared = Vec::with_capacity(items.len());
+    for item in items {
+        prepared.push(prepare_item(home, &entry, &canon, existing.as_ref(), item)?);
+    }
+    drop(existing);
+    let (rendered, generation) = write_all(home, &entry, &canon, &prepared)?;
+    let result = format!(
+        "{{\"items\":[{}],\"confirm_state\":\"candidate\",\"verification\":\"Unverified\"}}",
+        rendered.join(",")
+    );
+    Ok(response::knowledge_envelope(
+        repo,
+        generation,
+        "docs-ingest",
+        &result,
+        None,
+    ))
+}
+
 #[cfg(test)]
 mod scan_tests {
     use super::*;
@@ -2314,5 +3079,50 @@ prose parse_input
             assert!(knowledge::validate_id(id).is_ok(), "{id}");
             assert!(id[id.len() - 8..].chars().all(|c| c.is_ascii_hexdigit()));
         }
+    }
+}
+
+#[cfg(test)]
+mod ingest_tests {
+    use super::*;
+    use crate::testutil::tmpdir;
+
+    #[test]
+    fn ingest_capture_refuses_digest_changed_after_validation() {
+        let home = tmpdir("ingest-unit-home");
+        let root = tmpdir("ingest-unit-root");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "# A\nfirst body\n").unwrap();
+        let canon = paths::canonical_root(&root).unwrap();
+        let entry = registry::RepoEntry {
+            name: "r".to_string(),
+            root: canon.to_string_lossy().into_owned(),
+            added_unix: 1,
+        };
+        let text = std::fs::read_to_string(root.join("docs/a.md")).unwrap();
+        let section = parse_document("docs/a.md", &text).remove(0);
+        let prepared = Prepared {
+            record_id: "a-rec".to_string(),
+            kind: "decision".to_string(),
+            author: "tester".to_string(),
+            expected_revision: None,
+            title: "A".to_string(),
+            body: text[section.byte_start..section.byte_end].to_string(),
+            doc: "docs/a.md".to_string(),
+            section_id: section.section_id.clone(),
+            section_digest: section.digest.clone(),
+            byte_start: section.byte_start,
+            byte_end: section.byte_end,
+            bindings: Vec::new(),
+        };
+        let mut conn = knowledge_store::open_knowledge_at(&home, &entry, true).unwrap();
+        let before = knowledge_store::read_generation(&conn).unwrap();
+        // The file changes after validation and before the write.
+        std::fs::write(root.join("docs/a.md"), "# A\nsecond body\n").unwrap();
+        let err = write_item(&mut conn, &canon, &prepared).unwrap_err();
+        assert_eq!(err.0, 2, "{}", err.1);
+        assert!(err.1.contains("section-changed"), "{}", err.1);
+        assert!(knowledge_store::show_record(&conn, "a-rec", None).is_err());
+        assert_eq!(knowledge_store::read_generation(&conn).unwrap(), before);
     }
 }

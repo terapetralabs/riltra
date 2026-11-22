@@ -1063,6 +1063,82 @@ fn ingest_creates_record_and_binding_atomically() {
     assert_eq!(f.generation(), 1, "one bump per item");
 }
 
+/// Ingests the Storage section with `/` separators, or with `\` separators in the document
+/// and the binding target path when `backslash` is set. Returns the scan's `recorded` value
+/// for the section, the stored evidence, and the `knowledge at` output of the bound position.
+fn ingest_with_separators(tag: &str, backslash: bool) -> Option<(Value, Value, String)> {
+    let f = fixture(tag, &[("pkg/calc.py", CALC), ("docs/adr/0001.md", DOC)])?;
+    f.index();
+    f.import(&[("pkg/calc.py", calc_defs())]);
+    let p = proposal_of(&f.scan_json(&[]), "Storage@1", "add").clone();
+    let sep = |s: &str| {
+        if backslash {
+            s.replace('/', "\x5c")
+        } else {
+            s.to_string()
+        }
+    };
+    let mut target = p["target"].clone();
+    target["path"] = json!(sep(target["path"].as_str().unwrap()));
+    let mut item = item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&target, "documents add")],
+    );
+    item["doc"] = json!(sep(p["doc"].as_str().unwrap()));
+    let out = f.ingest(&input_of(vec![item]));
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let report = f.scan_json(&[]);
+    let recorded = section(doc(&report, "docs/adr/0001.md"), "Storage@1")["recorded"].clone();
+    let shown = f.show("doc-storage").expect("record exists");
+    let evidence = shown["result"]["evidence"][0].clone();
+    let line = p["target"]["anchor"]["line"].to_string();
+    let col = p["target"]["anchor"]["col"].to_string();
+    let at = f.at("pkg/calc.py", &line, &col).to_string();
+    Some((recorded, evidence, at))
+}
+
+#[test]
+fn ingest_normalizes_backslash_doc_path() {
+    let Some((control_recorded, control_ev, control_at)) =
+        ingest_with_separators("ingest-slash", false)
+    else {
+        return;
+    };
+    let Some((recorded, ev, at)) = ingest_with_separators("ingest-backslash", true) else {
+        return;
+    };
+    // Control: the `/` spelling records the section and stores the `/` path.
+    assert_eq!(control_recorded["id"], "doc-storage", "{control_recorded}");
+    assert_eq!(control_recorded["revision"], 1, "{control_recorded}");
+    assert_eq!(control_ev["path"], "docs/adr/0001.md");
+    // The `\` spelling must end up identical: normalized doc and target paths.
+    assert_eq!(recorded["id"], "doc-storage", "{recorded}");
+    assert_eq!(recorded["revision"], 1, "{recorded}");
+    assert_eq!(ev["path"], "docs/adr/0001.md", "{ev}");
+    // Compare the identity fields only: each fixture is its own git repo, so git_head differs.
+    for field in ["path", "byte_start", "byte_end", "digest"] {
+        assert_eq!(ev[field], control_ev[field], "{field}: {ev}");
+    }
+    assert!(
+        at.contains("docs-ingest:docs/adr/0001.md#Storage@1@"),
+        "{at}"
+    );
+    assert!(
+        control_at.contains("docs-ingest:docs/adr/0001.md#Storage@1@"),
+        "{control_at}"
+    );
+    assert!(
+        !at.contains("docs\x5c\x5cadr"),
+        "backslash doc path stored: {at}"
+    );
+    assert!(
+        !at.contains("pkg\x5c\x5ccalc.py"),
+        "backslash target path stored: {at}"
+    );
+}
+
 #[test]
 fn ingest_refuses_changed_section_and_writes_nothing() {
     let Some(f) = fixture(

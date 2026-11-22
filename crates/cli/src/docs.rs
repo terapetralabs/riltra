@@ -2148,7 +2148,9 @@ fn prove_binding(
     canon: &Path,
     target: &IngestTarget,
 ) -> Result<knowledge_binding::CodeAnchor, Fail> {
-    semantic::validate_snapshot_rel(&target.path)
+    // The normalized path is the identity from here on (resolver, snapshot lookup,
+    // source read, proof, and messages).
+    let path = semantic::validate_snapshot_rel(&target.path)
         .map_err(|m| (2, format!("invalid target path '{}': {m}", target.path)))?;
     if target.anchor.line == 0 || target.anchor.col == 0 {
         return Err((
@@ -2161,7 +2163,7 @@ fn prove_binding(
     let anchor = knowledge_binding::resolve_code_anchor(
         home,
         entry,
-        &target.path,
+        &path,
         target.anchor.line,
         target.anchor.col,
         target.symbol.as_deref(),
@@ -2175,7 +2177,7 @@ fn prove_binding(
                 2,
                 format!(
                     "binding-target-changed: {}:{}; scan again",
-                    target.path, target.anchor.line
+                    path, target.anchor.line
                 ),
             )
         } else {
@@ -2187,7 +2189,7 @@ fn prove_binding(
             2,
             format!(
                 "binding-target-changed: {}:{}; scan again",
-                target.path, target.definition.line
+                path, target.definition.line
             ),
         )
     };
@@ -2203,7 +2205,7 @@ fn prove_binding(
                 "no code snapshot: index the repository first".to_string(),
             )
         })?;
-    let defs = store::symbols_at(&conn, snapshot.id, &target.path).map_err(storage)?;
+    let defs = store::symbols_at(&conn, snapshot.id, &path).map_err(storage)?;
     let starting: Vec<&store::SymbolRow> = defs
         .iter()
         .filter(|d| d.start_line == target.definition.line)
@@ -2221,9 +2223,8 @@ fn prove_binding(
     {
         return Err(changed());
     }
-    let source =
-        semantic::confined_read(canon, &target.path, scan::MAX_FILE_BYTES).map_err(|m| (3, m))?;
-    match prove_anchor(&conn, snapshot.id, canon, &target.path, row, &source) {
+    let source = semantic::confined_read(canon, &path, scan::MAX_FILE_BYTES).map_err(|m| (3, m))?;
+    match prove_anchor(&conn, snapshot.id, canon, &path, row, &source) {
         Err(GraphQueryError::Anchor(_)) | Ok(Proof::Unproven(_)) => return Err(changed()),
         Err(GraphQueryError::Store(m)) => return Err(storage(m)),
         Ok(Proof::Proven(edge)) => {
@@ -2270,7 +2271,9 @@ fn prepare_item(
         expected_revision,
         bindings,
     } = item;
-    semantic::validate_snapshot_rel(&doc)
+    // The normalized path is the identity from here on: reading, the section lookup,
+    // the evidence ref, the provenance string, messages and output all use it.
+    let doc = semantic::validate_snapshot_rel(&doc)
         .map_err(|m| (2, format!("invalid doc path '{doc}': {m}")))?;
     if !is_markdown(&doc) {
         return Err((2, format!("doc must be a Markdown file: '{doc}'")));

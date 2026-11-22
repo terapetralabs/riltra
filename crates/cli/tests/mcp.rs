@@ -861,6 +861,131 @@ fn knowledge_at_anchor_mcp_matches_cli_and_keeps_legacy_store_read_only() {
     assert_eq!(listing(&legacy), before, "MCP read modified legacy storage");
 }
 
+#[test]
+fn context_by_name_mcp_matches_cli_with_scip_binding() {
+    const CALC_PY: &str = "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n";
+    let h = home("context-by-name");
+    let dir = home("context-by-name-repo");
+    std::fs::create_dir_all(dir.join("pkg")).unwrap();
+    std::fs::write(dir.join("pkg/calc.py"), CALC_PY).unwrap();
+    indexed_repo(&h, &dir, "r");
+    let add = "scip-kt test pkg 1.0.0 pkg/calc.py/add().";
+    let sub = "scip-kt test pkg 1.0.0 pkg/calc.py/sub().";
+    let occurrences = vec![occurrence(add, 1, 0, 4, 7), occurrence(sub, 1, 3, 4, 7)];
+    let symbols = [(add, "add"), (sub, "sub")];
+    let mut tool = Vec::new();
+    str_field(1, "cp-name", &mut tool);
+    str_field(2, "1.0", &mut tool);
+    let mut md = Vec::new();
+    len_field(2, &tool, &mut md);
+    str_field(
+        3,
+        &format!("file://{}", dir.to_string_lossy().replace('\\', "/")),
+        &mut md,
+    );
+    varint_field(4, 1, &mut md);
+    let mut payload = Vec::new();
+    len_field(1, &md, &mut payload);
+    len_field(
+        2,
+        &test_document("pkg/calc.py", &occurrences, &symbols),
+        &mut payload,
+    );
+    let scip = h.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    let (code, _out, err) = run_cli(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "r",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "import: {err}");
+    let record = br#"{"id":"doc-storage","kind":"decision","title":"Storage","body":"stored","status":"active","author":"a","evidence":[{"path":"pkg/calc.py","byte_start":0,"byte_end":7}]}"#;
+    let (code, _, err) = run_cli_stdin(
+        &h,
+        &["knowledge", "create", "--repo", "r", "--input", "-"],
+        record,
+    );
+    assert_eq!(code, 0, "create: {err}");
+    let other = br#"{"id":"other","kind":"decision","title":"Other","body":"no evidence","status":"active","author":"a"}"#;
+    let (code, _, err) = run_cli_stdin(
+        &h,
+        &["knowledge", "create", "--repo", "r", "--input", "-"],
+        other,
+    );
+    assert_eq!(code, 0, "create other: {err}");
+    let bind = |record: &str, line: &str, col: &str| {
+        let input = format!(
+            r#"{{"record_id":"{record}","record_revision":1,"relation":"documents","author":"a","rationale":"r","provenance":"p"}}"#
+        );
+        let (code, _, err) = run_cli_stdin(
+            &h,
+            &[
+                "knowledge",
+                "bind",
+                "--repo",
+                "r",
+                "--path",
+                "pkg/calc.py",
+                "--line",
+                line,
+                "--col",
+                col,
+                "--input",
+                "-",
+            ],
+            input.as_bytes(),
+        );
+        assert_eq!(code, 0, "bind {record}: {err}");
+    };
+    bind("doc-storage", "1", "5");
+    bind("other", "4", "5");
+
+    let args = [
+        "context",
+        "--repo",
+        "r",
+        "--target",
+        "add",
+        "--in",
+        "pkg/calc.py",
+        "--kind",
+        "function",
+    ];
+    let cli_doc = cli_json(&h, &args);
+    let page = &cli_doc["knowledge"]["bindings"];
+    assert_eq!(page["status"], "linked", "{cli_doc}");
+    let bindings = page["bindings"].as_array().unwrap();
+    assert_eq!(bindings.len(), 1, "{cli_doc}");
+    assert_eq!(bindings[0]["record_id"], "doc-storage", "{cli_doc}");
+    assert_eq!(bindings[0]["freshness"], "fresh", "{cli_doc}");
+    assert_eq!(
+        bindings[0]["record_evidence"],
+        json!({"total": 1, "fresh": 1, "stale": 0, "unresolved": 0}),
+        "{cli_doc}"
+    );
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_context",
+        &json!({"repo":"r","target":"add","in":"pkg/calc.py","kind":"function"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(
+        doc(&result),
+        cli_doc,
+        "MCP and CLI context documents must match"
+    );
+    let (code, err) = s.finish();
+    assert_eq!(code, 0, "MCP disconnect: {err}");
+}
+
 // --- CP6: health composition -------------------------------------------------
 
 #[test]

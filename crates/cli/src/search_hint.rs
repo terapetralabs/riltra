@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Empty-result hint for symbol search: the shape of the query that matched
 //! no definition name, so the document can point at `query` or text search.
-// Task 3 removes this attribute when the CLI and MCP call into the module.
-#![cfg_attr(not(test), allow(dead_code))]
 
 /// The `empty` hint carried by an empty search document. Only `query_shape`
 /// varies; the other keys of the `empty` object are constants.
@@ -27,6 +25,18 @@ pub(crate) fn query_shape(query: &str) -> &'static str {
     }
 }
 
+/// The hint for a search that read a snapshot and found nothing: `None` for a
+/// blank query (nothing was searched) or when `total > 0` (a page past the end
+/// of real results is not an empty search).
+pub(crate) fn empty_hint(query: &str, total: usize) -> Option<EmptyHint> {
+    if query.trim().is_empty() || total > 0 {
+        return None;
+    }
+    Some(EmptyHint {
+        query_shape: query_shape(query),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +51,14 @@ mod tests {
         assert_eq!(query_shape("  matchPath  "), "identifier");
         assert_eq!(query_shape("$scope-id"), "identifier");
         assert_eq!(query_shape(""), "text");
+    }
+
+    #[test]
+    fn empty_hint_conditions() {
+        assert!(empty_hint("", 0).is_none());
+        assert!(empty_hint("  \t", 0).is_none());
+        assert!(empty_hint("x", 3).is_none());
+        assert_eq!(empty_hint("x", 0).unwrap().query_shape, "identifier");
+        assert_eq!(empty_hint("a b", 0).unwrap().query_shape, "text");
     }
 }

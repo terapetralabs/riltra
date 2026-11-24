@@ -584,6 +584,7 @@ fn cmd_search(
         None
     };
     let _ = tx.commit();
+    let empty = search_hint::empty_hint(symbol, total);
     *out = response::search_response_json(&response::SearchResponse {
         repo: name,
         root: &snapshot.root,
@@ -596,7 +597,7 @@ fn cmd_search(
         total,
         hits: &hits,
         occurrences: census.as_ref(),
-        empty: None,
+        empty: empty.as_ref(),
     }) + "\n";
     0
 }

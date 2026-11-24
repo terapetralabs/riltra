@@ -1152,6 +1152,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
             0,
             &[],
             None,
+            None,
         ),
         store::IndexRead::Outdated(version) => {
             tool_error("schema_outdated", &outdated_message(&input.repo, version))
@@ -1196,6 +1197,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                         0,
                         &[],
                         None,
+                        None,
                     );
                 }
             };
@@ -1227,6 +1229,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                 total,
                 &hits,
                 census.as_ref(),
+                crate::search_hint::empty_hint(&input.query, total).as_ref(),
             )
         }
     }
@@ -1298,6 +1301,7 @@ fn search_doc(
     total: usize,
     hits: &[store::Hit],
     occurrences: Option<&store::OccurrenceList>,
+    empty: Option<&crate::search_hint::EmptyHint>,
 ) -> CallToolResult {
     doc(&response::search_response_json(&response::SearchResponse {
         repo,
@@ -1311,7 +1315,7 @@ fn search_doc(
         total,
         hits,
         occurrences,
-        empty: None,
+        empty,
     }))
 }
 

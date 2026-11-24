@@ -475,7 +475,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_search",
-        description = "Search indexed symbols by name (same document as CLI `search`). A missing index reports `no-index` without creating storage. When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take.",
+        description = "Search indexed definitions by name (same document as CLI `search`): a prefix match, then a case-insensitive substring match, over definition names only. String literals, comments, error messages and names defined outside the repository (imports) are not searched: use `riltra_code_query` for a description in words and your text search (grep) for literal text. A zero result adds an `empty` object with the query shape and `next` (`query`, `text-search`). A missing index reports `no-index` without creating storage. When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take.",
         annotations(
             title = "Search indexed symbols",
             read_only_hint = true,
@@ -3281,6 +3281,28 @@ mod tests {
                 }
             }
             _ => {}
+        }
+    }
+
+    #[test]
+    fn code_search_description_names_its_scope() {
+        let tools = sorted_tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "riltra_code_search")
+            .expect("code search tool");
+        let description = tool.description.as_deref().expect("description");
+        for needle in [
+            "definition names",
+            "String literals",
+            "riltra_code_query",
+            "text search",
+            "empty",
+        ] {
+            assert!(
+                description.contains(needle),
+                "missing {needle}: {description}"
+            );
         }
     }
 

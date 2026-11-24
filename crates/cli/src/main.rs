@@ -70,7 +70,7 @@ pub(crate) const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} watch --repo <name> [--interval-ms <n>] [--debounce-ms <n>] [--max-wait-ms <n>] [--max-builds <n>]\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]\n  {NAME} query --repo <name> --text <text> [--limit <n>] [--expand]
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} watch --repo <name> [--interval-ms <n>] [--debounce-ms <n>] [--max-wait-ms <n>] [--max-builds <n>]\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences] (definition names only)\n  {NAME} query --repo <name> --text <text> [--limit <n>] [--expand]
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]

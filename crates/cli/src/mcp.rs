@@ -42,7 +42,8 @@ use crate::{
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct RepoStatusInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
 }
 
@@ -50,7 +51,8 @@ struct RepoStatusInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct OverviewInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
 }
 
@@ -58,7 +60,8 @@ struct OverviewInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct MapInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Directory depth of each area, 1 to 4 (default 2), the CLI's `--depth`.
     depth: Option<usize>,
@@ -68,7 +71,8 @@ struct MapInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct CodeSearchInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Symbol text to search for (the CLI's `search <repo> <symbol>` argument).
     query: String,
@@ -86,7 +90,8 @@ struct CodeSearchInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct QueryInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Free text. Its words become the query terms: lowercase words of at least 3 characters, words made only of numeric characters (any script) dropped, at most 64.
     text: String,
@@ -100,7 +105,8 @@ struct QueryInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct EdgeInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Repository-relative path of the anchor position (required unless `target` is given).
     path: Option<String>,
@@ -127,7 +133,8 @@ struct EdgeInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct TraceInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Repository-relative path of the anchor position (required unless `target` is given).
     path: Option<String>,
@@ -158,7 +165,8 @@ struct TraceInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct ImpactInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Repository-relative path of the anchor position (required unless `target` is given).
     path: Option<String>,
@@ -194,7 +202,8 @@ struct ImpactInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct ContextInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Repository-relative path of the anchor position (required unless `target` is given).
     path: Option<String>,
@@ -241,7 +250,8 @@ impl JsonSchema for PacketInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct PacketParams {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// One to five explicitly selected position or name anchors.
     anchors: Vec<PacketSelector>,
@@ -285,7 +295,8 @@ impl From<PacketSelector> for packet::AnchorInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct KnowledgeSearchInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Literal text searched in titles and bodies (CLI
     /// `knowledge search --query`). Text or path is required.
@@ -317,7 +328,8 @@ struct KnowledgeSearchInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct KnowledgeShowInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Record id to read.
     id: String,
@@ -329,7 +341,8 @@ struct KnowledgeShowInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct KnowledgeRelatedInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Record id whose relations are read.
     id: String,
@@ -353,7 +366,8 @@ struct KnowledgeRelatedInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct KnowledgeAtInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Repository-relative path containing the anchor.
     path: String,
@@ -389,7 +403,8 @@ enum Operation {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct SemanticInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Repository-relative path of the anchor position.
     path: String,
@@ -409,7 +424,7 @@ struct RiltraMcp;
 impl RiltraMcp {
     #[tool(
         name = "riltra_repo_list",
-        description = "List registered repositories (same document as CLI `repo list`). When to call: first, to learn the `repo` name that every other tool takes.",
+        description = "List registered repositories (same document as CLI `repo list`). When to call: when more than one repository is registered, to learn the `repo` name the other tools need; with one repository, `repo` may be omitted.",
         annotations(
             title = "List registered repositories",
             read_only_hint = true,
@@ -439,7 +454,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<RepoStatusInput>,
     ) -> CallToolResult {
-        blocking(move || repo_status_doc(&input)).await
+        with_repo(input, move |input| repo_status_doc(&input)).await
     }
 
     #[tool(
@@ -456,7 +471,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<OverviewInput>,
     ) -> CallToolResult {
-        blocking(move || project_overview_doc(&input)).await
+        with_repo(input, move |input| project_overview_doc(&input)).await
     }
 
     #[tool(
@@ -470,7 +485,7 @@ impl RiltraMcp {
         )
     )]
     async fn riltra_project_map(&self, Parameters(input): Parameters<MapInput>) -> CallToolResult {
-        blocking(move || project_map_doc(&input)).await
+        with_repo(input, move |input| project_map_doc(&input)).await
     }
 
     #[tool(
@@ -487,7 +502,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<CodeSearchInput>,
     ) -> CallToolResult {
-        blocking(move || code_search_doc(&input)).await
+        with_repo(input, move |input| code_search_doc(&input)).await
     }
 
     #[tool(
@@ -501,7 +516,7 @@ impl RiltraMcp {
         )
     )]
     async fn riltra_code_query(&self, Parameters(input): Parameters<QueryInput>) -> CallToolResult {
-        blocking(move || query_doc(&input)).await
+        with_repo(input, move |input| query_doc(&input)).await
     }
 
     #[tool(
@@ -518,7 +533,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<EdgeInput>,
     ) -> CallToolResult {
-        blocking(move || edge_doc(&input, GraphMode::Callers)).await
+        with_repo(input, move |input| edge_doc(&input, GraphMode::Callers)).await
     }
 
     #[tool(
@@ -535,7 +550,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<ChangesInput>,
     ) -> CallToolResult {
-        blocking(move || changes_doc(&input)).await
+        with_repo(input, move |input| changes_doc(&input)).await
     }
 
     #[tool(
@@ -552,7 +567,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<ChecksInput>,
     ) -> CallToolResult {
-        blocking(move || checks_doc(&input)).await
+        with_repo(input, move |input| checks_doc(&input)).await
     }
 
     #[tool(
@@ -569,7 +584,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<DocsScanInput>,
     ) -> CallToolResult {
-        blocking(move || docs_scan_doc(&input)).await
+        with_repo(input, move |input| docs_scan_doc(&input)).await
     }
 
     #[tool(
@@ -586,7 +601,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<EdgeInput>,
     ) -> CallToolResult {
-        blocking(move || edge_doc(&input, GraphMode::Callees)).await
+        with_repo(input, move |input| edge_doc(&input, GraphMode::Callees)).await
     }
 
     #[tool(
@@ -600,7 +615,7 @@ impl RiltraMcp {
         )
     )]
     async fn riltra_code_trace(&self, Parameters(input): Parameters<TraceInput>) -> CallToolResult {
-        blocking(move || trace_doc(&input)).await
+        with_repo(input, move |input| trace_doc(&input)).await
     }
 
     #[tool(
@@ -617,7 +632,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<ImpactInput>,
     ) -> CallToolResult {
-        blocking(move || impact_doc(&input)).await
+        with_repo(input, move |input| impact_doc(&input)).await
     }
 
     #[tool(
@@ -631,7 +646,7 @@ impl RiltraMcp {
         )
     )]
     async fn riltra_context(&self, Parameters(input): Parameters<ContextInput>) -> CallToolResult {
-        blocking(move || context_doc(&input)).await
+        with_repo(input, move |input| context_doc(&input)).await
     }
 
     #[tool(
@@ -665,7 +680,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<KnowledgeSearchInput>,
     ) -> CallToolResult {
-        blocking(move || knowledge_search_doc(&input)).await
+        with_repo(input, move |input| knowledge_search_doc(&input)).await
     }
 
     #[tool(
@@ -682,7 +697,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<KnowledgeShowInput>,
     ) -> CallToolResult {
-        blocking(move || knowledge_show_doc(&input)).await
+        with_repo(input, move |input| knowledge_show_doc(&input)).await
     }
 
     #[tool(
@@ -699,7 +714,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<KnowledgeRelatedInput>,
     ) -> CallToolResult {
-        blocking(move || knowledge_related_doc(&input)).await
+        with_repo(input, move |input| knowledge_related_doc(&input)).await
     }
 
     #[tool(
@@ -716,7 +731,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<KnowledgeAtInput>,
     ) -> CallToolResult {
-        blocking(move || knowledge_at_doc(&input)).await
+        with_repo(input, move |input| knowledge_at_doc(&input)).await
     }
 
     #[tool(
@@ -734,7 +749,7 @@ impl RiltraMcp {
         &self,
         Parameters(input): Parameters<SemanticInput>,
     ) -> CallToolResult {
-        blocking(move || semantic_doc(&input)).await
+        with_repo(input, move |input| semantic_doc(&input)).await
     }
 
     #[tool(
@@ -806,6 +821,72 @@ fn sorted_schema(schema: &rmcp::model::JsonObject) -> rmcp::model::JsonObject {
         serde_json::Value::Object(schema) => schema,
         _ => unreachable!("JSON schema root is an object"),
     }
+}
+
+/// Input structs whose `repo` may be omitted (see `repo_default`).
+trait HasRepo {
+    fn repo_mut(&mut self) -> &mut String;
+}
+
+macro_rules! has_repo {
+    ($($ty:ty),* $(,)?) => {
+        $(impl HasRepo for $ty {
+            fn repo_mut(&mut self) -> &mut String {
+                &mut self.repo
+            }
+        })*
+    };
+}
+
+has_repo!(
+    RepoStatusInput,
+    OverviewInput,
+    MapInput,
+    CodeSearchInput,
+    QueryInput,
+    EdgeInput,
+    TraceInput,
+    ImpactInput,
+    ContextInput,
+    KnowledgeSearchInput,
+    KnowledgeShowInput,
+    KnowledgeRelatedInput,
+    KnowledgeAtInput,
+    SemanticInput,
+    ChangesInput,
+    ChecksInput,
+    DocsScanInput,
+);
+
+/// Fill an empty `repo` from the registry. A named `repo` is left as it is
+/// and causes no file-system access, so a named call keeps its error order.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
+fn fill_repo(registry_file: &Path, repo: &mut String) -> Result<(), CallToolResult> {
+    if !repo.is_empty() {
+        return Ok(());
+    }
+    let reg = registry::load(registry_file).map_err(|e| tool_error("store_error", &e))?;
+    match crate::repo_default::resolve(&reg, repo) {
+        Ok(Some(name)) => {
+            *repo = name;
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err((kind, message)) => Err(tool_error(kind, &message)),
+    }
+}
+
+async fn with_repo<T: HasRepo + Send + 'static>(
+    mut input: T,
+    f: impl FnOnce(T) -> CallToolResult + Send + 'static,
+) -> CallToolResult {
+    blocking(
+        move || match fill_repo(&paths::registry_path(), input.repo_mut()) {
+            Ok(()) => f(input),
+            Err(e) => e,
+        },
+    )
+    .await
 }
 
 /// Run synchronous domain work on the blocking pool. Where panics unwind
@@ -1023,7 +1104,8 @@ fn index_status_doc(
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct ChangesInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// `unstaged` (index to worktree), `staged` (HEAD to index), `all` (HEAD to worktree) or `compare` (`base` to worktree). Default `all`.
     scope: Option<String>,
@@ -1058,7 +1140,8 @@ fn changes_doc(input: &ChangesInput) -> CallToolResult {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct ChecksInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// `unstaged` (index to worktree), `staged` (HEAD to index), `all` (HEAD to worktree) or `compare` (`base` to worktree). Default `all`.
     scope: Option<String>,
@@ -1072,7 +1155,8 @@ struct ChecksInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct DocsScanInput {
-    /// Registered repository name.
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
     repo: String,
     /// Repository-relative Markdown paths to scan (CLI `--path`, repeatable). Omit to scan every Markdown document in the repository.
     paths: Option<Vec<String>>,
@@ -1797,7 +1881,7 @@ fn packet_doc(input: PacketInput) -> CallToolResult {
 }
 
 fn packet_doc_with_home(input: PacketInput, config_home: &Path) -> CallToolResult {
-    let input: PacketParams = match serde_json::from_value(input.0) {
+    let mut input: PacketParams = match serde_json::from_value(input.0) {
         Ok(input) => input,
         Err(e) => return tool_error("invalid_input", &format!("invalid packet input: {e}")),
     };
@@ -1809,6 +1893,9 @@ fn packet_doc_with_home(input: PacketInput, config_home: &Path) -> CallToolResul
     };
     if let Err(e) = packet::validate_request(&request) {
         return tool_error("invalid_input", &e);
+    }
+    if let Err(e) = fill_repo(&config_home.join("registry.json"), &mut input.repo) {
+        return e;
     }
     let (home, root) = match repo_root_at(config_home, &input.repo) {
         Ok(value) => value,

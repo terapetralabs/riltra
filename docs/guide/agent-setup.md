@@ -70,7 +70,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 
 | You want to know | Call | Notes |
 |---|---|---|
-| Is Riltra working, and which repositories are registered? | `riltra_health`, `riltra_repo_list` | Read-only; they create and open no storage. |
+| Is Riltra working, and which repositories are registered? | `riltra_health`, `riltra_repo_list` | Read-only; they create and open no storage. With exactly one repository registered, every other tool may omit `repo`; with several, a call without it answers `invalid_input` and names them. |
 | Is this repository indexed, and is the index current? | `riltra_repo_status` | Includes `index_status`. A missing index answers `no-index`; nothing is created. |
 | Where do I start in this project? | `riltra_project_overview` | Read-only summary from index and document evidence. Entry points are candidates, not proof of a runtime flow. |
 | Which areas does the project have, and how are they linked? | `riltra_project_map` | Directory areas, proven links and bounded static flows. Areas are navigation hints, not architecture boundaries. |

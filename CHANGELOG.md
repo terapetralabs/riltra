@@ -4,6 +4,14 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- MCP tools: `repo` is optional when exactly one repository is registered. A call that omits
+  `repo` or passes an empty string uses that repository; with none registered it answers
+  `not_registered`, with several it answers `invalid_input` naming them, and an unreadable
+  registry answers `store_error`. A call with a non-empty `repo` behaves as before and does not
+  read the registry first. The CLI still requires `--repo`.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

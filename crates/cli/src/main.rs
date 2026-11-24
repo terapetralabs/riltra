@@ -44,6 +44,7 @@ mod paths;
 mod progress;
 mod provider_setup;
 mod registry;
+mod repo_default;
 mod response;
 mod scan;
 mod scip;

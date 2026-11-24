@@ -5,7 +5,6 @@
 //! or several is an error that says what to do. A named `repo` is returned
 //! untouched, so a wrong name still meets the existing `unknown repository`
 //! path.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::registry::Registry;
 

@@ -419,7 +419,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
         .map(|v| v.as_str().expect("required field"))
         .collect();
     packet_required.sort_unstable();
-    assert_eq!(packet_required, ["anchors", "repo"]);
+    assert_eq!(packet_required, ["anchors"]);
     assert_eq!(
         packet_schema["properties"]["anchors"]["items"]["additionalProperties"], false,
         "{packet_schema}"
@@ -446,14 +446,17 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
     );
     assert_eq!(
         semantic_schema["required"],
-        json!(["repo", "path", "line", "col", "operation"])
+        json!(["path", "line", "col", "operation"])
     );
     let overview_schema = &find("riltra_project_overview")["inputSchema"];
-    assert_eq!(overview_schema["required"], json!(["repo"]));
+    assert!(
+        required_names(overview_schema).is_empty(),
+        "{overview_schema}"
+    );
     assert_eq!(overview_schema["additionalProperties"], false);
     assert!(overview_schema["properties"]["repo"].is_object());
     let status_schema = &find("riltra_repo_status")["inputSchema"];
-    assert_eq!(status_schema["required"], json!(["repo"]));
+    assert!(required_names(status_schema).is_empty(), "{status_schema}");
     assert!(status_schema["properties"]["repo"].is_object());
     let search_schema = &find("riltra_code_search")["inputSchema"];
     let required: Vec<&str> = search_schema["required"]
@@ -462,7 +465,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert!(required.contains(&"repo") && required.contains(&"query"));
+    assert!(!required.contains(&"repo") && required.contains(&"query"));
     assert!(
         !required.contains(&"occurrences"),
         "the opt-in property must stay optional: {search_schema}"
@@ -485,14 +488,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
         "riltra_code_impact",
     ] {
         let schema = &find(tool)["inputSchema"];
-        let mut required: Vec<&str> = schema["required"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{tool}: required array: {schema}"))
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        required.sort_unstable();
-        assert_eq!(required, ["repo"], "{tool}: {schema}");
+        assert!(required_names(schema).is_empty(), "{tool}: {schema}");
         let mut keys: Vec<&str> = schema["properties"]
             .as_object()
             .unwrap_or_else(|| panic!("{tool}: properties: {schema}"))
@@ -528,14 +524,10 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
         assert_eq!(schema["additionalProperties"], false, "{tool}: {schema}");
     }
     let context_schema = &find("riltra_context")["inputSchema"];
-    let mut context_required: Vec<&str> = context_schema["required"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect();
-    context_required.sort_unstable();
-    assert_eq!(context_required, ["repo"]);
+    assert!(
+        required_names(context_schema).is_empty(),
+        "{context_schema}"
+    );
     let mut context_fields: Vec<&str> = context_schema["properties"]
         .as_object()
         .unwrap()
@@ -566,14 +558,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
     // path), show/related require repo+id; show takes no generation, related
     // defaults direction to outbound; unknown parameters are rejected.
     let search_schema = &find("riltra_knowledge_search")["inputSchema"];
-    let mut required: Vec<&str> = search_schema["required"]
-        .as_array()
-        .unwrap_or_else(|| panic!("knowledge_search: required array: {search_schema}"))
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    required.sort_unstable();
-    assert_eq!(required, ["repo"], "{search_schema}");
+    assert!(required_names(search_schema).is_empty(), "{search_schema}");
     let mut keys: Vec<&str> = search_schema["properties"]
         .as_object()
         .unwrap()
@@ -614,7 +599,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
         .map(|v| v.as_str().unwrap())
         .collect();
     required.sort_unstable();
-    assert_eq!(required, ["id", "repo"], "{show_schema}");
+    assert_eq!(required, ["id"], "{show_schema}");
     let mut keys: Vec<&str> = show_schema["properties"]
         .as_object()
         .unwrap()
@@ -632,7 +617,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
         .map(|v| v.as_str().unwrap())
         .collect();
     required.sort_unstable();
-    assert_eq!(required, ["id", "repo"], "{related_schema}");
+    assert_eq!(required, ["id"], "{related_schema}");
     let mut keys: Vec<&str> = related_schema["properties"]
         .as_object()
         .unwrap()
@@ -666,7 +651,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
         .map(|value| value.as_str().unwrap())
         .collect();
     at_required.sort_unstable();
-    assert_eq!(at_required, ["col", "line", "path", "repo"], "{at_schema}");
+    assert_eq!(at_required, ["col", "line", "path"], "{at_schema}");
     assert_eq!(at_schema["additionalProperties"], false, "{at_schema}");
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
@@ -1589,6 +1574,16 @@ fn modern_overview(s: &mut Session, id: i64, repo: &str) -> Value {
         "tools/call",
         json!({"name":"riltra_project_overview", "arguments":{"repo":repo}}),
     )
+}
+
+/// A schema's `required` names, sorted; empty when the array is absent.
+fn required_names(schema: &Value) -> Vec<&str> {
+    let mut names: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|a| a.iter().map(|v| v.as_str().unwrap()).collect())
+        .unwrap_or_default();
+    names.sort_unstable();
+    names
 }
 
 fn is_error(result: &Value) -> bool {
@@ -7666,7 +7661,7 @@ fn code_query_is_read_only_and_its_schema_takes_repo_text_and_limit() {
         .collect();
     names.sort_unstable();
     assert_eq!(names, ["expand", "limit", "repo", "text"], "{schema}");
-    assert_eq!(schema["required"], json!(["repo", "text"]), "{schema}");
+    assert_eq!(schema["required"], json!(["text"]), "{schema}");
     assert_eq!(schema["additionalProperties"], false, "{schema}");
     let description = tool["description"].as_str().unwrap();
     assert!(description.contains("When to call"), "{description}");
@@ -8167,4 +8162,235 @@ fn mcp_project_map_no_index_creates_nothing() {
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
     std::fs::write(&db, b"").unwrap();
     assert_ne!(listing(&h), before, "the planted control must be detected");
+}
+
+// Optional `repo` (plan 2026-11-25-mcp-optional-repo): an omitted name is
+// filled from a single registered repository; several are an error that
+// names them; a named repo adds no registry read.
+
+/// Valid non-`repo` arguments for every tool that takes `repo`.
+const TOOL_ARGS: [(&str, &str); 19] = [
+    ("riltra_repo_status", "{}"),
+    ("riltra_project_overview", "{}"),
+    ("riltra_project_map", "{}"),
+    ("riltra_code_changes", "{}"),
+    ("riltra_change_checks", "{}"),
+    ("riltra_docs_scan", "{}"),
+    ("riltra_code_callers", "{}"),
+    ("riltra_code_callees", "{}"),
+    ("riltra_code_trace", "{}"),
+    ("riltra_code_impact", "{}"),
+    ("riltra_context", "{}"),
+    ("riltra_knowledge_search", "{}"),
+    ("riltra_code_search", r#"{"query":"alpha"}"#),
+    ("riltra_code_query", r#"{"text":"alpha"}"#),
+    ("riltra_code_packet", r#"{"anchors":[{"target":"alpha"}]}"#),
+    (
+        "riltra_code_semantic",
+        r#"{"path":"lib.rs","line":1,"col":1,"operation":"definition"}"#,
+    ),
+    (
+        "riltra_knowledge_at_anchor",
+        r#"{"path":"lib.rs","line":1,"col":1}"#,
+    ),
+    ("riltra_knowledge_show", r#"{"id":"x"}"#),
+    ("riltra_knowledge_related", r#"{"id":"x"}"#),
+];
+
+fn tool_args(json_text: &str, repo: Option<&str>) -> Value {
+    let mut v: Value = serde_json::from_str(json_text).unwrap();
+    if let Some(repo) = repo {
+        v["repo"] = json!(repo);
+    }
+    v
+}
+
+fn write_alpha(dir: &Path) {
+    std::fs::write(dir.join("lib.rs"), "pub fn alpha() -> u32 {\n    1\n}\n").unwrap();
+}
+
+fn tools_with_repo(s: &mut Session, id: i64) -> Vec<String> {
+    s.send(&json!({"jsonrpc":"2.0","id":id,"method":"tools/list","params":{}}).to_string());
+    let v = s.recv();
+    let mut names: Vec<String> = v["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter(|t| t["inputSchema"]["properties"].get("repo").is_some())
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// The comparable part of a tool result: error flag and document.
+fn outcome(result: &Value) -> (bool, Value) {
+    let body = match result.get("structuredContent") {
+        Some(v) if !v.is_null() => v.clone(),
+        _ => result["content"].clone(),
+    };
+    (is_error(result), body)
+}
+
+fn two_repo_home(tag: &str) -> PathBuf {
+    let h = home(tag);
+    for name in ["a", "b"] {
+        let r = home(&format!("{tag}-{name}"));
+        write_alpha(&r);
+        init_repo(&h, &r, name);
+    }
+    h
+}
+
+#[test]
+fn omitted_repo_matches_named_repo() {
+    let h = home("optrepo-one");
+    let r = home("optrepo-one-repo");
+    write_alpha(&r);
+    indexed_repo(&h, &r, "solo");
+    let mut s = ready(&h);
+    let omitted = call_tool(&mut s, 2, "riltra_code_search", &json!({"query":"alpha"}));
+    let named = call_tool(
+        &mut s,
+        3,
+        "riltra_code_search",
+        &json!({"repo":"solo","query":"alpha"}),
+    );
+    assert!(!is_error(&omitted), "{omitted}");
+    assert_eq!(doc(&omitted), doc(&named));
+    assert_eq!(doc(&omitted)["total"], 1);
+    let omitted = call_tool(&mut s, 4, "riltra_repo_status", &json!({}));
+    let named = call_tool(&mut s, 5, "riltra_repo_status", &json!({"repo":"solo"}));
+    assert!(!is_error(&omitted), "{omitted}");
+    assert_eq!(doc(&omitted), doc(&named));
+}
+
+#[test]
+fn omitted_repo_with_two_registered_names_both() {
+    let h = two_repo_home("optrepo-two");
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_code_search", &json!({"query":"x"}));
+    assert!(is_error(&result), "{result}");
+    let d = doc(&result);
+    assert_eq!(d["kind"], "invalid_input", "{d}");
+    assert!(
+        d["message"].as_str().unwrap().contains("registered: a, b"),
+        "{d}"
+    );
+}
+
+#[test]
+fn named_repo_with_two_registered_is_unchanged() {
+    let h = two_repo_home("optrepo-named");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_search",
+        &json!({"repo":"b","query":"x"}),
+    );
+    assert!(!is_error(&result), "{result}");
+}
+
+#[test]
+fn omitted_repo_without_registry_creates_nothing() {
+    let h = home("optrepo-none");
+    let mut s = ready(&h);
+    let result = call_tool(&mut s, 2, "riltra_code_search", &json!({"query":"x"}));
+    assert!(is_error(&result), "{result}");
+    assert_eq!(
+        doc(&result),
+        json!({"kind": "not_registered", "message": "no repository is registered"})
+    );
+    drop(s);
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn omitted_repo_every_tool_one_registered() {
+    let h = home("optrepo-all-one");
+    let r = home("optrepo-all-one-repo");
+    write_alpha(&r);
+    indexed_repo(&h, &r, "solo");
+    let mut s = ready(&h);
+    let mut table: Vec<String> = TOOL_ARGS.iter().map(|(n, _)| n.to_string()).collect();
+    table.sort_unstable();
+    assert_eq!(
+        tools_with_repo(&mut s, 2),
+        table,
+        "TOOL_ARGS must cover every repo tool"
+    );
+    let mut id = 10;
+    for (tool, args) in TOOL_ARGS {
+        let omitted = call_tool(&mut s, id, tool, &tool_args(args, None));
+        let named = call_tool(&mut s, id + 1, tool, &tool_args(args, Some("solo")));
+        id += 2;
+        assert!(
+            !omitted.to_string().contains("unknown repository: ''"),
+            "{tool} was not wired: {omitted}"
+        );
+        assert_eq!(outcome(&omitted), outcome(&named), "{tool}");
+    }
+}
+
+#[test]
+fn omitted_repo_every_tool_two_registered() {
+    let h = two_repo_home("optrepo-all-two");
+    let mut s = ready(&h);
+    for (id, (tool, args)) in (10..).zip(TOOL_ARGS) {
+        let result = call_tool(&mut s, id, tool, &tool_args(args, None));
+        assert!(is_error(&result), "{tool}: {result}");
+        let d = doc(&result);
+        assert_eq!(d["kind"], "invalid_input", "{tool}: {d}");
+        assert!(
+            d["message"].as_str().unwrap().contains("registered: a, b"),
+            "{tool}: {d}"
+        );
+    }
+}
+
+#[test]
+fn named_repo_keeps_validation_order_with_corrupt_registry() {
+    let h = home("optrepo-corrupt");
+    std::fs::write(h.join("registry.json"), "not json").unwrap();
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_search",
+        &json!({"repo":"r","query":"x","limit":1001}),
+    );
+    assert_eq!(
+        doc(&result),
+        json!({"kind": "invalid_input", "message": "--limit exceeds maximum 1000"})
+    );
+}
+
+#[test]
+fn repo_is_optional_and_documented_in_every_schema() {
+    let h = home("optrepo-schema");
+    let mut s = ready(&h);
+    s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    let v = s.recv();
+    let mut seen = 0;
+    for tool in v["result"]["tools"].as_array().unwrap() {
+        let schema = &tool["inputSchema"];
+        let Some(repo) = schema["properties"].get("repo") else {
+            continue;
+        };
+        seen += 1;
+        assert!(
+            !required_names(schema).contains(&"repo"),
+            "{}: {schema}",
+            tool["name"]
+        );
+        assert_eq!(
+            repo["description"],
+            "Registered repository name. Optional when exactly one repository is registered.",
+            "{}",
+            tool["name"]
+        );
+        assert_eq!(schema["additionalProperties"], false, "{}", tool["name"]);
+    }
+    assert_eq!(seen, 19);
 }

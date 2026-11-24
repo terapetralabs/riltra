@@ -8324,12 +8324,14 @@ fn omitted_repo_every_tool_one_registered() {
     for (tool, args) in TOOL_ARGS {
         let omitted = call_tool(&mut s, id, tool, &tool_args(args, None));
         let named = call_tool(&mut s, id + 1, tool, &tool_args(args, Some("solo")));
-        id += 2;
+        let empty = call_tool(&mut s, id + 2, tool, &tool_args(args, Some("")));
+        id += 3;
         assert!(
             !omitted.to_string().contains("unknown repository: ''"),
             "{tool} was not wired: {omitted}"
         );
         assert_eq!(outcome(&omitted), outcome(&named), "{tool}");
+        assert_eq!(outcome(&empty), outcome(&named), "{tool}: empty repo");
     }
 }
 
@@ -8338,14 +8340,17 @@ fn omitted_repo_every_tool_two_registered() {
     let h = two_repo_home("optrepo-all-two");
     let mut s = ready(&h);
     for (id, (tool, args)) in (10..).zip(TOOL_ARGS) {
-        let result = call_tool(&mut s, id, tool, &tool_args(args, None));
-        assert!(is_error(&result), "{tool}: {result}");
-        let d = doc(&result);
-        assert_eq!(d["kind"], "invalid_input", "{tool}: {d}");
-        assert!(
-            d["message"].as_str().unwrap().contains("registered: a, b"),
-            "{tool}: {d}"
-        );
+        let omitted = call_tool(&mut s, 2 * id, tool, &tool_args(args, None));
+        let empty = call_tool(&mut s, 2 * id + 1, tool, &tool_args(args, Some("")));
+        for result in [&omitted, &empty] {
+            assert!(is_error(result), "{tool}: {result}");
+            let d = doc(result);
+            assert_eq!(d["kind"], "invalid_input", "{tool}: {d}");
+            assert!(
+                d["message"].as_str().unwrap().contains("registered: a, b"),
+                "{tool}: {d}"
+            );
+        }
     }
 }
 
@@ -8363,6 +8368,25 @@ fn named_repo_keeps_validation_order_with_corrupt_registry() {
     assert_eq!(
         doc(&result),
         json!({"kind": "invalid_input", "message": "--limit exceeds maximum 1000"})
+    );
+}
+
+#[test]
+fn omitted_repo_with_corrupt_registry_is_store_error() {
+    let h = home("optrepo-corrupt-omitted");
+    std::fs::write(h.join("registry.json"), "not json").unwrap();
+    let mut s = ready(&h);
+    for (id, args) in [
+        (2, json!({"query":"x"})),
+        (3, json!({"repo":"","query":"x"})),
+    ] {
+        let result = call_tool(&mut s, id, "riltra_code_search", &args);
+        assert!(is_error(&result), "{result}");
+        assert_eq!(doc(&result)["kind"], "store_error", "{result}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(h.join("registry.json")).unwrap(),
+        "not json"
     );
 }
 

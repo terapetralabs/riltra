@@ -823,10 +823,6 @@ fn sorted_schema(schema: &rmcp::model::JsonObject) -> rmcp::model::JsonObject {
     }
 }
 
-/// Run synchronous domain work on the blocking pool. Where panics unwind
-/// (debug and test builds), a panicked task is a classified `store_error`. The
-/// release profile sets `panic = "abort"`, so in a release binary a panic ends
-/// the process before any join error exists.
 /// Input structs whose `repo` may be omitted (see `repo_default`).
 trait HasRepo {
     fn repo_mut(&mut self) -> &mut String;
@@ -893,6 +889,10 @@ async fn with_repo<T: HasRepo + Send + 'static>(
     .await
 }
 
+/// Run synchronous domain work on the blocking pool. Where panics unwind
+/// (debug and test builds), a panicked task is a classified `store_error`. The
+/// release profile sets `panic = "abort"`, so in a release binary a panic ends
+/// the process before any join error exists.
 async fn blocking(f: impl FnOnce() -> CallToolResult + Send + 'static) -> CallToolResult {
     match tokio::task::spawn_blocking(f).await {
         Ok(result) => result,

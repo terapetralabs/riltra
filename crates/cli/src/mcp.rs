@@ -1311,6 +1311,7 @@ fn search_doc(
         total,
         hits,
         occurrences,
+        empty: None,
     }))
 }
 

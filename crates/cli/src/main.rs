@@ -48,6 +48,7 @@ mod response;
 mod scan;
 mod scip;
 mod scip_proto;
+mod search_hint;
 mod semantic;
 mod start;
 mod store;
@@ -515,6 +516,7 @@ fn cmd_search(
             total: 0,
             hits: &[],
             occurrences: None,
+            empty: None,
         }) + "\n";
         return 0;
     }
@@ -557,6 +559,7 @@ fn cmd_search(
                 total: 0,
                 hits: &[],
                 occurrences: None,
+                empty: None,
             }) + "\n";
             return 0;
         }
@@ -593,6 +596,7 @@ fn cmd_search(
         total,
         hits: &hits,
         occurrences: census.as_ref(),
+        empty: None,
     }) + "\n";
     0
 }

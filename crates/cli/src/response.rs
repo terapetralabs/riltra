@@ -52,6 +52,8 @@ pub(crate) struct SearchResponse<'a> {
     /// The opt-in occurrence census (`--occurrences`); `None` leaves the
     /// document byte-identical to a search without the flag.
     pub occurrences: Option<&'a store::OccurrenceList>,
+    /// The empty-result hint; `None` leaves the document unchanged.
+    pub empty: Option<&'a crate::search_hint::EmptyHint>,
 }
 
 fn occurrence_item_json(hit: &store::OccurrenceHit) -> String {
@@ -122,8 +124,17 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
             )
         })
         .unwrap_or_default();
+    let empty = response
+        .empty
+        .map(|hint| {
+            format!(
+                ",\"empty\":{{\"searched\":\"definition-names\",\"match\":\"prefix-or-substring\",\"query_shape\":\"{}\",\"next\":[\"query\",\"text-search\"]}}",
+                hint.query_shape
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":{},\"results\":[{}],\"truncated\":{}{}}}",
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":{},\"results\":[{}],\"truncated\":{}{}{}}}",
         json::escape(response.repo),
         json::escape(response.root),
         match response.snapshot {
@@ -138,7 +149,8 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
         response.total,
         results.join(","),
         truncated,
-        occurrences
+        occurrences,
+        empty
     )
 }
 
@@ -2850,6 +2862,7 @@ mod tests {
             total: 0,
             hits: &[],
             occurrences: None,
+            empty: None,
         });
         assert_eq!(
             text,
@@ -2872,6 +2885,7 @@ mod tests {
             total: 0,
             hits: &[],
             occurrences: None,
+            empty: None,
         });
         assert_eq!(
             text,
@@ -2895,6 +2909,7 @@ mod tests {
             total: 2,
             hits: &hits,
             occurrences: None,
+            empty: None,
         });
         assert_eq!(
             text,
@@ -2918,6 +2933,7 @@ mod tests {
             total: 2,
             hits: &hits,
             occurrences: None,
+            empty: None,
         });
         assert_eq!(
             text,
@@ -2958,11 +2974,83 @@ mod tests {
             total: 0,
             hits: &[],
             occurrences: Some(&list),
+            empty: None,
         });
         assert_eq!(
             text,
             r#"{"repo":"demo","root":"C:\\repo","snapshot":{"id":7,"created_unix":100,"head":"abc","branch":null,"dirty":false,"status_at_write":"fresh","nonce":"n"},"freshness":"fresh","reasons":[],"query":{"symbol":"b","limit":1,"offset":0},"total":0,"results":[],"truncated":false,"occurrences":{"scope":"repository-wide-exact-name","binding":"unbound","field_declarations":1,"symbol_declarations":2,"total":3,"truncated":true,"items":[{"path":"use.cc","role":"macro-argument","confidence":"candidate","span":{"start_line":4,"start_col":9,"end_line":4,"end_col":12},"bytes":[40,43],"provenance":{"provider":"syntax","grammar":"cpp:0.23.4","language":"cpp"}}]}}"#
         );
+    }
+
+    fn empty_hint_response<'a>(
+        symbol: &'a str,
+        occurrences: Option<&'a store::OccurrenceList>,
+        empty: Option<&'a crate::search_hint::EmptyHint>,
+    ) -> String {
+        search_response_json(&SearchResponse {
+            repo: "demo",
+            root: "demo-root",
+            snapshot: None,
+            freshness: "unknown",
+            reasons: &["no-index".to_string()],
+            symbol,
+            limit: 50,
+            offset: 0,
+            total: 0,
+            hits: &[],
+            occurrences,
+            empty,
+        })
+    }
+
+    #[test]
+    fn search_empty_hint_shape_is_byte_stable() {
+        let hint = crate::search_hint::EmptyHint {
+            query_shape: "text",
+        };
+        let text = empty_hint_response("Expected component", None, Some(&hint));
+        assert_eq!(
+            text,
+            r#"{"repo":"demo","root":"demo-root","snapshot":null,"freshness":"unknown","reasons":["no-index"],"query":{"symbol":"Expected component","limit":50,"offset":0},"total":0,"results":[],"truncated":false,"empty":{"searched":"definition-names","match":"prefix-or-substring","query_shape":"text","next":["query","text-search"]}}"#
+        );
+    }
+
+    #[test]
+    fn search_empty_hint_follows_occurrences() {
+        let list = store::OccurrenceList {
+            field_declarations: 0,
+            symbol_declarations: 0,
+            total: 0,
+            items: vec![],
+        };
+        let hint = crate::search_hint::EmptyHint {
+            query_shape: "identifier",
+        };
+        let text = empty_hint_response("b", Some(&list), Some(&hint));
+        let occ = text
+            .find(",\"occurrences\":{")
+            .expect("occurrences present");
+        let empty = text.find(",\"empty\":{").expect("empty present");
+        assert!(occ < empty, "{text}");
+        assert!(text.ends_with(
+            r#","empty":{"searched":"definition-names","match":"prefix-or-substring","query_shape":"identifier","next":["query","text-search"]}}"#
+        ));
+        assert!(
+            text.contains(r#""truncated":false,"occurrences":{"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn search_empty_hint_escapes() {
+        let hint = crate::search_hint::EmptyHint {
+            query_shape: "text",
+        };
+        let text = empty_hint_response("tar\"get\\x", None, Some(&hint));
+        assert!(text.contains(r#""symbol":"tar\"get\\x""#), "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(value["query"]["symbol"], "tar\"get\\x");
+        assert_eq!(value["empty"]["query_shape"], "text");
     }
 
     #[test]

@@ -2317,6 +2317,7 @@ fn t3_code_search_matches_cli_including_paging_and_escaping() {
         cli_json(&h, &["search", "--repo", "r", "--symbol", "zzz_absent"])
     );
     assert_eq!(none["total"], 0);
+    assert_eq!(none["empty"]["query_shape"], "identifier");
     // Quote/backslash escaping parity of the echoed query.
     let escaped = "a\"b\\c";
     let esc = doc(&call_tool(
@@ -2418,6 +2419,125 @@ fn t3_code_search_missing_index_matches_cli_without_creating_storage() {
         before,
         "missing index must not create a database"
     );
+}
+
+fn search_pair(s: &mut Session, id: i64, h: &Path, query: &str, extra: &[&str]) -> Value {
+    let mut args = json!({"repo": "r", "query": query});
+    let mut cli = vec!["search", "--repo", "r", "--symbol", query];
+    let mut it = extra.chunks(2);
+    for pair in &mut it {
+        args[pair[0].trim_start_matches("--")] = json!(pair[1].parse::<u64>().unwrap());
+        cli.extend_from_slice(pair);
+    }
+    let mcp = doc(&call_tool(s, id, "riltra_code_search", &args));
+    assert_eq!(mcp, cli_json(h, &cli), "MCP and CLI differ for {query:?}");
+    mcp
+}
+
+#[test]
+fn empty_hint_on_text_query() {
+    let h = home("cempty");
+    let r = home("cempty-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    let d = search_pair(&mut s, 2, &h, "getDocsVersionCandidates", &[]);
+    assert_eq!(d["total"], 0);
+    assert_eq!(d["empty"]["query_shape"], "identifier");
+    assert_eq!(d["empty"]["next"], json!(["query", "text-search"]));
+    let t = search_pair(&mut s, 3, &h, "Expected component", &[]);
+    assert_eq!(t["total"], 0);
+    assert_eq!(t["empty"]["query_shape"], "text");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn empty_hint_absent_without_index_and_with_unreadable_root() {
+    let h = home("cemptynone");
+    let r = home("cemptynone-repo");
+    init_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    let d = search_pair(&mut s, 2, &h, "zzz_absent", &[]);
+    assert_eq!(d["reasons"], json!(["no-index"]));
+    assert!(d.get("empty").is_none(), "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+
+    let h = home("cemptygone");
+    let r = home("cemptygone-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let moved = home("cemptygone-target");
+    std::fs::remove_dir(&moved).unwrap();
+    std::fs::rename(&r, &moved).unwrap();
+    let mut s = ready(&h);
+    let d = search_pair(&mut s, 2, &h, "zzz_absent", &[]);
+    assert_eq!(d["reasons"], json!(["root-unreadable"]));
+    assert!(d.get("empty").is_none(), "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn empty_hint_absent_for_blank_query() {
+    let h = home("cemptyblank");
+    let r = home("cemptyblank-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    for (id, q) in [(2, "   "), (3, "")] {
+        let (code, out, _err) = run_cli(&h, &["search", "--repo", "r", "--symbol", q]);
+        let mcp = doc(&call_tool(
+            &mut s,
+            id,
+            "riltra_code_search",
+            &json!({"repo": "r", "query": q}),
+        ));
+        assert_eq!(mcp["total"], 0, "{q:?}");
+        assert!(mcp.get("empty").is_none(), "{q:?}: {mcp}");
+        if code == 0 {
+            let cli: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(mcp, cli, "{q:?}");
+        } else {
+            assert_eq!(code, 2, "CLI rejected {q:?} with an unexpected code");
+        }
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn empty_hint_absent_when_paging_past_results() {
+    let h = home("cemptypage");
+    let r = home("cemptypage-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    let d = search_pair(&mut s, 2, &h, "alpha", &["--offset", "10"]);
+    assert_eq!(d["total"], 3);
+    assert_eq!(d["results"], json!([]));
+    assert!(d.get("empty").is_none(), "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn empty_hint_on_stale_snapshot_keeps_reasons() {
+    let h = home("cemptystale");
+    let r = home("cemptystale-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    std::fs::write(r.join("d.py"), "def alpha_four():\n    pass\n").unwrap();
+    let mut s = ready(&h);
+    let hit = search_pair(&mut s, 2, &h, "alpha", &[]);
+    let miss = search_pair(&mut s, 3, &h, "zzz_absent", &[]);
+    assert_eq!(miss["freshness"], "stale");
+    assert!(!miss["reasons"].as_array().unwrap().is_empty());
+    assert_eq!(miss["reasons"], hit["reasons"]);
+    assert!(miss.get("empty").is_some(), "{miss}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
 }
 
 #[test]

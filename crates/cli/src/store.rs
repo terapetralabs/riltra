@@ -3,7 +3,7 @@
 //! FTS5 lexical search, and snapshot-scoped facts. Symbol rowids are
 //! per-snapshot only — never permanent cross-revision identities.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -828,6 +828,69 @@ pub fn symbols_for(conn: &Connection, snapshot_id: i64) -> Result<Vec<SymbolRow>
         .map_err(|e| e.to_string())?;
     mapped
         .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// One named definition's span, for mapping a text hit to its enclosing
+/// definition. Only named rows are returned.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymbolSpan {
+    pub name: String,
+    pub kind: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    // shortcut: byte range is read by the companion matcher (Task 3) only.
+    #[allow(dead_code)]
+    pub byte_start: i64,
+    #[allow(dead_code)]
+    pub byte_end: i64,
+}
+
+/// Path → content digest of every file one snapshot indexed. Files the
+/// parser does not support have no row, so they are absent here.
+pub fn indexed_file_digests(
+    conn: &Connection,
+    snapshot_id: i64,
+) -> Result<HashMap<String, String>, String> {
+    let mut statement = conn
+        .prepare("SELECT path, digest FROM files WHERE snapshot_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([snapshot_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Named definitions of one indexed file, ordered by start byte.
+pub fn symbols_in_file(
+    conn: &Connection,
+    snapshot_id: i64,
+    path: &str,
+) -> Result<Vec<SymbolSpan>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT s.name, s.kind, s.start_line, s.end_line, s.byte_start, s.byte_end \
+             FROM symbols s JOIN files f ON f.id = s.file_id AND f.snapshot_id = s.snapshot_id \
+             WHERE s.snapshot_id = ?1 AND f.path = ?2 AND s.name IS NOT NULL \
+             ORDER BY s.byte_start",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params![snapshot_id, path], |row| {
+            Ok(SymbolSpan {
+                name: row.get(0)?,
+                kind: row.get(1)?,
+                start_line: row.get::<_, i64>(2)? as u32,
+                end_line: row.get::<_, i64>(3)? as u32,
+                byte_start: row.get(4)?,
+                byte_end: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
 }
 

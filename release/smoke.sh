@@ -135,6 +135,8 @@ expect "occurrences" '"binding":"unbound"' "$census"
 expect "occurrence item" '"role":"member-access"' "$census"
 callers="$("$bin" callers --repo smoke --path a.py --line 1 --col 5)"
 expect "callers are candidates" '"kind":"POTENTIAL_CALL"' "$callers"
+grep_doc="$("$bin" grep --repo smoke --pattern 'alpha()')"
+expect "grep names the enclosing definition" '"in":{"name":"beta"' "$grep_doc"
 
 # --- the MCP stdio server ----------------------------------------------------
 init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'
@@ -156,7 +158,7 @@ jsonrpc="$(grep -c '^{"jsonrpc":"2.0"' "$work/mcp.out" || true)"
 [ "$lines" -gt 0 ] && [ "$lines" = "$jsonrpc" ] && pass "stdout carries only JSON-RPC ($lines lines)" \
   || fail "stdout carries only JSON-RPC (lines=$lines jsonrpc=$jsonrpc)"
 tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp.out" | sort -u | wc -l | tr -d ' ')"
-[ "$tools" = "7" ] && pass "seven core tools advertised by default" || fail "seven core tools advertised by default (got $tools)"
+[ "$tools" = "8" ] && pass "eight core tools advertised by default" || fail "eight core tools advertised by default (got $tools)"
 expect "overview tool advertised" '"name":"riltra_project_overview"' "$out"
 expect "initialize carries instructions" '"instructions"' "$out"
 {
@@ -166,7 +168,7 @@ expect "initialize carries instructions" '"instructions"' "$out"
   sleep 2
 } | "$bin" mcp --all-tools >"$work/mcp-all.out" 2>"$work/mcp-all.err"
 all_tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp-all.out" | sort -u | wc -l | tr -d ' ')"
-[ "$all_tools" = "21" ] && pass "twenty-one tools advertised with --all-tools" || fail "twenty-one tools advertised with --all-tools (got $all_tools)"
+[ "$all_tools" = "22" ] && pass "twenty-two tools advertised with --all-tools" || fail "twenty-two tools advertised with --all-tools (got $all_tools)"
 expect "packet tool advertised with --all-tools" '"name":"riltra_code_packet"' "$(cat "$work/mcp-all.out")"
 expect "a source-grounded call" 'alpha' "$out"
 overview_response="$(overview_response_line "$work/mcp.out")"

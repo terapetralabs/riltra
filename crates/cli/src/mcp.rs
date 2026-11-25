@@ -6,7 +6,8 @@
 //! completed the design-gate inventory (§3) at eighteen tools, and the area
 //! map (`riltra_project_map`) makes it nineteen, and the change checks tool
 //! (`riltra_change_checks`) makes it twenty, and the documents tool
-//! (`riltra_docs_scan`) makes it twenty-one, through the rmcp tool macros.
+//! (`riltra_docs_scan`) makes it twenty-one, and the text search tool
+//! (`riltra_code_grep`) makes it twenty-two, through the rmcp tool macros.
 //! The default `tools/list` shows only `CORE_TOOLS`; `riltra mcp --all-tools`
 //! shows every tool. Every tool stays callable by name either way.
 //! Tool calls reuse the CLI's response formatters byte-for-byte, and the index read path
@@ -36,7 +37,7 @@ use crate::json;
 use crate::knowledge_store_absent;
 use crate::lexical;
 use crate::{
-    context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_search,
+    context, doctor, git, grep, ignore, index, knowledge, knowledge_binding, knowledge_search,
     knowledge_store, map, overview, packet, paths, registry, response, store,
 };
 
@@ -86,6 +87,25 @@ struct CodeSearchInput {
     /// the address of a member, same-file macro arguments): a name census,
     /// not a binding. Off by default; the document is unchanged without it.
     occurrences: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct GrepInput {
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
+    repo: String,
+    /// Text to find, matched literally unless `regex` is true. Must not be empty.
+    pattern: String,
+    /// Read `pattern` as a regular expression (linear time, no backreferences). Default false.
+    regex: Option<bool>,
+    /// Match letters regardless of case. Default false.
+    ignore_case: Option<bool>,
+    /// Repository-relative directory or file that limits the search, for example `src/parser`.
+    path: Option<String>,
+    /// Maximum files in the answer (default 20, range 1 to 200).
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -510,7 +530,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_search",
-        description = "Search indexed definitions by name (same document as CLI `search`): a prefix match, then a case-insensitive substring match, over definition names only. A zero result adds an `empty` object with the query shape and `next` (`query`, `text-search`). When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take. Not for: text inside strings or comments; use grep. String literals, comments, error messages and names defined outside the repository (imports) are not searched: use `riltra_code_query` for a description in words and your text search (grep) for literal text. A missing index reports `no-index` without creating storage.",
+        description = "Search indexed definitions by name (same document as CLI `search`): a prefix match, then a case-insensitive substring match, over definition names only. A zero result adds an `empty` object with the query shape and `next` (`query`, `text-search`). When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take. Not for: text inside strings or comments; use riltra_code_grep. String literals, comments, error messages and names defined outside the repository (imports) are not searched: use `riltra_code_query` for a description in words and text search (`riltra_code_grep`) for literal text. A missing index reports `no-index` without creating storage.",
         annotations(
             title = "Search indexed symbols",
             read_only_hint = true,
@@ -526,8 +546,22 @@ impl RiltraMcp {
     }
 
     #[tool(
+        name = "riltra_code_grep",
+        description = "Lines of text or a regular expression in the repository's files (same document as CLI `grep`), each with its enclosing indexed definition. When to call: when a string literal, error message, option or comment is quoted and its location is needed. Not for: a definition name; use riltra_code_search, or a description in words; use riltra_code_query. Files without a parser are searched too (in_reason `not-indexed`); a file changed since indexing gets no enclosing definition (in_reason `file-changed-since-index`). Binary files and files over 1 MiB are skipped and counted; `truncated` names any limit reached.",
+        annotations(
+            title = "Search text in files",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_grep(&self, Parameters(input): Parameters<GrepInput>) -> CallToolResult {
+        with_repo(input, move |input| grep_doc(&input)).await
+    }
+
+    #[tool(
         name = "riltra_code_query",
-        description = "Rank indexed symbols by the words of a free text (same document as CLI `query`). Expansion along proven call edges is opt-in with `expand: true`; it adds an `expansion` object and never changes `results`. When to call: to find a definition from a description in words, before the graph tools that take a `path`, `line` and `col`. Not for: exact text; use grep. Lexical only: BM25 over symbol names, paths and doc comments, with no semantic matching; test paths rank last unless a term names tests.",
+        description = "Rank indexed symbols by the words of a free text (same document as CLI `query`). Expansion along proven call edges is opt-in with `expand: true`; it adds an `expansion` object and never changes `results`. When to call: to find a definition from a description in words, before the graph tools that take a `path`, `line` and `col`. Not for: exact text; use riltra_code_grep. Lexical only: BM25 over symbol names, paths and doc comments, with no semantic matching; test paths rank last unless a term names tests.",
         annotations(
             title = "Search indexed symbols by free text",
             read_only_hint = true,
@@ -868,6 +902,7 @@ has_repo!(
     OverviewInput,
     MapInput,
     CodeSearchInput,
+    GrepInput,
     QueryInput,
     EdgeInput,
     TraceInput,
@@ -1341,6 +1376,63 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                 crate::search_hint::empty_hint(&input.query, total).as_ref(),
             )
         }
+    }
+}
+
+fn grep_doc(input: &GrepInput) -> CallToolResult {
+    let limit = input.limit.unwrap_or(grep::DEFAULT_LIMIT);
+    if limit == 0 || limit > grep::MAX_LIMIT {
+        return tool_error(
+            "invalid_input",
+            &format!("limit must be between 1 and {}", grep::MAX_LIMIT),
+        );
+    }
+    let (home, root) = match repo_root(&input.repo) {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let req = grep::GrepRequest {
+        pattern: &input.pattern,
+        regex: input.regex.unwrap_or(false),
+        ignore_case: input.ignore_case.unwrap_or(false),
+        path_prefix: input.path.as_deref(),
+        limit,
+    };
+    let outcome = match store::open_read(&store::db_path(&home, &input.repo)) {
+        store::IndexRead::Missing => grep::grep_repo(&root, None, &req),
+        store::IndexRead::Outdated(version) => {
+            return tool_error("schema_outdated", &outdated_message(&input.repo, version))
+        }
+        store::IndexRead::Ahead(version) => {
+            return tool_error(
+                "schema_ahead",
+                &format!(
+                    "database schema v{version} is newer than supported v{}",
+                    store::SCHEMA_VERSION
+                ),
+            )
+        }
+        store::IndexRead::Error(message) => return tool_error("store_error", &message),
+        store::IndexRead::Ready(mut conn) => {
+            let tx = match conn.transaction() {
+                Ok(tx) => tx,
+                Err(e) => return tool_error("store_error", &e.to_string()),
+            };
+            let found = grep::grep_repo(&root, Some(&tx), &req);
+            if found.is_ok() {
+                if let Err(e) = tx.commit() {
+                    return tool_error("store_error", &e.to_string());
+                }
+            }
+            found
+        }
+    };
+    match outcome {
+        Ok(result) => exact_doc(&response::grep_response_json(&input.repo, &req, &result)),
+        Err(e) => match grep::refusal_message(&e) {
+            Some(message) => tool_error("invalid_input", message),
+            None => tool_error("store_error", &e),
+        },
     }
 }
 
@@ -2564,6 +2656,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_code_callees",
                 "riltra_code_callers",
                 "riltra_code_changes",
+                "riltra_code_grep",
                 "riltra_code_impact",
                 "riltra_code_packet",
                 "riltra_code_query",

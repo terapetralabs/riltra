@@ -39,6 +39,18 @@ adds an exact-name census of occurrences such as member accesses, address of a
 member, and same-file macro arguments. It is a name census, not a resolved
 binding; an empty result does not prove that a name is unused.
 
+`grep --repo <name> --pattern <text> [--regex] [--ignore-case] [--path <prefix>] [--limit <n>]`
+(MCP `riltra_code_grep`) searches the text of the repository's files, read from
+disk when the search runs. Literal matching is the default; `--regex` uses the
+`regex` crate, which runs in linear time with no backtracking, and a pattern
+over its size limit is refused with exit 2. Each hit carries its enclosing
+indexed definition (`in`) only when the file still matches its indexed digest;
+`in_reason` says `indexed`, `file-changed-since-index`, `not-indexed` (a
+language without a parser) or `no-index`. Binary files and files over 1 MiB are
+skipped and counted. `limit` counts files (default 20, maximum 200); hits are
+capped per file and in total, and `truncated` names the limit reached. A search
+without an index still runs and creates nothing.
+
 `query --repo <name> --text <text> [--limit <n>]` (MCP `riltra_code_query`) is
 lexical concept search: it ranks indexed definitions for a free text by the
 words of their names, paths and doc comments (BM25 over the concept index). It
@@ -854,8 +866,8 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves twenty-one local stdio tools; by default it lists seven core tools, and `riltra mcp --all-tools` lists all of them. Twenty read repository,
-index, code, knowledge, project overview, area map, selected-anchor packet, change-check, and documents-linked-to-code data. The remaining tool,
+`riltra mcp` serves twenty-two local stdio tools; by default it lists eight core tools, and `riltra mcp --all-tools` lists all of them. Twenty-one read repository,
+index, code, text-in-files, knowledge, project overview, area map, selected-anchor packet, change-check, and documents-linked-to-code data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the
 network. The MCP handlers themselves do not create, migrate, or replace a

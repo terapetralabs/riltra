@@ -4689,6 +4689,7 @@ dependencies = [
  "ort",
  "petgraph",
  "protobuf",
+ "regex",
  "rmcp",
  "rusqlite",
  "serde",

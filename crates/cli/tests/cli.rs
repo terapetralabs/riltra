@@ -695,3 +695,117 @@ fn index_exits_3_while_the_writer_lock_is_held() {
     drop(held);
     assert_eq!(run(&h, &["index", "--repo", "tiny"]).0, 0);
 }
+
+// ---------------------------------------------------------------------------
+// `riltra grep`. The golden is written by hand from GREP_FIXTURE: 65 bytes;
+// `alpha()` is on line 1 (inside alpha) and line 6 (inside beta, lines 5-7).
+// ---------------------------------------------------------------------------
+
+const GREP_FIXTURE: &[u8] =
+    b"def alpha():\n    return 1\n\n\ndef beta():\n    alpha()\n    return 2\n";
+
+/// Repository `repo` with one Python file, initialized and indexed.
+fn grep_fixture_indexed(h: &Path) -> PathBuf {
+    let repo = mkrepo(h, "repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/app.py"), GREP_FIXTURE).unwrap();
+    assert_eq!(
+        run(
+            h,
+            &["init", "--repo", repo.to_str().unwrap(), "--name", "repo"]
+        )
+        .0,
+        0
+    );
+    let (code, _, err) = run(h, &["index", "--repo", "repo"]);
+    assert_eq!(code, 0, "stderr: {err:?}");
+    repo
+}
+
+#[test]
+fn grep_cli_matches_golden() {
+    let h = home("grep-golden");
+    grep_fixture_indexed(&h);
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "alpha()"]);
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, include_str!("golden/grep-basic.json"));
+}
+
+#[test]
+fn grep_cli_invalid_regex_exits_2() {
+    let h = home("grep-regex");
+    grep_fixture_indexed(&h);
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "(", "--regex"]);
+    assert_eq!(code, 2, "stderr: {err:?}");
+    assert!(out.is_empty(), "stdout: {out:?}");
+    assert!(err.contains("pattern does not compile"), "stderr: {err:?}");
+}
+
+#[test]
+fn grep_cli_bad_limit_exits_2() {
+    let h = home("grep-limit");
+    grep_fixture_indexed(&h);
+    for limit in ["0", "201"] {
+        let (code, out, _) = run(
+            &h,
+            &[
+                "grep",
+                "--repo",
+                "repo",
+                "--pattern",
+                "alpha",
+                "--limit",
+                limit,
+            ],
+        );
+        assert_eq!(code, 2, "limit {limit}");
+        assert!(out.is_empty(), "limit {limit}: {out:?}");
+    }
+}
+
+#[test]
+fn grep_cli_unregistered_exits_3() {
+    let h = home("grep-unknown");
+    let (code, out, err) = run(&h, &["grep", "--repo", "nope", "--pattern", "alpha"]);
+    assert_eq!(code, 3, "stderr: {err:?}");
+    assert!(out.is_empty(), "stdout: {out:?}");
+    assert!(err.contains("unknown repository"), "stderr: {err:?}");
+}
+
+#[test]
+fn grep_cli_missing_root_exits_3() {
+    let h = home("grep-moved");
+    let repo = grep_fixture_indexed(&h);
+    std::fs::rename(&repo, h.join("moved")).unwrap();
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "alpha"]);
+    assert_eq!(code, 3, "stderr: {err:?}");
+    assert!(out.is_empty(), "stdout: {out:?}");
+    assert!(
+        err.contains("registered root is missing"),
+        "stderr: {err:?}"
+    );
+}
+
+#[test]
+fn grep_cli_without_index_searches_and_creates_nothing() {
+    let h = home("grep-noindex");
+    let repo = mkrepo(&h, "repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/app.py"), GREP_FIXTURE).unwrap();
+    assert_eq!(
+        run(
+            &h,
+            &["init", "--repo", repo.to_str().unwrap(), "--name", "repo"]
+        )
+        .0,
+        0
+    );
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "alpha()"]);
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert!(out.contains("\"in_reason\":\"no-index\""), "stdout: {out}");
+    assert!(out.contains("\"snapshot\":null"), "stdout: {out}");
+    assert!(
+        !h.join("index").join("repo.db").exists(),
+        "grep must not create an index"
+    );
+}

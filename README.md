@@ -105,16 +105,20 @@ guessing.
 <a id="mcp-server-nineteen-read-only-tools-one-provider-backed-tool"></a>
 <a id="mcp-server-twenty-read-only-tools-one-provider-backed-tool"></a>
 
-Run `riltra mcp` to start a local stdio MCP server with twenty-one tools: twenty
-read-only tools for repository, code, knowledge, project overview, the area map, selected-anchor packets, change checks, and documents linked to code, plus
+Run `riltra mcp` to start a local stdio MCP server with twenty-two tools: twenty-one
+read-only tools for repository, code, text search in files, knowledge, project overview, the area map, selected-anchor packets, change checks, and documents linked to code, plus
 `riltra_code_semantic`, which starts the language server configured by the
 operator. That server may write its own cache, run project tools, or access the
 network. Riltra's MCP handlers do not create, migrate, or replace a database.
 A missing index returns `no-index`; an unsupported schema is refused with
 `schema_outdated`. Prepare repositories with the CLI before querying them.
 
-By default `riltra mcp` lists seven core tools; `riltra mcp --all-tools` lists
-all twenty-one. Every tool stays callable by name.
+By default `riltra mcp` lists eight core tools; `riltra mcp --all-tools` lists
+all twenty-two. Every tool stays callable by name.
+
+`riltra grep --repo <name> --pattern <text> [--regex] [--ignore-case] [--path <prefix>] [--limit <n>]`
+(MCP `riltra_code_grep`) searches the repository's text files, including
+languages without a parser, and gives each hit its enclosing indexed definition.
 
 For tool selection, result labels, and troubleshooting, see the [agent setup
 guide](docs/guide/agent-setup.md).

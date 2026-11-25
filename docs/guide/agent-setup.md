@@ -68,7 +68,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 
 ## Which tool for which question
 
-`riltra mcp` lists only seven tools by default: `riltra_code_search`, `riltra_code_query`, `riltra_code_callers`, `riltra_code_impact`, `riltra_context`, `riltra_project_overview` and `riltra_knowledge_search`. Every other tool in the table below needs `riltra mcp --all-tools` to be listed; calling them by name works either way.
+`riltra mcp` lists only eight tools by default: `riltra_code_grep`, `riltra_code_search`, `riltra_code_query`, `riltra_code_callers`, `riltra_code_impact`, `riltra_context`, `riltra_project_overview` and `riltra_knowledge_search`. Every other tool in the table below needs `riltra mcp --all-tools` to be listed; calling them by name works either way.
 
 | You want to know | Call | Notes |
 |---|---|---|
@@ -77,6 +77,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | Where do I start in this project? | `riltra_project_overview` | Read-only summary from index and document evidence. Entry points are candidates, not proof of a runtime flow. |
 | Which areas does the project have, and how are they linked? | `riltra_project_map` | Directory areas, proven links and bounded static flows. Areas are navigation hints, not architecture boundaries. |
 | Where is a symbol defined? | `riltra_code_search` | `query` is the symbol text. `limit` (default 50, maximum 1000) and `offset` page the results. `occurrences: true` adds a name census for C++ only. |
+| Where does this text appear, such as an error message, string, option or comment? | `riltra_code_grep` | Literal text, or a regex with `regex: true`. Each hit carries its enclosing definition (`in`) and `in_reason`; a file changed since indexing gets no enclosing definition. `path` limits the search; `limit` counts files (default 20, maximum 200). |
 | Which definitions match a description in words? | `riltra_code_query` | Lexical ranking over names, paths and doc comments. Results carry `path` and `line` but no column; pass `name` as `target` and `path` as `in`. |
 | Which definitions does my git change touch? | `riltra_code_changes` | Live parse of the changed files: definitions added, removed or modified. A map of structure, not an impact verdict. |
 | Which tests and areas should I check for my git change? | `riltra_change_checks` | Suggestions from git changes, stored relations and file names. Riltra runs no test, and an empty list does not mean no test is needed; run the checks your project requires. |

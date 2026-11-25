@@ -14,6 +14,7 @@ mod args;
 mod backup;
 mod changes;
 mod checks;
+mod companions;
 mod concept;
 mod context;
 mod docs;
@@ -21,6 +22,7 @@ mod doctor;
 mod edges;
 mod expand;
 mod git;
+mod grep;
 mod ignore;
 mod index;
 #[cfg(feature = "semantic-knowledge")]
@@ -73,6 +75,7 @@ pub(crate) const SCOPE: &str = "m1-registry";
 pub(crate) fn usage() -> String {
     format!(
         "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>] [--progress]\n  {NAME} index --repo <name> [--full] [--progress]\n  {NAME} index status --repo <name>\n  {NAME} watch --repo <name> [--interval-ms <n>] [--debounce-ms <n>] [--max-wait-ms <n>] [--max-builds <n>]\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences] (definition names only)\n  {NAME} query --repo <name> --text <text> [--limit <n>] [--expand]
+  {NAME} grep --repo <name> --pattern <text> [--regex] [--ignore-case] [--path <prefix>] [--limit <n>] (text in files, with the enclosing definition)
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
@@ -457,6 +460,79 @@ fn cmd_query(
     }
 }
 
+/// `grep`: text in the repository's files, read from disk now. Without an
+/// index the search still runs (`no-index`); nothing is created.
+fn cmd_grep(options: args::GrepArgs, out: &mut String, err: &mut String) -> i32 {
+    let limit = match parse_count(options.limit.as_deref(), grep::DEFAULT_LIMIT, "limit") {
+        Ok(n) => n,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    if limit == 0 || limit > grep::MAX_LIMIT {
+        err.push_str(&format!(
+            "error: --limit must be between 1 and {}\n",
+            grep::MAX_LIMIT
+        ));
+        return 2;
+    }
+    let (root, _) = match resolve_recorded_root(&options.repo, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    let req = grep::GrepRequest {
+        pattern: &options.pattern,
+        regex: options.regex,
+        ignore_case: options.ignore_case,
+        path_prefix: options.path.as_deref(),
+        limit,
+    };
+    let db = store::db_path(&paths::config_dir(), &options.repo);
+    let outcome = if db.exists() {
+        let mut conn = match store::open_live(&db) {
+            Ok(conn) => conn,
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        };
+        let tx = match conn.transaction() {
+            Ok(tx) => tx,
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        };
+        let found = grep::grep_repo(Path::new(&root), Some(&tx), &req);
+        if found.is_ok() {
+            if let Err(e) = tx.commit() {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        }
+        found
+    } else {
+        grep::grep_repo(Path::new(&root), None, &req)
+    };
+    match outcome {
+        Ok(result) => {
+            *out = response::grep_response_json(&options.repo, &req, &result) + "\n";
+            0
+        }
+        Err(e) => match grep::refusal_message(&e) {
+            Some(message) => {
+                err.push_str(&format!("error: {message}\n"));
+                2
+            }
+            None => {
+                err.push_str(&format!("error: {e}\n"));
+                3
+            }
+        },
+    }
+}
+
 fn cmd_search(
     name: &str,
     symbol: &str,
@@ -809,6 +885,7 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             limit,
             expand,
         } => cmd_query(&repo, &text, limit.as_deref(), expand, out, err),
+        Command::Grep(options) => cmd_grep(options, out, err),
         Command::Semantic { op } => cmd_semantic(op, out, err),
         Command::Edge { op } => cmd_edge(op, out, err),
         Command::Trace(args) => cmd_trace(args, out, err),

@@ -97,7 +97,7 @@ Run `riltra --help` for the full command list. Git is needed for repository
 fingerprints; without it, Riltra reports that status as unavailable instead of
 guessing.
 
-## MCP server (twenty read-only tools, one provider-backed tool)
+## MCP server (twenty-one read-only tools, one provider-backed tool)
 
 <a id="mcp-server-twelve-read-only-tools-one-provider-backed-tool"></a>
 <a id="mcp-server-sixteen-read-only-tools-one-provider-backed-tool"></a>

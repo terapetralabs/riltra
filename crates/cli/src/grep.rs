@@ -205,19 +205,28 @@ fn grep_repo_with_budget(
         }
         shown += file.hits.len();
     }
+    // One symbols query for the files that are still shown with hits.
+    let spans_by_path = match (tx, snapshot.as_ref()) {
+        (Some(tx), Some(snap)) => {
+            let paths: Vec<&str> = matched
+                .iter()
+                .filter(|m| m.fresh && !m.hits.is_empty())
+                .map(|m| m.path.as_str())
+                .collect();
+            store::symbols_in_files(tx, snap.id, &paths)?
+        }
+        _ => HashMap::new(),
+    };
     let mut files = Vec::with_capacity(matched.len());
     for m in matched {
-        let spans = match (tx, snapshot.as_ref()) {
-            (Some(tx), Some(snap)) if m.fresh => store::symbols_in_file(tx, snap.id, &m.path)?,
-            _ => Vec::new(),
-        };
+        let spans: &[store::SymbolSpan] = spans_by_path.get(&m.path).map_or(&[], Vec::as_slice);
         let hits = m
             .hits
             .into_iter()
             .map(|h| GrepHit {
                 line: h.line,
                 col: h.col,
-                enclosing: innermost(&spans, h.line),
+                enclosing: innermost(spans, h.line),
                 text: h.text,
                 in_reason: m.in_reason,
             })
@@ -345,7 +354,14 @@ fn index_state(
 fn search_lines(pattern: &regex::bytes::Regex, bytes: &[u8]) -> (usize, Vec<RawHit>) {
     let mut count = 0;
     let mut hits = Vec::new();
-    for (index, line) in bytes.split(|b| *b == b'\n').enumerate() {
+    // A final newline ends the last line; it does not start another one, and
+    // an empty file has no lines at all.
+    if bytes.is_empty() {
+        return (count, hits);
+    }
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    for (index, raw) in body.split(|b| *b == b'\n').enumerate() {
+        let line = raw.strip_suffix(b"\r").unwrap_or(raw);
         let Some(found) = pattern.find(line) else {
             continue;
         };
@@ -533,6 +549,80 @@ mod tests {
         let result = grep_repo(&root, None, &request("needle")).expect("grep");
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["src/core.py", "tests/test_core.py"]);
+    }
+
+    fn regex_request(pattern: &str) -> GrepRequest<'_> {
+        GrepRequest {
+            regex: true,
+            ..request(pattern)
+        }
+    }
+
+    fn hit_lines(file: &GrepFile) -> Vec<u32> {
+        file.hits.iter().map(|h| h.line).collect()
+    }
+
+    #[test]
+    fn grep_crlf_lines_match_without_the_carriage_return() {
+        let root = repo_with(&[("win.txt", b"a;\r\n\r\nb\r\n")]);
+        let result = grep_repo(&root, None, &regex_request(";$")).expect("grep");
+        assert_eq!(
+            hit_lines(&result.files[0]),
+            [1],
+            "the \\r is not part of the line"
+        );
+        let result = grep_repo(&root, None, &regex_request("^$")).expect("grep");
+        assert_eq!(
+            hit_lines(&result.files[0]),
+            [2],
+            "a blank CRLF line is blank"
+        );
+        assert_eq!(result.files[0].hits[0].text, "");
+    }
+
+    #[test]
+    fn grep_final_newline_does_not_start_a_phantom_line() {
+        let root = repo_with(&[("end.txt", b"x\n")]);
+        let result = grep_repo(&root, None, &regex_request("^$")).expect("grep");
+        assert!(result.files.is_empty(), "no empty line 2 exists");
+        let result = grep_repo(&root, None, &regex_request("x*")).expect("grep");
+        assert_eq!(result.files[0].hit_count, 1, "one line, one hit");
+    }
+
+    #[test]
+    fn grep_empty_file_has_no_lines() {
+        let root = repo_with(&[("empty.txt", b"")]);
+        let result = grep_repo(&root, None, &regex_request("^")).expect("grep");
+        assert!(result.files.is_empty());
+        assert_eq!(result.totals.hits, 0);
+        assert_eq!(result.totals.files_scanned, 1);
+    }
+
+    #[test]
+    fn grep_maps_each_file_to_its_own_definitions() {
+        let root = repo_with(&[
+            ("one.py", b"def first():\n    return \"needle\"\n"),
+            ("two.py", b"def second():\n    return \"needle\"\n"),
+        ]);
+        let home = indexed(&root);
+        let result = grep_indexed(&home, &root, &request("needle"));
+        let mapped: Vec<(String, String)> = result
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.path.clone(),
+                    f.hits[0].enclosing.as_ref().unwrap().name.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            mapped,
+            [
+                ("one.py".to_string(), "first".to_string()),
+                ("two.py".to_string(), "second".to_string()),
+            ]
+        );
     }
 
     #[test]

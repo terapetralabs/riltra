@@ -53,7 +53,11 @@ without an index still runs and creates nothing.
 
 Files are searched in path order, from the walk that `scan` and `index` share.
 `.riltraignore` is honoured and `.gitignore` is not, so `node_modules/` or
-`target/` are searched unless a `.riltraignore` entry excludes them. The first
+`target/` are searched unless a `.riltraignore` entry excludes them. Files under
+a folder named `node_modules`, `vendor`, `target`, `dist`, `build`, `.venv`,
+`venv`, `__pycache__` or `third_party` are read after every other file and are
+ranked after them in the answer, so the read budget reaches the project's own
+files first; they are never skipped for that name. The first
 8 KiB of a file decide whether it is binary; a binary file is counted as skipped
 and costs no read budget. The text read in one search is capped at 256 MiB
 (`totals.bytes_read`). A search cut short by that cap with no hits says so:

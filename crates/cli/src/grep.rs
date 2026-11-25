@@ -141,7 +141,10 @@ fn grep_repo_with_budget(
     };
     let mut truncated: Option<&'static str> = None;
     let mut matched: Vec<Matched> = Vec::new();
-    for planned in &plan {
+    // Project files first, dependency folders last, each in walk order.
+    let (project, dependencies): (Vec<_>, Vec<_>) =
+        plan.iter().partition(|p| !is_dependency_path(&p.rel));
+    for planned in project.into_iter().chain(dependencies) {
         if !matches!(
             planned.action,
             scan::PlanAction::Parse(_) | scan::PlanAction::Unsupported(_)
@@ -211,6 +214,7 @@ fn grep_repo_with_budget(
     totals.hits = matched.iter().map(|m| m.hit_count).sum();
     matched.sort_by_key(|m| {
         (
+            is_dependency_path(&m.path),
             index::is_test_path(&m.path),
             Reverse(m.hit_count),
             m.path.clone(),
@@ -382,6 +386,26 @@ fn under_prefix(rel: &str, prefix: Option<&str>) -> bool {
                     .is_some_and(|rest| rest.starts_with('/'))
         }
     }
+}
+
+/// Folder names that usually hold dependencies or build output. Grep reads
+/// and ranks files under them last; it never skips them.
+const DEPENDENCY_DIRS: [&str; 9] = [
+    "node_modules",
+    "vendor",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "third_party",
+];
+
+/// Whether a folder component of `rel` is one of `DEPENDENCY_DIRS`.
+fn is_dependency_path(rel: &str) -> bool {
+    rel.rsplit_once('/')
+        .is_some_and(|(dirs, _)| dirs.split('/').any(|d| DEPENDENCY_DIRS.contains(&d)))
 }
 
 /// The snapshot, its indexed digests, and its freshness verdict. Without a
@@ -641,6 +665,45 @@ mod tests {
         let result = grep_repo(&root, None, &request("needle")).expect("grep");
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["src/core.py", "tests/test_core.py"]);
+    }
+
+    #[test]
+    fn grep_reads_dependency_folders_last() {
+        // `node_modules` sorts before `src`, but a dependency folder must not
+        // spend the read budget before the project's own files.
+        let big = b"needle\n".repeat(100);
+        let root = repo_with(&[
+            ("node_modules/pkg/index.js", big.as_slice()),
+            ("src/app.js", b"needle\n"),
+        ]);
+        let result = grep_repo_with_budget(&root, None, &request("needle"), 100).expect("grep");
+        let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/app.js"]);
+        assert_eq!(result.truncated, Some("bytes-read"));
+    }
+
+    #[test]
+    fn grep_ranks_dependency_folders_after_project_files() {
+        let root = repo_with(&[
+            ("vendor/lib.py", b"needle\nneedle\nneedle\n"),
+            ("tests/test_core.py", b"needle\nneedle\n"),
+            ("src/core.py", b"needle\n"),
+        ]);
+        let result = grep_repo(&root, None, &request("needle")).expect("grep");
+        let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["src/core.py", "tests/test_core.py", "vendor/lib.py"]
+        );
+    }
+
+    #[test]
+    fn dependency_path_matches_whole_components_only() {
+        assert!(is_dependency_path("node_modules/a.js"));
+        assert!(is_dependency_path("web/node_modules/a/b.js"));
+        assert!(is_dependency_path("crates/cli/target/debug/x.rs"));
+        assert!(!is_dependency_path("src/targets.rs"));
+        assert!(!is_dependency_path("src/vendor.py"));
     }
 
     fn regex_request(pattern: &str) -> GrepRequest<'_> {

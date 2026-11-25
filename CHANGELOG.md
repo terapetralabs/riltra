@@ -9,13 +9,16 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 ### Added
 
 - `riltra grep` and the MCP tool `riltra_code_grep`: text search in the repository's files that
-  names the definition enclosing each hit. Literal text by default; `--regex` and `--ignore-case`
+  names the definition enclosing each hit when the file matches the index (otherwise `in` is
+  `null` and `in_reason` says why). Literal text by default; `--regex` and `--ignore-case`
   change the match, and `--path` limits the files searched.
 - Companion files for a grep hit, each with an evidence label: `name-pair` (same base name,
   `path-convention`), `importer` (`import-text-match`: a file whose indexed import text names the
   hit's file, a guess from text and never a proven import), and `caller` (`CALLS` or
-  `POTENTIAL_CALL`). The grep document carries `caller_gaps`: the reasons a caller lookup was
-  skipped, or `[]` when none.
+  `POTENTIAL_CALL`). Companions are named for the first five files of the answer only, at most
+  three per kind; test files are excluded. The grep document carries `caller_gaps`: why an
+  attempted caller lookup could not run (graph proof not current, definition not resolved), or
+  `[]` when none.
 - MCP server instructions: the server tells the client which tool answers which kind of question.
 - `riltra mcp --all-tools`: lists every MCP tool, not only the core set.
 - A macOS ARM64 check and package workflow (`macos-arm64.yml`). It runs on push to `master` and

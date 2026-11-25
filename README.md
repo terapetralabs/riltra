@@ -114,12 +114,15 @@ A missing index returns `no-index`; an unsupported schema is refused with
 `schema_outdated`. Prepare repositories with the CLI before querying them.
 
 By default `riltra mcp` lists eight core tools; `riltra mcp --all-tools` lists
-all twenty-two. Every tool stays callable by name.
+all twenty-two. A client that lets the model call only listed tools needs
+`--all-tools` in its MCP configuration to reach the rest; calling by name helps
+only a client that calls by name directly.
 
 `riltra grep --repo <name> --pattern <text> [--regex] [--ignore-case] [--path <prefix>] [--limit <n>]`
 (MCP `riltra_code_grep`) searches the repository's text files, including
 languages without a parser, gives each hit its enclosing indexed definition, and
-names up to five paired files (`companions`) with their evidence labels.
+gives companion files (`companions`) with their evidence labels for the first
+five files of the answer only (at most three per kind; test files excluded).
 
 For tool selection, result labels, and troubleshooting, see the [agent setup
 guide](docs/guide/agent-setup.md).

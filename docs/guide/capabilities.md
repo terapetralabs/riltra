@@ -51,6 +51,17 @@ skipped and counted. `limit` counts files (default 20, maximum 200); hits are
 capped per file and in total, and `truncated` names the limit reached. A search
 without an index still runs and creates nothing.
 
+Files are searched in path order, from the walk that `scan` and `index` share.
+`.riltraignore` is honoured and `.gitignore` is not, so `node_modules/` or
+`target/` are searched unless a `.riltraignore` entry excludes them. The first
+8 KiB of a file decide whether it is binary; a binary file is counted as skipped
+and costs no read budget. The text read in one search is capped at 256 MiB
+(`totals.bytes_read`). A search cut short by that cap with no hits says so:
+`empty.searched` is `text-lines-incomplete` and the suggested next steps are
+`path` or `.riltraignore`, not a plain "not found". A `path` of `.`, `./` or an
+empty value names the whole repository. A pattern that contains a newline is
+refused with `invalid_input` (exit 2), since matching runs line by line.
+
 The first five files of the answer carry `companions`: at most three per `why`,
 each with `path`, `why`, `basis` and `via`. Evidence labels:
 
@@ -73,12 +84,13 @@ each with `path`, `why`, `basis` and `via`. Evidence labels:
   the import has one. `via` names that definition. Only for fresh files.
   `POTENTIAL_CALL` is syntax-only and never `CALLS`. Needs an index.
 
-`caller_gaps` (after `truncated`) lists why caller lookups were skipped, sorted
-and unique, and is `[]` when none was skipped. `graph-proof-incompatible` means
-the snapshot's graph proof is not current, so no caller lookup ran.
+`caller_gaps` (after `truncated`) names why an attempted caller lookup could not
+run, sorted and unique, and is `[]` when none did. `graph-proof-incompatible`
+means the snapshot's graph proof is not current, so no caller lookup ran.
 `definition-not-resolved` means the resolver did not map a definition back to
-itself, so that definition was skipped. A storage failure is an error, not a
-gap.
+itself, so that definition was skipped. No caller lookup is attempted without an
+index, for a stale file, for a hit outside any definition, or beyond the first
+five files; those add no reason. A storage failure is an error, not a gap.
 
 Test files are not companions in 0.3.0.
 

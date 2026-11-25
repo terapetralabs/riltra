@@ -162,6 +162,21 @@ fn grep_repo_with_budget(
             totals.files_skipped_large += 1;
             continue;
         }
+        // A binary file costs its probe only: it is neither read in full nor
+        // charged to the read budget.
+        let probe = match read_probe(&planned.full) {
+            Ok(probe) => probe,
+            Err(_) => {
+                totals.files_scanned += 1;
+                totals.files_skipped_unreadable += 1;
+                continue;
+            }
+        };
+        if probe.contains(&0) {
+            totals.files_scanned += 1;
+            totals.files_skipped_binary += 1;
+            continue;
+        }
         if totals.bytes_read + len > max_bytes_read {
             truncated = Some("bytes-read");
             break;
@@ -178,11 +193,6 @@ fn grep_repo_with_budget(
         totals.bytes_read += bytes.len() as u64;
         if bytes.len() as u64 > scan::MAX_FILE_BYTES {
             totals.files_skipped_large += 1;
-            continue;
-        }
-        let probe = &bytes[..bytes.len().min(BINARY_PROBE_BYTES)];
-        if probe.contains(&0) {
-            totals.files_skipped_binary += 1;
             continue;
         }
         let (in_reason, fresh) = index_state(digests.as_ref(), &planned.rel, &bytes);
@@ -323,6 +333,12 @@ fn compile(req: &GrepRequest<'_>) -> Result<regex::bytes::Regex, String> {
     if req.pattern.is_empty() {
         return Err(refusal("pattern must not be empty"));
     }
+    // Matching runs line by line, so no pattern with a newline can match.
+    if req.pattern.contains('\n') {
+        return Err(refusal(
+            "pattern must not contain a newline; search one line at a time",
+        ));
+    }
     let source = if req.regex {
         req.pattern.to_string()
     } else {
@@ -336,12 +352,17 @@ fn compile(req: &GrepRequest<'_>) -> Result<regex::bytes::Regex, String> {
 }
 
 /// The path prefix as a repository-relative directory or file, without
-/// leading `./` or trailing slashes.
+/// leading `./` or trailing slashes. `""`, `"."` and `"./"` name the whole
+/// repository, so they give no prefix.
 fn normalize_prefix(raw: Option<&str>) -> Result<Option<String>, String> {
     let Some(raw) = raw else {
         return Ok(None);
     };
     let slashed = raw.replace('\\', "/");
+    // Agents send these for the whole repository; they are not a prefix.
+    if matches!(slashed.as_str(), "" | "." | "./") {
+        return Ok(None);
+    }
     let trimmed = slashed.trim_start_matches("./").trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "." || Path::new(trimmed).is_absolute() {
         return Err(refusal(&format!(
@@ -393,6 +414,16 @@ fn snapshot_state(
         Err(_) => ("unknown".to_string(), vec!["root-unreadable".to_string()]),
     };
     Ok((Some(snapshot), Some(digests), freshness, reasons))
+}
+
+/// The first `BINARY_PROBE_BYTES` of a file, enough to tell a binary file.
+fn read_probe(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut probe = Vec::with_capacity(BINARY_PROBE_BYTES);
+    std::fs::File::open(path)?
+        .take(BINARY_PROBE_BYTES as u64)
+        .read_to_end(&mut probe)?;
+    Ok(probe)
 }
 
 /// `(in_reason, fresh)` for one file's bytes against the indexed digests.
@@ -863,5 +894,61 @@ mod tests {
         assert_eq!(result.freshness, "fresh");
         assert!(result.reasons.is_empty());
         assert!(result.snapshot.is_some());
+    }
+
+    #[test]
+    fn grep_binary_file_costs_no_read_budget() {
+        // The binary file is larger than the budget; it must not stop the search.
+        let mut blob = b"needle\0".to_vec();
+        blob.resize(1000, b'a');
+        let root = repo_with(&[("a.bin", &blob), ("b.txt", b"needle\n")]);
+        let result = grep_repo_with_budget(&root, None, &request("needle"), 100).expect("grep");
+        assert_eq!(result.truncated, None);
+        assert_eq!(result.totals.files_skipped_binary, 1);
+        assert_eq!(result.totals.bytes_read, 7, "only b.txt is read");
+        assert_eq!(result.files.len(), 1);
+    }
+
+    #[test]
+    fn grep_truncated_without_hits_says_the_search_was_incomplete() {
+        let root = repo_with(&[("a.txt", b"x\n"), ("b.txt", b"needle\n")]);
+        let req = request("needle");
+        let result = grep_repo_with_budget(&root, None, &req, 1).expect("grep");
+        assert_eq!(result.truncated, Some("bytes-read"));
+        let json = crate::response::grep_response_json("r", &req, &result);
+        assert!(
+            json.ends_with(
+                "\"empty\":{\"searched\":\"text-lines-incomplete\",\"mode\":\"literal\",\"next\":[\"path\",\".riltraignore\"]}}"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn grep_refuses_a_pattern_with_a_newline() {
+        let root = repo_with(&[("a.txt", b"x\ny\n")]);
+        for regex in [false, true] {
+            let req = GrepRequest {
+                regex,
+                ..request("x\ny")
+            };
+            let err = grep_repo(&root, None, &req).err().expect("must be refused");
+            assert!(err.starts_with("invalid_input: "), "{err}");
+        }
+    }
+
+    #[test]
+    fn grep_path_dot_or_empty_means_the_whole_repository() {
+        let root = repo_with(&[("a/x.txt", b"needle\n"), ("b.txt", b"needle\n")]);
+        let all = grep_repo(&root, None, &request("needle")).expect("grep");
+        assert_eq!(all.files.len(), 2);
+        for path in [".", "", "./"] {
+            let req = GrepRequest {
+                path_prefix: Some(path),
+                ..request("needle")
+            };
+            let result = grep_repo(&root, None, &req).expect("grep");
+            assert_eq!(result.files.len(), 2, "path {path:?}");
+        }
     }
 }

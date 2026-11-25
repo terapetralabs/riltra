@@ -242,7 +242,14 @@ fn grep_document(
         ),
         None => "null".to_string(),
     };
-    let empty = if totals.hits == 0 {
+    // A search cut short by the read budget did not look everywhere, so it
+    // must not read as "not found".
+    let empty = if totals.hits == 0 && truncated == Some("bytes-read") {
+        format!(
+            ",\"empty\":{{\"searched\":\"text-lines-incomplete\",\"mode\":\"{}\",\"next\":[\"path\",\".riltraignore\"]}}",
+            grep_mode(req)
+        )
+    } else if totals.hits == 0 {
         format!(
             ",\"empty\":{{\"searched\":\"text-lines\",\"mode\":\"{}\",\"next\":[\"code_search\",\"code_query\"]}}",
             grep_mode(req)

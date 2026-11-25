@@ -10,6 +10,10 @@ name: release-candidate
 #
 # macOS runs on the x64 pool for the reason recorded in ci.yml; macOS ARM64 is
 # not covered by this workflow either.
+#
+# The package runners are pinned to fixed images (windows-2025, ubuntu-24.04,
+# macos-15-intel) so that a change of a `-latest` image does not change the
+# build that is tested. The guard job keeps ubuntu-latest: it runs no build.
 
 on:
   workflow_dispatch:
@@ -50,8 +54,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: windows-x64, runner: windows-latest, ext: zip }
-          - { name: linux-x64, runner: ubuntu-latest, ext: tar.gz }
+          - { name: windows-x64, runner: windows-2025, ext: zip }
+          - { name: linux-x64, runner: ubuntu-24.04, ext: tar.gz }
           - { name: macos-x64, runner: macos-15-intel, ext: tar.gz }
     name: package (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}

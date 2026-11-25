@@ -8,7 +8,8 @@
 # It runs the shipped binary only (no cargo, no source tree) in a scratch
 # directory and an isolated RILTRA_HOME: version, help and status, init and
 # index of a two-file fixture, a symbol search, an occurrence census, a
-# callers query, and the MCP stdio server (initialize, tools/list, a source-
+# callers query, a grep, a knowledge record bound to a symbol, an incremental
+# index after an edit, and the MCP stdio server (initialize, tools/list, a source-
 # grounded call, a classified error, a pure JSON-RPC stdout). An archive is
 # extracted first, so the check covers what a user would unpack. Exit 0 only
 # when every check passes; the first failure stops it with the check's name.
@@ -137,6 +138,17 @@ callers="$("$bin" callers --repo smoke --path a.py --line 1 --col 5)"
 expect "callers are candidates" '"kind":"POTENTIAL_CALL"' "$callers"
 grep_doc="$("$bin" grep --repo smoke --pattern 'alpha()')"
 expect "grep names the enclosing definition" '"in":{"name":"beta"' "$grep_doc"
+
+# --- knowledge record, binding and an incremental index ----------------------
+record='{"id":"smoke-record","kind":"decision","title":"Smoke alpha decision","body":"short body","status":"active","author":"smoke","evidence":[]}'
+binding='{"record_id":"smoke-record","record_revision":1,"relation":"documents","author":"smoke","rationale":"smoke check","provenance":"smoke"}'
+expect "knowledge create" '"operation":"create"' "$(printf '%s' "$record" | "$bin" knowledge create --repo smoke --input -)"
+expect "knowledge search finds the title" '"id":"smoke-record"' "$("$bin" knowledge search --repo smoke --query Smoke)"
+expect "knowledge bind to alpha" '"operation":"bind"' "$(printf '%s' "$binding" | "$bin" knowledge bind --repo smoke --path a.py --line 1 --col 5 --input -)"
+expect "knowledge at returns the record" '"record_id":"smoke-record"' "$("$bin" knowledge at --repo smoke --path a.py --line 1 --col 5)"
+printf 'def gamma():\n    return 1\n' >>"$work/repo/a.py"
+expect "index is incremental after a change" '"mode":"incremental"' "$("$bin" index --repo smoke)"
+expect "search finds the function added since the index" '"name":"gamma"' "$("$bin" search --repo smoke --symbol gamma)"
 
 # --- the MCP stdio server ----------------------------------------------------
 init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'

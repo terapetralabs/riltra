@@ -74,6 +74,7 @@ const AGENT_BLOCK: &str = r#"## Code intelligence (Riltra)
 
 Riltra is a local code map, not a source of truth. Confirm answers against the cited source; index freshness and evidence labels limit what an answer establishes.
 
+- `riltra mcp` lists only a core tool set by default. The tools this block names that are outside it (`riltra_health`, `riltra_repo_status`, `riltra_code_packet`, `riltra_code_changes` and `riltra_knowledge_at_anchor`) are listed only by `riltra mcp --all-tools`; calling them by name works either way.
 - For a new folder, run `riltra start [--path <directory>] [--name <name>]` in a terminal. The wizard shows readiness and the effective `RILTRA_HOME`; registration and indexing each require a separate default-no approval. `--client` selects an integration only; it does not approve writes.
 - In the wizard, choose a definition from the overview menu. Riltra builds a packet from that selection, so do not guess line or column coordinates. Entry points are candidates from indexed definitions or conventional locations, not proof of runtime flow. Document and manifest excerpts are labelled live evidence.
 - `fresh` describes the selected index snapshot. On `stale`, `unknown`, `source-changed`, or a changed menu snapshot, reindex and select again.
@@ -93,7 +94,7 @@ const AGENT_BLOCK_MARKERS: [&str; 10] = [
     "`riltra start [--path <directory>] [--name <name>]`",
     "`unsupported-schema:<found>`",
     "`riltra_health.versions.code_index_schema`",
-    "`riltra_repo_status`",
+    "Call `riltra_repo_status` for this repo",
     "`schema_ahead` (`<found>` is higher)",
     "separate approval before running it",
     "`probe_scope: in_process_handler`",

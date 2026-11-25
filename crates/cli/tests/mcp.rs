@@ -834,6 +834,10 @@ fn every_tool_description_follows_template() {
             "{name} has no When to call: {desc}"
         );
         assert!(desc.contains("Not for:"), "{name} has no Not for: {desc}");
+        assert!(
+            desc.find("When to call:") < desc.find("Not for:"),
+            "{name}: When to call: must come before Not for: {desc}"
+        );
         for token in desc
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .filter(|t| t.starts_with("riltra_"))

@@ -67,10 +67,11 @@ jobs:
         # which leaves the required context missing. `macos-15-intel` is the
         # same macOS 15 release on the separate x64 pool.
         #
-        # macOS ARM64 is therefore no longer covered by this matrix. Restore
-        # it as a SEPARATE, NON-REQUIRED workflow once the ARM64 pool
-        # recovers; a `continue-on-error` matrix entry would report a
-        # cancelled job as a pass, which is not acceptable evidence.
+        # macOS ARM64 is therefore no longer covered by this matrix. It runs
+        # in the SEPARATE, NON-REQUIRED workflow macos-arm64.yml (artifact
+        # only, no `continue-on-error`): a `continue-on-error` matrix entry
+        # would report a cancelled job as a pass, which is not acceptable
+        # evidence.
         include:
           - { name: windows-latest, runner: windows-latest }
           - { name: ubuntu-latest, runner: ubuntu-latest }

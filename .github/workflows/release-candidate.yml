@@ -9,7 +9,8 @@ name: release-candidate
 # decision (design gate D-M9-6).
 #
 # macOS runs on the x64 pool for the reason recorded in ci.yml; macOS ARM64 is
-# not covered by this workflow either.
+# not covered by this workflow either. It has its own non-required workflow,
+# macos-arm64.yml.
 #
 # The package runners are pinned to fixed images (windows-2025, ubuntu-24.04,
 # macos-15-intel) so that a change of a `-latest` image does not change the

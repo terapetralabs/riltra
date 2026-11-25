@@ -1969,10 +1969,31 @@ fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str
             let Some(src_root) = rust_crate_src_root(importer) else {
                 return false;
             };
-            return (1..=parts.len()).any(|n| {
-                let path = parts[..n].join("/");
-                target == format!("{src_root}/{path}.rs")
-                    || target == format!("{src_root}/{path}/mod.rs")
+            let Some(rest) = target
+                .strip_prefix(src_root)
+                .and_then(|t| t.strip_prefix('/'))
+            else {
+                return false;
+            };
+            // `target` is `<path>.rs` or `<path>/mod.rs` for a prefix `<path>`
+            // of the module parts. Grow the prefix only while it is still a
+            // prefix of the stem, so a long `use` line costs linear time.
+            let stems = [rest.strip_suffix(".rs"), rest.strip_suffix("/mod.rs")];
+            return stems.into_iter().flatten().any(|stem| {
+                let mut path = String::new();
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 {
+                        path.push('/');
+                    }
+                    path.push_str(part);
+                    if !stem.starts_with(path.as_str()) {
+                        return false;
+                    }
+                    if path == stem {
+                        return true;
+                    }
+                }
+                false
             });
         }
     }
@@ -7085,6 +7106,38 @@ mod tests {
             "use crate::helper;",
             "crates/a/src/helper.rs"
         ));
+    }
+
+    #[test]
+    fn rust_use_matches_every_module_prefix_and_mod_rs() {
+        let import = "use crate::a::b::c;";
+        let matches = |target: &str| import_mentions_path("src/main.rs", "rust", import, target);
+        assert!(matches("src/a.rs"));
+        assert!(matches("src/a/mod.rs"));
+        assert!(matches("src/a/b.rs"));
+        assert!(matches("src/a/b/c/mod.rs"));
+        assert!(!matches("src/a/b/c/d.rs"));
+        assert!(!matches("src/b.rs"));
+        assert!(!matches("src/ab.rs"));
+    }
+
+    #[test]
+    fn rust_long_use_path_is_checked_in_linear_time() {
+        // A crafted `use crate::a::a::...` line that matches no target used to
+        // rebuild every prefix from the start: quadratic in the line length.
+        let import = format!("use crate::{}x;", "a::".repeat(30_000));
+        let start = std::time::Instant::now();
+        assert!(!import_mentions_path(
+            "src/main.rs",
+            "rust",
+            &import,
+            "src/b.rs"
+        ));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

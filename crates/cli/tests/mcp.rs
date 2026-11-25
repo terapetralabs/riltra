@@ -16,6 +16,39 @@ use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The core set the default `riltra mcp` lists, in the order `health` reports
+/// it. `riltra_code_grep` joins the server in Task 2; until then the default
+/// list holds only the core tools that exist.
+const CORE_TOOLS: [&str; 8] = [
+    "riltra_code_grep",
+    "riltra_code_search",
+    "riltra_code_query",
+    "riltra_code_callers",
+    "riltra_code_impact",
+    "riltra_context",
+    "riltra_project_overview",
+    "riltra_knowledge_search",
+];
+
+fn all_tools_flag(cmd: &mut Command) {
+    cmd.arg("--all-tools");
+}
+
+/// Sorted tool names from one `tools/list` request on a ready session.
+fn tool_names(s: &mut Session, id: i64) -> Vec<String> {
+    s.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {}}).to_string());
+    let v = s.recv();
+    assert_eq!(v["id"], id, "tools/list response: {v}");
+    let mut names: Vec<String> = v["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
 #[path = "common/mock_lsp.rs"]
 mod mock_lsp;
 #[path = "common/rust_alias.rs"]
@@ -225,7 +258,7 @@ fn mcp_initialize_handshake_reports_identity() {
 #[test]
 fn mcp_tools_list_advertises_the_twenty_one_tools() {
     let h = home("tools");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let v = s.recv();
     assert_eq!(v["id"], 2);
@@ -661,7 +694,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
 #[test]
 fn every_tool_description_says_when_to_call_it() {
     let h = home("when-to-call");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let v = s.recv();
     let tools = v["result"]["tools"].as_array().expect("tools array");
@@ -679,6 +712,138 @@ fn every_tool_description_says_when_to_call_it() {
         missing.is_empty(),
         "tools whose description has no \"When to call: \" clause: {missing:?}"
     );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn default_tools_list_is_the_core_set() {
+    let h = home("core-default");
+    let mut all = ready_with(&h, all_tools_flag);
+    let all_names = tool_names(&mut all, 2);
+    let mut expected: Vec<String> = CORE_TOOLS
+        .iter()
+        .filter(|name| all_names.iter().any(|a| a.as_str() == **name))
+        .map(|name| name.to_string())
+        .collect();
+    expected.sort_unstable();
+    let mut s = ready(&h);
+    assert_eq!(
+        tool_names(&mut s, 2),
+        expected,
+        "the default list is the core set that exists"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    let (code, _) = all.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn all_tools_flag_lists_every_tool() {
+    let h = home("all-tools");
+    let mut all = ready_with(&h, all_tools_flag);
+    let all_names = tool_names(&mut all, 2);
+    assert_eq!(
+        all_names.len(),
+        21,
+        "--all-tools lists every tool (22 after Task 2): {all_names:?}"
+    );
+    let mut core = ready(&h);
+    let core_names = tool_names(&mut core, 2);
+    assert!(
+        core_names.len() < all_names.len(),
+        "the default list is smaller than --all-tools: {core_names:?}"
+    );
+    assert!(
+        core_names.iter().all(|n| all_names.contains(n)),
+        "every default tool is also listed by --all-tools: {core_names:?}"
+    );
+    let (code, _) = core.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    let (code, _) = all.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn hidden_tool_still_callable() {
+    let h = home("hidden-callable");
+    let r = home("hidden-callable-repo");
+    let lines = graph_repo(&h, &r, "g", &[vec![1], vec![2], vec![]]);
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_trace",
+        &json!({"repo": "g", "path": "graph.py", "line": lines[0], "col": 6, "depth": 3}),
+    );
+    assert!(
+        !is_error(&res),
+        "a tool outside the core set must stay callable: {res}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
+fn initialize_carries_instructions() {
+    let h = home("instructions");
+    let mut s = spawn(&h);
+    s.send(initialize_request());
+    let v = s.recv();
+    let text = v["result"]["instructions"]
+        .as_str()
+        .unwrap_or_else(|| panic!("initialize must carry instructions: {v}"));
+    assert!(
+        text.len() <= 600,
+        "instructions are {} bytes: {text}",
+        text.len()
+    );
+    for name in [
+        "riltra_code_grep",
+        "riltra_code_search",
+        "riltra_code_impact",
+        "riltra_knowledge_search",
+    ] {
+        assert!(text.contains(name), "instructions must name {name}: {text}");
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn every_tool_description_follows_template() {
+    let h = home("template");
+    let mut s = ready_with(&h, all_tools_flag);
+    s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    let v = s.recv();
+    let tools = v["result"]["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    for tool in tools {
+        let name = tool["name"].as_str().expect("tool name");
+        let desc = tool["description"].as_str().unwrap_or_default();
+        assert!(
+            desc.contains("When to call:"),
+            "{name} has no When to call: {desc}"
+        );
+        assert!(desc.contains("Not for:"), "{name} has no Not for: {desc}");
+        for token in desc
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| t.starts_with("riltra_"))
+        {
+            assert!(
+                names.contains(&token),
+                "{name} names {token}, which is not a tool"
+            );
+        }
+    }
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
     assert_home_untouched(&h);
@@ -1045,6 +1210,11 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_status"
         ],
         "the health document must list the twenty-one tools"
+    );
+    assert_eq!(
+        d["capabilities"]["core_tools"],
+        json!(CORE_TOOLS),
+        "the health document must mark the core set"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -7858,11 +8028,11 @@ fn code_query_refuses_outdated_and_newer_databases_with_their_own_kinds() {
 #[test]
 fn mcp_tools_list_2026_07_28_advertises_twenty_one_tools_with_cache_hints() {
     let h = home("tools-list-modern");
-    let mut legacy = ready(&h);
+    let mut legacy = ready_with(&h, all_tools_flag);
     legacy.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let legacy_result = legacy.recv()["result"].clone();
 
-    let mut modern = spawn(&h);
+    let mut modern = spawn_with(&h, all_tools_flag);
     let result = modern_request(&mut modern, 3, "tools/list", json!({}));
     assert_eq!(result["ttlMs"], 0);
     assert_eq!(result["cacheScope"], "public");
@@ -8312,7 +8482,7 @@ fn omitted_repo_every_tool_one_registered() {
     let r = home("optrepo-all-one-repo");
     write_alpha(&r);
     indexed_repo(&h, &r, "solo");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     let mut table: Vec<String> = TOOL_ARGS.iter().map(|(n, _)| n.to_string()).collect();
     table.sort_unstable();
     assert_eq!(
@@ -8393,7 +8563,7 @@ fn omitted_repo_with_corrupt_registry_is_store_error() {
 #[test]
 fn repo_is_optional_and_documented_in_every_schema() {
     let h = home("optrepo-schema");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let v = s.recv();
     let mut seen = 0;

@@ -156,9 +156,18 @@ jsonrpc="$(grep -c '^{"jsonrpc":"2.0"' "$work/mcp.out" || true)"
 [ "$lines" -gt 0 ] && [ "$lines" = "$jsonrpc" ] && pass "stdout carries only JSON-RPC ($lines lines)" \
   || fail "stdout carries only JSON-RPC (lines=$lines jsonrpc=$jsonrpc)"
 tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp.out" | sort -u | wc -l | tr -d ' ')"
-[ "$tools" = "21" ] && pass "twenty-one tools advertised" || fail "twenty-one tools advertised (got $tools)"
+[ "$tools" = "7" ] && pass "seven core tools advertised by default" || fail "seven core tools advertised by default (got $tools)"
 expect "overview tool advertised" '"name":"riltra_project_overview"' "$out"
-expect "packet tool advertised" '"name":"riltra_code_packet"' "$out"
+expect "initialize carries instructions" '"instructions"' "$out"
+{
+  printf '%s\n' "$init"
+  sleep 1
+  printf '%s\n%s\n' "$ready" "$list"
+  sleep 2
+} | "$bin" mcp --all-tools >"$work/mcp-all.out" 2>"$work/mcp-all.err"
+all_tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp-all.out" | sort -u | wc -l | tr -d ' ')"
+[ "$all_tools" = "21" ] && pass "twenty-one tools advertised with --all-tools" || fail "twenty-one tools advertised with --all-tools (got $all_tools)"
+expect "packet tool advertised with --all-tools" '"name":"riltra_code_packet"' "$(cat "$work/mcp-all.out")"
 expect "a source-grounded call" 'alpha' "$out"
 overview_response="$(overview_response_line "$work/mcp.out")"
 overview_response_is_successful "$overview_response" \

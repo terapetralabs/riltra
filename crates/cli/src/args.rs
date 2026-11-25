@@ -99,7 +99,10 @@ pub enum Command {
     Knowledge {
         op: KnowledgeOp,
     },
-    Mcp,
+    /// Serve the MCP stdio interface. `all_tools` lists every tool, not only the core set.
+    Mcp {
+        all_tools: bool,
+    },
     /// Print the agent instruction block (Markdown text, not JSON). No arguments.
     AgentBlock,
 }
@@ -328,7 +331,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "-h" | "--help" | "help" if args.len() == 1 => Ok(Command::Help),
         "-V" | "--version" | "version" if args.len() == 1 => Ok(Command::Version),
         "status" if args.len() == 1 => Ok(Command::Status),
-        "mcp" if args.len() == 1 => Ok(Command::Mcp),
+        "mcp" if args.len() == 1 => Ok(Command::Mcp { all_tools: false }),
+        "mcp" if args.len() == 2 && args[1] == "--all-tools" => {
+            Ok(Command::Mcp { all_tools: true })
+        }
         "overview" => {
             let mut repo = None;
             let mut i = 1;

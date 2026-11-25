@@ -108,7 +108,7 @@ without touching your own registry.
 
 `riltra mcp` serves twenty-one tools over stdio (twenty read-only ones and the
 provider-backed `riltra_code_semantic`, which stays off until an operator sets
-`RILTRA_LSP_SERVER` to a language server's absolute path). An OpenCode
+`RILTRA_LSP_SERVER` to a language server's absolute path). By default the server lists seven core tools; `riltra mcp --all-tools` lists all twenty-one. An OpenCode
 configuration entry looks like:
 
 ```json

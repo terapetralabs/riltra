@@ -108,7 +108,8 @@ guessing.
 Run `riltra mcp` to start a local stdio MCP server with twenty-one tools: twenty
 read-only tools for repository, code, knowledge, project overview, the area map, selected-anchor packets, change checks, and documents linked to code, plus
 `riltra_code_semantic`, which starts the language server configured by the
-operator. That server may write its own cache, run project tools, or access the
+operator. By default `riltra mcp` lists seven core tools; `riltra mcp
+--all-tools` lists all twenty-one. Every tool stays callable by name. That server may write its own cache, run project tools, or access the
 network. Riltra's MCP handlers do not create, migrate, or replace a database.
 A missing index returns `no-index`; an unsupported schema is refused with
 `schema_outdated`. Prepare repositories with the CLI before querying them.

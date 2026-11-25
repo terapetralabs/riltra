@@ -279,11 +279,13 @@ fn rust_import(target: &str, importer: &str, text: &str) -> Option<String> {
         return None;
     }
     let module = rust_module(target)?.join("::");
+    // One budget for every `crate::` occurrence of this importer's text.
+    let mut scanned = 0usize;
     for (at, _) in text.match_indices("crate::") {
         if text[..at].chars().next_back().is_some_and(is_word_char) {
             continue;
         }
-        if use_tree_names(&text[at + "crate::".len()..], &module) {
+        if use_tree_names(&text[at + "crate::".len()..], &module, &mut scanned) {
             return Some(format!("crate::{module}"));
         }
     }
@@ -317,20 +319,27 @@ const USE_TREE_SCAN_BYTES: usize = 1 << 20;
 /// Whether a `use` tree (the text after `crate::`) names `module` or an item of
 /// it. The walk is iterative, so no depth of the tree can exhaust the call stack.
 /// A branch whose path can no longer lead to `module` is dropped at once, so a
-/// path never grows past the module's own length.
-fn use_tree_names(tree: &str, module: &str) -> bool {
-    let mut scanned = 0usize;
+/// path never grows past the module's own length. `scanned` is the group text
+/// read so far for the whole importer, shared by its `crate::` occurrences.
+/// Only a group is charged: its closing scan and its items are read once per
+/// level, so the charge bounds all the work a nested tree can cause.
+fn use_tree_names(tree: &str, module: &str, scanned: &mut usize) -> bool {
     let mut pending: Vec<(String, &str)> = vec![(String::new(), tree)];
     while let Some((prefix, rest)) = pending.pop() {
-        scanned += rest.len();
-        if scanned > USE_TREE_SCAN_BYTES {
-            return false;
-        }
         let mut prefix = prefix;
         let mut rest = rest.trim_start();
         loop {
             if let Some(inner) = rest.strip_prefix('{') {
-                let inner = &inner[..group_end(inner)];
+                // Checked before the scan, so an exhausted budget costs nothing.
+                if *scanned > USE_TREE_SCAN_BYTES {
+                    return false;
+                }
+                let end = group_end(inner);
+                *scanned += end;
+                if *scanned > USE_TREE_SCAN_BYTES {
+                    return false;
+                }
+                let inner = &inner[..end];
                 for item in split_top_level(inner).into_iter().rev() {
                     pending.push((prefix.clone(), item));
                 }
@@ -1204,5 +1213,19 @@ mod tests {
         let file = result.files.iter().find(|f| f.path == "index.js").unwrap();
         assert_eq!(paths_of(&file.companions), ["index.d.ts"]);
         assert!(file.companions.iter().all(|c| c.why == "name-pair"));
+    }
+
+    #[test]
+    fn rust_nested_use_scan_budget_is_shared_across_occurrences() {
+        // Unbalanced nested groups: every `crate::` occurrence would rescan the
+        // rest of the text if each one had its own budget.
+        let text = "use crate::{crate::{".repeat(4800);
+        let started = std::time::Instant::now();
+        assert_eq!(rust_import("src/index.rs", "src/main.rs", &text), None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }

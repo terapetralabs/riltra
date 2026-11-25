@@ -13,7 +13,8 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   `null` and `in_reason` says why). Literal text by default; `--regex` and `--ignore-case`
   change the match, and `--path` limits the files searched. Files under common dependency and
   build folders (`node_modules`, `vendor`, `target`, `dist`, `build`, `.venv`, `venv`,
-  `__pycache__`, `third_party`) are read and ranked last, never skipped.
+  `__pycache__`, `third_party`) are read and ranked last; they are never skipped by name, but
+  the read budget can end the search before it reaches them.
 - Companion files for a grep hit, each with an evidence label: `name-pair` (same base name,
   `path-convention`), `importer` (`import-text-match`: a file whose indexed import text names the
   hit's file, a guess from text and never a proven import), and `caller` (`CALLS` or

@@ -190,8 +190,8 @@ opt-in or appended; changes to existing keys are released in a minor version
 and described in the release notes. The on-disk index schema is versioned: an
 older schema is reported as stale or `schema_outdated` and rebuilt with
 `riltra index`, never silently reused. Since `0.3.0`, `riltra mcp` lists nine
-core tools by default and `riltra mcp --all-tools` lists all of them; the tool
-names did not change. These are compatibility commitments for the `0.3.x` line
+core tools by default and `riltra mcp --all-tools` lists all of them; no
+existing tool was renamed or removed. These are compatibility commitments for the `0.3.x` line
 only. They are not API guarantees for a 1.0 release, and this
 release makes no claim about measured results on real projects.
 

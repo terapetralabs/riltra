@@ -51,7 +51,8 @@ skipped and counted. `limit` counts files (default 20, maximum 200); hits are
 capped per file and in total, and `truncated` names the limit reached. A search
 without an index still runs and creates nothing.
 
-Files are searched in path order, from the walk that `scan` and `index` share.
+Files are searched in path order, from the walk that `scan` and `index` share,
+with dependency folders (below) last.
 `.riltraignore` is honoured and `.gitignore` is not, so `node_modules/` or
 `target/` are searched unless a `.riltraignore` entry excludes them. Files under
 a folder named `node_modules`, `vendor`, `target`, `dist`, `build`, `.venv`,

@@ -65,7 +65,7 @@ languages, evidence labels, provider boundaries, and known limits.
 
 ## Quick start
 
-The [`0.2.0` release](https://github.com/terapetralabs/riltra/releases/tag/v0.2.0)
+The [`0.2.1` release](https://github.com/terapetralabs/riltra/releases/tag/v0.2.1)
 provides native archives for Windows x64, Linux x64, and macOS Intel x64 with
 SHA-256 checksums. The default package does not include the optional
 semantic-knowledge feature. See [release/INSTALL.md](release/INSTALL.md) for install and
@@ -182,13 +182,13 @@ older schema is reported as stale or `schema_outdated` and rebuilt with
 the `0.2.x` line only. They are not API guarantees for a 1.0 release, and this
 release makes no claim about measured results on real projects.
 
-Platform support for the `0.2.0` archives is Windows x64, Linux x64, and macOS
+Platform support for the `0.2.1` archives is Windows x64, Linux x64, and macOS
 Intel x64. The optional semantic-knowledge feature is not part of the default
 package.
 
 ## Project status
 
-Riltra is pre-1.0 software. `0.2.0` is a release, not a pre-release. `0.1.0`
+Riltra is pre-1.0 software. `0.2.1` is a release, not a pre-release. `0.1.0`
 was published as a pre-release. Check the [release notes](https://github.com/terapetralabs/riltra/releases)
 for the published versions and their limits.
 

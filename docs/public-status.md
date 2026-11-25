@@ -1,6 +1,6 @@
 # Public project status
 
-Riltra `0.2.0` is a published pre-1.0 release, local-first CLI and MCP server.
+Riltra `0.2.1` is a published pre-1.0 release, local-first CLI and MCP server.
 The [README](../README.md) covers installation and agent setup. The
 [capabilities guide](guide/capabilities.md) lists supported languages, evidence
 labels, provider boundaries, and known limitations. Archive installation and

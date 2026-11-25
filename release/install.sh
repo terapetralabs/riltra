@@ -4,7 +4,7 @@
 # Minimal user-level installer for a Riltra release archive (M10 Task 5).
 #
 # Local archive:  install.sh --archive <riltra-<version>-<platform>.tar.gz>
-# Release asset:  install.sh [--version 0.2.0]
+# Release asset:  install.sh [--version 0.2.1]
 #
 # The payload (binary, LICENSE, NOTICE, THIRD_PARTY_LICENSES.txt, sbom.cdx.json
 # and INSTALL.md) goes to $HOME/.local/share/riltra. The user-visible command is
@@ -12,7 +12,7 @@
 # PATH is printed, not changed.
 set -eu
 
-version=0.2.0
+version=0.2.1
 archive=
 while [ $# -gt 0 ]; do
     case "$1" in

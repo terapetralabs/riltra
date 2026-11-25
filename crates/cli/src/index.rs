@@ -1891,7 +1891,7 @@ pub(crate) fn resolve_edge_anchor_classified(
 /// Only the enclosing conventional root is used: custom target paths and
 /// `src/bin` are not resolved as separate crate roots. A path with no `src`
 /// component yields no candidate rather than a repo-root guess.
-fn rust_crate_src_root(importer: &str) -> Option<&str> {
+pub(crate) fn rust_crate_src_root(importer: &str) -> Option<&str> {
     if let Some((head, _)) = importer.rsplit_once("/src/") {
         return Some(&importer[..head.len() + "/src".len()]);
     }
@@ -2082,6 +2082,87 @@ pub(crate) fn indexed_inbound_total(
     Ok(store::selected_edge_counts(tx, &selection)?.total)
 }
 
+/// The anchor of one definition for the grep companions, resolved as `callers`
+/// resolves a position: a proven semantic identity when the import has one,
+/// else the syntax definition at that position. Errors are the resolver's own.
+pub(crate) fn companion_anchor(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    validated: &str,
+    line1: u32,
+    col1: u32,
+    source: &[u8],
+) -> Result<EdgeAnchor, GraphQueryError> {
+    resolve_edge_anchor_classified(
+        tx,
+        snapshot_id,
+        canon,
+        validated,
+        line1 - 1,
+        col1 - 1,
+        None,
+        Some(source),
+    )
+}
+
+/// The inbound caller edges of an anchor, page by page in the order the
+/// `callers` query uses, with the same candidate and selection rules. `visit`
+/// sees each edge and returns `false` to stop. Coverage, live state and counts
+/// are not computed: this is the lean path the grep companions use.
+pub(crate) fn companion_caller_edges(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    inputs: &CallerInputs,
+    anchor: &EdgeAnchor,
+    mut visit: impl FnMut(&store::EdgeRow) -> bool,
+) -> Result<(), GraphQueryError> {
+    const PAGE: i64 = DEFAULT_SEARCH_LIMIT as i64;
+    let endpoint = anchor_endpoint(anchor)
+        .ok_or_else(|| GraphQueryError::Anchor("anchor has no endpoint".to_string()))?;
+    // Same rule as `edge_query_tx_classified`: a data member takes no call by name.
+    let by_name = !anchor.data_member;
+    let candidates = if by_name {
+        caller_candidate_paths_with(tx, snapshot_id, inputs, anchor)?
+    } else {
+        CallerCandidates {
+            paths: Vec::new(),
+            aliases: Vec::new(),
+        }
+    };
+    let candidate_name = if by_name {
+        anchor.candidate_display.as_deref().map(called_name)
+    } else {
+        None
+    };
+    let selection = store::EdgeSelection {
+        snapshot_id,
+        endpoint: &endpoint,
+        inbound: true,
+        candidate_name,
+        candidate_paths: &candidates.paths,
+        candidate_aliases: &candidates.aliases,
+        syntax_aliases: &[],
+    };
+    let mut offset = 0;
+    loop {
+        let page = if candidate_name.is_some() {
+            store::selected_edge_page(tx, &selection, PAGE, offset)?
+        } else {
+            store::edges_inbound(tx, snapshot_id, &endpoint, PAGE, offset)?
+        };
+        for edge in &page {
+            if !visit(edge) {
+                return Ok(());
+            }
+        }
+        if (page.len() as i64) < PAGE {
+            return Ok(());
+        }
+        offset += PAGE;
+    }
+}
+
 struct CallerCandidates {
     paths: Vec<String>,
     aliases: Vec<(String, String)>,
@@ -2089,8 +2170,10 @@ struct CallerCandidates {
 
 /// The snapshot-wide inputs every caller seed reads. Loaded once per query.
 pub(crate) struct CallerInputs {
-    id_map: BTreeMap<String, (i64, String)>,
-    imports: Vec<store::ImportRow>,
+    /// Path → (file id, digest) of every indexed file of the snapshot.
+    pub(crate) id_map: BTreeMap<String, (i64, String)>,
+    /// Every import row of the snapshot.
+    pub(crate) imports: Vec<store::ImportRow>,
 }
 
 impl CallerInputs {

@@ -222,6 +222,12 @@ fn grep_document(
         Some(reason) => format!("{{\"reason\":\"{reason}\"}}"),
         None => "null".to_string(),
     };
+    let gaps_json = result
+        .caller_gaps
+        .iter()
+        .map(|gap| format!("\"{}\"", json::escape(gap)))
+        .collect::<Vec<_>>()
+        .join(",");
     let snapshot_json = match &result.snapshot {
         Some(snapshot) => format!(
             "{{\"id\":{},\"freshness\":\"{}\",\"reasons\":[{}]}}",
@@ -245,7 +251,7 @@ fn grep_document(
         String::new()
     };
     format!(
-        "{{\"repo\":\"{}\",\"pattern\":\"{}\",\"mode\":\"{}\",\"files\":[{}],\"totals\":{{\"files_scanned\":{},\"files_skipped_binary\":{},\"files_skipped_large\":{},\"files_skipped_unreadable\":{},\"dirs_unreadable\":{},\"dirs_escaped\":{},\"files_matched\":{},\"hits\":{},\"bytes_read\":{}}},\"truncated\":{},\"snapshot\":{}{}}}",
+        "{{\"repo\":\"{}\",\"pattern\":\"{}\",\"mode\":\"{}\",\"files\":[{}],\"totals\":{{\"files_scanned\":{},\"files_skipped_binary\":{},\"files_skipped_large\":{},\"files_skipped_unreadable\":{},\"dirs_unreadable\":{},\"dirs_escaped\":{},\"files_matched\":{},\"hits\":{},\"bytes_read\":{}}},\"truncated\":{},\"caller_gaps\":[{}],\"snapshot\":{}{}}}",
         json::escape(repo),
         json::escape(req.pattern),
         grep_mode(req),
@@ -260,6 +266,7 @@ fn grep_document(
         totals.hits,
         totals.bytes_read,
         truncated_json,
+        gaps_json,
         snapshot_json,
         empty
     )

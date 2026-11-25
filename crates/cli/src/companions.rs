@@ -5,11 +5,13 @@
 //! - `name-pair` (`path-convention`): same base name, extension of the same
 //!   group (C/C++ headers, JS/TS, lex/yacc, Python stubs). From the walk only.
 //! - `importer` (`import-text-match`): a file whose indexed import text names
-//!   the file of the hit. A guess from text, never a proven import.
+//!   the file of the hit, or a Rust parent file that declares it with `mod`.
+//!   A guess from text, never a proven import.
 //! - `caller` (`CALLS` or `POTENTIAL_CALL`): a file that calls a definition
-//!   enclosing a hit. The same edge query the `callers` tool runs.
+//!   enclosing a hit, found with the anchor resolution and edge selection of
+//!   the `callers` tool.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::{index, scan, semantic, store};
@@ -21,6 +23,17 @@ pub(crate) struct Companion {
     pub basis: &'static str,
     pub via: String,
 }
+
+/// The caller companions of one file, and the reasons lookups were skipped.
+pub(crate) struct CallerFinds {
+    pub companions: Vec<Companion>,
+    pub gaps: Vec<&'static str>,
+}
+
+/// A caller lookup skipped because the snapshot's graph proof is not current.
+pub(crate) const GAP_GRAPH_PROOF: &str = "graph-proof-incompatible";
+/// A definition the resolver does not map back to itself, so it is skipped.
+pub(crate) const GAP_NOT_RESOLVED: &str = "definition-not-resolved";
 
 /// Per kind of `why`, at most this many companions.
 const MAX_PER_KIND: usize = 3;
@@ -89,41 +102,41 @@ pub(crate) fn name_pairs(path: &str, walk: &[String]) -> Vec<Companion> {
         .collect()
 }
 
-/// Files whose indexed import text names `path`, one per importing file.
-/// Reads the imports table only; `Err` on a storage failure.
-// shortcut: no importer rule for Go package roots (`.` import path) or
-// Rust `mod` declarations; `mod` is not an import fact in the index, so the
-// text needed to match it is not stored. Upgrade when mod items are indexed.
+/// Files whose import text, or Rust parent `mod` declaration, names `path`,
+/// one entry per file. Uses the snapshot's inputs, loaded once per request.
+/// `Err` only when a file cannot be read for a Rust parent check.
 pub(crate) fn importers(
-    tx: &rusqlite::Transaction<'_>,
-    snapshot_id: i64,
+    inputs: &index::CallerInputs,
+    canon: &Path,
+    walk: &[String],
     path: &str,
 ) -> Result<Vec<Companion>, String> {
-    let names: HashMap<i64, String> = store::file_id_map(tx, snapshot_id)?
-        .into_iter()
-        .map(|(rel, (id, _))| (id, rel))
+    let names: HashMap<i64, &str> = inputs
+        .id_map
+        .iter()
+        .map(|(rel, (id, _))| (*id, rel.as_str()))
         .collect();
-    let mut found: Vec<(String, String)> = Vec::new();
-    for row in store::imports_for(tx, snapshot_id)? {
-        let importer = names
+    // Importer path → the spelling that names `path`.
+    let mut found: BTreeMap<String, String> = BTreeMap::new();
+    for row in &inputs.imports {
+        let importer = *names
             .get(&row.file_id)
             .ok_or_else(|| format!("import row of unknown file id {}", row.file_id))?;
-        if importer == path || index::is_test_path(importer) {
-            continue;
-        }
-        if found.iter().any(|(seen, _)| seen == importer) {
+        if importer == path || index::is_test_path(importer) || found.contains_key(importer) {
             continue;
         }
         // The text is `None` only for bytes that are not UTF-8: such an import
-        // cannot be matched as text and is not a guess either.
+        // cannot be matched as text, and is not guessed at either.
         let Some(text) = row.text.as_deref() else {
             continue;
         };
         if let Some(via) = import_match(path, importer, text) {
-            found.push((importer.clone(), via));
+            found.insert(importer.to_string(), via);
         }
     }
-    found.sort();
+    for (importer, via) in mod_declarations(canon, walk, path)? {
+        found.entry(importer).or_insert(via);
+    }
     Ok(found
         .into_iter()
         .take(MAX_PER_KIND)
@@ -151,34 +164,61 @@ fn import_match(target: &str, importer: &str, text: &str) -> Option<String> {
         return go_import(target, text);
     }
     if target.ends_with(".rs") {
-        return rust_import(target, text);
+        return rust_import(target, importer, text);
     }
     None
 }
 
-/// Python: the dotted module of the file (`a/b/c.py` or `a/b/c/__init__.py`
-/// is `a.b.c`), named by `import a.b.c` or by `from a.b import c`.
+/// Python: the dotted module of the file (`a/b/c.py` or `a/b/c/__init__.py` is
+/// `a.b.c`). Named by the module position of `import a.b.c [as x]`, or of
+/// `from a.b import c`, where `c` is a name that submodule `a.b.c` can match.
+/// Names after `import` are never aliases: the `as` part is skipped.
 fn python_import(target: &str, text: &str) -> Option<String> {
     let stem = target
         .strip_suffix(".pyi")
         .or_else(|| target.strip_suffix(".py"))?;
     let stem = stem.strip_suffix("/__init__").unwrap_or(stem);
     let module = stem.replace('/', ".");
-    let tokens: Vec<&str> = text
-        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')' | ';'))
-        .filter(|t| !t.is_empty())
-        .collect();
-    if tokens.contains(&module.as_str()) {
-        return Some(module);
-    }
-    let (parent_module, last) = module.rsplit_once('.')?;
-    let from_form = tokens.first() == Some(&"from") && tokens.get(1) == Some(&parent_module);
-    let names_last = tokens
-        .iter()
-        .skip_while(|t| **t != "import")
-        .skip(1)
-        .any(|t| *t == last);
-    (from_form && names_last).then_some(module)
+    let statement = text.replace(['(', ')'], " ");
+    let first = statement.split_whitespace().next()?;
+    let names = keyword_rest(&statement, "import")?;
+    let matched = match first {
+        "import" => item_heads(names).contains(&module.as_str()),
+        "from" => {
+            let from_module = statement.split_whitespace().nth(1)?;
+            let names_last = module
+                .rsplit_once('.')
+                .is_some_and(|(parent_module, last)| {
+                    from_module == parent_module && item_heads(names).contains(&last)
+                });
+            from_module == module.as_str() || names_last
+        }
+        _ => false,
+    };
+    matched.then_some(module)
+}
+
+/// The first word of each comma-separated item: a module of `import` or a name
+/// of `from ... import`. An `as` alias is a later word, so it is never read.
+fn item_heads(list: &str) -> Vec<&str> {
+    list.split(',')
+        .filter_map(|item| item.split_whitespace().next())
+        .collect()
+}
+
+/// The text after the first whole-word occurrence of `keyword`.
+fn keyword_rest<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    text.match_indices(keyword)
+        .find(|(at, _)| {
+            let before = text[..*at].chars().next_back();
+            let after = text[*at + keyword.len()..].chars().next();
+            !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+        })
+        .map(|(at, _)| &text[at + keyword.len()..])
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// JS/TS: a relative specifier that resolves from the importer's folder to
@@ -215,7 +255,8 @@ fn c_include(target: &str, text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Go: a quoted import path that ends at the target's package folder.
+/// Go: a quoted import path that ends at the target's package folder. A bare
+/// path such as the standard library's `errors` is not a local package.
 fn go_import(target: &str, text: &str) -> Option<String> {
     let dir = parent(target);
     if dir.is_empty() {
@@ -223,27 +264,322 @@ fn go_import(target: &str, text: &str) -> Option<String> {
     }
     quoted(text)
         .into_iter()
-        .find(|spec| *spec == dir || spec.ends_with(&format!("/{dir}")))
+        .find(|spec| spec.ends_with(&format!("/{dir}")))
         .map(str::to_string)
 }
 
-/// Rust: `use crate::a::b` for `src/a/b.rs` (or `src/a/b/mod.rs`). The `mod b`
-/// declaration in the parent file is not matched: `mod` is not an import fact.
-fn rust_import(target: &str, text: &str) -> Option<String> {
-    let rel = match target.rsplit_once("/src/") {
-        Some((_, rest)) => rest,
-        None => target.strip_prefix("src/")?,
-    };
-    let stem = rel.strip_suffix(".rs")?;
-    let stem = stem.strip_suffix("/mod").unwrap_or(stem);
-    if stem == "lib" || stem == "main" {
+/// Rust: `use crate::a::b` names `src/a/b.rs` (or `src/a/b/mod.rs`) when the
+/// importer is in the same crate. Grouped and glob uses are read through
+/// `use_paths`. Parent `mod` declarations are a separate check (`mod_declarations`).
+fn rust_import(target: &str, importer: &str, text: &str) -> Option<String> {
+    let root = index::rust_crate_src_root(target)?;
+    if index::rust_crate_src_root(importer) != Some(root) {
         return None;
     }
-    let needle = format!("crate::{}", stem.replace('/', "::"));
-    let matched = text.match_indices(&needle).any(|(at, _)| {
-        !text[at + needle.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
-    });
-    matched.then_some(needle)
+    let module = rust_module(target)?.join("::");
+    let mut paths = Vec::new();
+    for (at, _) in text.match_indices("crate::") {
+        if text[..at].chars().next_back().is_some_and(is_word_char) {
+            continue;
+        }
+        use_paths(&text[at + "crate::".len()..], "", &mut paths);
+    }
+    let named = paths
+        .iter()
+        .any(|p| *p == module || p.starts_with(&format!("{module}::")));
+    named.then(|| format!("crate::{module}"))
+}
+
+/// The module segments of a Rust file under its crate's source root. `None`
+/// for the crate roots `lib.rs` and `main.rs`, which are not modules.
+fn rust_module(path: &str) -> Option<Vec<&str>> {
+    let root = index::rust_crate_src_root(path)?;
+    let rel = path.strip_prefix(root)?.strip_prefix('/')?;
+    let stem = rel.strip_suffix(".rs")?;
+    let mut segments: Vec<&str> = stem.split('/').collect();
+    if segments.last() == Some(&"mod") {
+        segments.pop();
+    }
+    let crate_root = matches!(segments.as_slice(), ["lib"] | ["main"]);
+    if segments.is_empty() || crate_root {
+        None
+    } else {
+        Some(segments)
+    }
+}
+
+/// Full paths named by a `use` tree that follows `crate::`: `a::b`,
+/// `a::{b, c::d}`, `a::*`, `a::{self}`, `a::b as c`. `prefix` is the path read
+/// so far; the tree ends at `;` or at the closing brace of its group.
+fn use_paths(text: &str, prefix: &str, out: &mut Vec<String>) {
+    let text = text.trim_start();
+    if let Some(inner) = text.strip_prefix('{') {
+        let inner = &inner[..group_end(inner)];
+        for item in split_top_level(inner) {
+            use_paths(item, prefix, out);
+        }
+        return;
+    }
+    if text.starts_with('*') {
+        out.push(prefix.to_string());
+        return;
+    }
+    let end = text.find(|c: char| !is_word_char(c)).unwrap_or(text.len());
+    let segment = &text[..end];
+    if segment.is_empty() {
+        return;
+    }
+    if let Some(after) = text[end..].trim_start().strip_prefix("::") {
+        use_paths(after, &join_path(prefix, segment), out);
+    } else if segment == "self" {
+        out.push(prefix.to_string());
+    } else {
+        out.push(join_path(prefix, segment));
+    }
+}
+
+fn join_path(prefix: &str, segment: &str) -> String {
+    if prefix.is_empty() {
+        segment.to_string()
+    } else {
+        format!("{prefix}::{segment}")
+    }
+}
+
+/// Byte index of the `}` that closes a group whose `{` is already consumed.
+fn group_end(text: &str) -> usize {
+    let mut depth = 0usize;
+    for (at, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 0 => return at,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    text.len()
+}
+
+/// Items of a use group, split at commas that are not inside a nested group.
+fn split_top_level(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (at, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+/// Rust: the parent module files of `path` that declare it with `mod`. The
+/// parent of `a/b` is `a.rs` or `a/mod.rs`; the parent of `a` is `lib.rs` or
+/// `main.rs`. Only files of the walk are read; a comment line is not a
+/// declaration.
+fn mod_declarations(
+    canon: &Path,
+    walk: &[String],
+    path: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let (Some(root), Some(segments)) = (index::rust_crate_src_root(path), rust_module(path)) else {
+        return Ok(Vec::new());
+    };
+    let Some((last, parents)) = segments.split_last() else {
+        return Ok(Vec::new());
+    };
+    let parent_files = if parents.is_empty() {
+        vec![format!("{root}/lib.rs"), format!("{root}/main.rs")]
+    } else {
+        let dir = parents.join("/");
+        vec![format!("{root}/{dir}.rs"), format!("{root}/{dir}/mod.rs")]
+    };
+    let mut out = Vec::new();
+    for parent_file in parent_files {
+        if index::is_test_path(&parent_file) || !walk.contains(&parent_file) {
+            continue;
+        }
+        let bytes = semantic::confined_read(canon, &parent_file, scan::MAX_FILE_BYTES)?;
+        if declares_mod(&String::from_utf8_lossy(&bytes), last) {
+            out.push((parent_file, format!("mod {last}")));
+        }
+    }
+    Ok(out)
+}
+
+/// Whether some non-comment line holds the words `mod <name>`.
+fn declares_mod(text: &str, name: &str) -> bool {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .any(|line| {
+            let words: Vec<&str> = line
+                .split(|c: char| !is_word_char(c))
+                .filter(|w| !w.is_empty())
+                .collect();
+            words
+                .windows(2)
+                .any(|pair| pair[0] == "mod" && pair[1] == name)
+        })
+}
+
+/// Caller companions of the definitions that enclose one file's hits, and the
+/// reasons lookups were skipped. Each definition is anchored at its name, the
+/// position `callers` is asked about, so a proven SCIP identity is used when
+/// the import has one. A definition the resolver does not map back to itself
+/// is skipped and named in `gaps`. A storage failure is an `Err`. The caller
+/// set is the one `callers` gives for the same name, read page by page until
+/// `MAX_PER_KIND` CALLS files are found or the edges run out.
+pub(crate) fn callers(
+    inputs: &index::CallerInputs,
+    tx: &rusqlite::Connection,
+    canon: &Path,
+    snapshot_id: i64,
+    path: &str,
+    defs: &[store::SymbolSpan],
+) -> Result<CallerFinds, String> {
+    let mut finds = CallerFinds {
+        companions: Vec::new(),
+        gaps: Vec::new(),
+    };
+    if defs.is_empty() {
+        return Ok(finds);
+    }
+    // The edge query reads the latest snapshot of `tx`; it must be the one the
+    // grep was answered from.
+    if store::latest_snapshot(tx)?.map(|s| s.id) != Some(snapshot_id) {
+        return Err("snapshot changed during grep".to_string());
+    }
+    // The same proof gate as the `callers` query, checked once.
+    if !store::graph_proof_current(tx, snapshot_id)? {
+        finds.gaps.push(GAP_GRAPH_PROOF);
+        return Ok(finds);
+    }
+    let validated = semantic::validate_doc_path(canon, path)?;
+    let source = semantic::confined_read(canon, &validated, scan::MAX_FILE_BYTES)?;
+    // Caller path → (0 for CALLS or 1 for POTENTIAL_CALL, the definition's name).
+    let mut found: BTreeMap<String, (u8, String)> = BTreeMap::new();
+    let mut calls = 0;
+    for def in defs {
+        let (Ok(start), Ok(end)) = (
+            usize::try_from(def.byte_start),
+            usize::try_from(def.byte_end),
+        ) else {
+            finds.gaps.push(GAP_NOT_RESOLVED);
+            continue;
+        };
+        let Some((line1, col1)) =
+            name_offset(&source, &def.name, start, end).and_then(|at| position_of(&source, at))
+        else {
+            finds.gaps.push(GAP_NOT_RESOLVED);
+            continue;
+        };
+        let anchor =
+            match index::companion_anchor(tx, snapshot_id, canon, &validated, line1, col1, &source)
+            {
+                Ok(anchor) => anchor,
+                Err(index::GraphQueryError::Anchor(_)) => {
+                    finds.gaps.push(GAP_NOT_RESOLVED);
+                    continue;
+                }
+                Err(index::GraphQueryError::Store(message)) => return Err(message),
+            };
+        // A syntax anchor must be this very definition. A semantic identity is
+        // the one the import proves at the name, so it is accepted as it is.
+        if anchor.kind == index::AnchorKind::SyntaxFallback
+            && anchor.span_bytes != Some((start, end))
+        {
+            finds.gaps.push(GAP_NOT_RESOLVED);
+            continue;
+        }
+        let walked = index::companion_caller_edges(tx, snapshot_id, inputs, &anchor, |edge| {
+            let rank: u8 = match edge.edge_kind.as_str() {
+                "CALLS" => 0,
+                "POTENTIAL_CALL" => 1,
+                _ => return true,
+            };
+            let caller = edge.caller_path.as_str();
+            if caller != path && !index::is_test_path(caller) {
+                let current = found.get(caller).map(|(known, _)| *known);
+                match current {
+                    Some(0) => {}
+                    Some(_) if rank == 1 => {}
+                    Some(_) => {
+                        found.insert(caller.to_string(), (0, def.name.clone()));
+                        calls += 1;
+                    }
+                    None => {
+                        if rank == 0 {
+                            calls += 1;
+                        }
+                        found.insert(caller.to_string(), (rank, def.name.clone()));
+                    }
+                }
+            }
+            calls < MAX_PER_KIND
+        });
+        match walked {
+            Ok(()) => {}
+            Err(index::GraphQueryError::Anchor(_)) => finds.gaps.push(GAP_NOT_RESOLVED),
+            Err(index::GraphQueryError::Store(message)) => return Err(message),
+        }
+        if calls >= MAX_PER_KIND {
+            break;
+        }
+    }
+    let mut ranked: Vec<(u8, String, String)> = found
+        .into_iter()
+        .map(|(caller, (rank, via))| (rank, caller, via))
+        .collect();
+    ranked.sort();
+    finds.companions = ranked
+        .into_iter()
+        .take(MAX_PER_KIND)
+        .map(|(rank, caller, via)| Companion {
+            path: caller,
+            why: "caller",
+            basis: if rank == 0 { "CALLS" } else { "POTENTIAL_CALL" },
+            via,
+        })
+        .collect();
+    Ok(finds)
+}
+
+/// Byte offset of the first whole-word `name` inside `source[start..end]`. A
+/// word character is a letter, digit, `_` or `$`, as in identifiers of the
+/// supported languages.
+fn name_offset(source: &[u8], name: &str, start: usize, end: usize) -> Option<usize> {
+    let body = source.get(start..end)?;
+    let needle = name.as_bytes();
+    if needle.is_empty() || needle.len() > body.len() {
+        return None;
+    }
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    (0..=body.len() - needle.len())
+        .find(|&at| {
+            body[at..].starts_with(needle)
+                && (at == 0 || !word(body[at - 1]))
+                && !body.get(at + needle.len()).is_some_and(|&b| word(b))
+        })
+        .map(|at| start + at)
+}
+
+/// The 1-based line and byte column of `offset`. The resolver maps them back to
+/// `offset`: its column is a byte column from the line start.
+fn position_of(source: &[u8], offset: usize) -> Option<(u32, u32)> {
+    let before = source.get(..offset)?;
+    let line_start = before
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1);
+    let lines = before.iter().filter(|b| **b == b'\n').count();
+    Some(((lines + 1) as u32, (offset - line_start + 1) as u32))
 }
 
 /// Quoted substrings of `text`, quotes removed.
@@ -290,120 +626,6 @@ fn strip_group_ext(path: &str, group: usize) -> &str {
         }
     }
     best
-}
-
-/// Files that call a definition of `path` that encloses one of its hits.
-/// `defs` are those enclosing definitions. Only the edge query of the
-/// `callers` tool is used, with its freshness verdict passed on. Returns `Err`
-/// when the resolver does not map a definition's first byte back to that same
-/// definition; the position is verified at runtime, not proven by construction.
-///
-/// The anchor is the first byte of each definition. The resolver's syntax
-/// fallback picks the narrowest definition that holds that byte, which is the
-/// definition itself unless a narrower row starts at the same byte. The
-/// returned span is checked against the definition, so such a case is an
-/// `Err`, never a wrong caller list.
-pub(crate) fn callers(
-    tx: &rusqlite::Transaction<'_>,
-    name: &str,
-    canon: &Path,
-    snapshot_id: i64,
-    path: &str,
-    defs: &[store::SymbolSpan],
-    freshness: (&str, &[String]),
-) -> Result<Vec<Companion>, String> {
-    if defs.is_empty() {
-        return Ok(Vec::new());
-    }
-    // The edge query reads the latest snapshot of `tx`; it must be the one
-    // the grep was answered from.
-    if store::latest_snapshot(tx)?.map(|s| s.id) != Some(snapshot_id) {
-        return Err("snapshot changed during grep".to_string());
-    }
-    let validated = semantic::validate_doc_path(canon, path)?;
-    let source = semantic::confined_read(canon, &validated, scan::MAX_FILE_BYTES)?;
-    // (0 = CALLS, 1 = POTENTIAL_CALL), caller path, the definition's name.
-    let mut found: Vec<(u8, String, String)> = Vec::new();
-    for def in defs {
-        let start = usize::try_from(def.byte_start)
-            .map_err(|_| format!("definition '{}' in {path} has a bad span", def.name))?;
-        let end = usize::try_from(def.byte_end)
-            .map_err(|_| format!("definition '{}' in {path} has a bad span", def.name))?;
-        let (line1, col1) = position_of(&source, start)?;
-        let request = index::EdgeRequest {
-            anchor: index::SpanQuery {
-                rel: &validated,
-                line1,
-                col1,
-                refs: false,
-            },
-            symbol: None,
-            direction: index::EdgeDir::Callers,
-            limit: index::DEFAULT_SEARCH_LIMIT,
-            offset: 0,
-        };
-        let out = index::edge_query_tx(
-            tx,
-            name,
-            canon,
-            &validated,
-            &request,
-            || {},
-            Some(freshness),
-        )?;
-        if out.anchor.kind != index::AnchorKind::SyntaxFallback
-            || out.anchor.span_bytes != Some((start, end))
-        {
-            return Err(format!(
-                "companion anchor for '{}' in {path} did not resolve to its definition",
-                def.name
-            ));
-        }
-        for hit in &out.edges {
-            let rank = match hit.edge.edge_kind.as_str() {
-                "CALLS" => 0,
-                "POTENTIAL_CALL" => 1,
-                _ => continue,
-            };
-            let caller = &hit.edge.caller_path;
-            if caller == path || index::is_test_path(caller) {
-                continue;
-            }
-            found.push((rank, caller.clone(), def.name.clone()));
-        }
-    }
-    // CALLS first, then by path; one companion per caller file.
-    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    let mut companions: Vec<Companion> = Vec::new();
-    for (rank, caller, via) in found {
-        if companions.iter().any(|c| c.path == caller) {
-            continue;
-        }
-        if companions.len() == MAX_PER_KIND {
-            break;
-        }
-        companions.push(Companion {
-            path: caller,
-            why: "caller",
-            basis: if rank == 0 { "CALLS" } else { "POTENTIAL_CALL" },
-            via,
-        });
-    }
-    Ok(companions)
-}
-
-/// The 1-based line and byte column of `offset`. The resolver maps them back
-/// to `offset` (its column is a byte column from the line start).
-fn position_of(source: &[u8], offset: usize) -> Result<(u32, u32), String> {
-    let before = source
-        .get(..offset)
-        .ok_or_else(|| "definition offset is outside the source".to_string())?;
-    let line_start = before
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |p| p + 1);
-    let lines = before.iter().filter(|b| **b == b'\n').count();
-    Ok(((lines + 1) as u32, (offset - line_start + 1) as u32))
 }
 
 #[cfg(test)]
@@ -470,19 +692,28 @@ mod tests {
         assert_eq!(paths_of(&pairs), ["src/util.pyi", "lib/util.py"]);
     }
 
-    #[test]
-    fn importers_python_dotted_module() {
-        let root = repo_with(&[
-            ("pkg/core.py", b"def run():\n    return 1\n"),
-            ("app.py", b"import pkg.core\n"),
-            ("lone.py", b"from pkg import core\n"),
-            ("near.py", b"import pkg.corex\n"),
-        ]);
+    /// The importers of `target` in an index of `files`.
+    fn importers_of(files: &[(&str, &[u8])], target: &str) -> Vec<Companion> {
+        let root = repo_with(files);
         let home = indexed(&root);
         let mut conn = store::open_live(&store::db_path(&home, "r")).unwrap();
         let tx = conn.transaction().unwrap();
         let snap = store::latest_snapshot(&tx).unwrap().unwrap();
-        let found = importers(&tx, snap.id, "pkg/core.py").unwrap();
+        let inputs = index::CallerInputs::load(&tx, snap.id).unwrap();
+        let canon = root.canonicalize().unwrap();
+        let all: Vec<String> = files.iter().map(|(rel, _)| rel.to_string()).collect();
+        importers(&inputs, &canon, &all, target).unwrap()
+    }
+
+    #[test]
+    fn importers_python_dotted_module() {
+        let files: &[(&str, &[u8])] = &[
+            ("pkg/core.py", b"def run():\n    return 1\n"),
+            ("app.py", b"import pkg.core\n"),
+            ("lone.py", b"from pkg import core\n"),
+            ("near.py", b"import pkg.corex\n"),
+        ];
+        let found = importers_of(files, "pkg/core.py");
         assert_eq!(paths_of(&found), ["app.py", "lone.py"]);
         assert_eq!(found[0].basis, "import-text-match");
         assert_eq!(found[0].why, "importer");
@@ -490,8 +721,27 @@ mod tests {
     }
 
     #[test]
+    fn importers_python_claims_only_the_module_position() {
+        let files: &[(&str, &[u8])] = &[
+            ("signals.py", b"def x():\n    pass\n"),
+            ("np.py", b"x = 1\n"),
+            ("numpy.py", b"y = 2\n"),
+            (
+                "app.py",
+                b"from django.core import signals\n\ndef go():\n    return signals.x()\n",
+            ),
+            ("app2.py", b"import numpy as np\n"),
+        ];
+        // `from django.core import signals` names a submodule name, not the
+        // module `signals`; `as np` is an alias, never a module of this file.
+        assert!(importers_of(files, "signals.py").is_empty());
+        assert!(importers_of(files, "np.py").is_empty());
+        assert_eq!(paths_of(&importers_of(files, "numpy.py")), ["app2.py"]);
+    }
+
+    #[test]
     fn importers_js_relative_with_index() {
-        let root = repo_with(&[
+        let files: &[(&str, &[u8])] = &[
             ("lib/ui/index.ts", b"export const x = 1;\n"),
             ("app.ts", b"import { x } from \"./lib/ui\";\n"),
             (
@@ -500,18 +750,14 @@ mod tests {
             ),
             ("bare.ts", b"import { x } from \"lib/ui\";\n"),
             ("near.ts", b"import { x } from \"./lib/uix\";\n"),
-        ]);
-        let home = indexed(&root);
-        let mut conn = store::open_live(&store::db_path(&home, "r")).unwrap();
-        let tx = conn.transaction().unwrap();
-        let snap = store::latest_snapshot(&tx).unwrap().unwrap();
-        let found = importers(&tx, snap.id, "lib/ui/index.ts").unwrap();
+        ];
+        let found = importers_of(files, "lib/ui/index.ts");
         assert_eq!(paths_of(&found), ["app.ts", "deep/page.ts"]);
     }
 
     #[test]
     fn importers_c_include() {
-        let root = repo_with(&[
+        let files: &[(&str, &[u8])] = &[
             ("inc/foo.h", b"int foo(void);\n"),
             (
                 "src/main.c",
@@ -519,52 +765,121 @@ mod tests {
             ),
             ("src/other.c", b"#include \"foo.h\"\n"),
             ("src/far.c", b"#include <foo.h>\n"),
-        ]);
-        let home = indexed(&root);
-        let mut conn = store::open_live(&store::db_path(&home, "r")).unwrap();
-        let tx = conn.transaction().unwrap();
-        let snap = store::latest_snapshot(&tx).unwrap().unwrap();
-        let found = importers(&tx, snap.id, "inc/foo.h").unwrap();
+        ];
+        let found = importers_of(files, "inc/foo.h");
         assert_eq!(paths_of(&found), ["src/main.c", "src/other.c"]);
     }
 
     #[test]
     fn importers_go_package_dir() {
-        let root = repo_with(&[
+        let files: &[(&str, &[u8])] = &[
             ("p/q/q.go", b"package q\n\nfunc Q() {}\n"),
             (
                 "main.go",
                 b"package main\n\nimport \"example.com/m/p/q\"\n\nfunc main() { q.Q() }\n",
             ),
             ("x.go", b"package x\n\nimport \"example.com/m/p/qq\"\n"),
-        ]);
-        let home = indexed(&root);
-        let mut conn = store::open_live(&store::db_path(&home, "r")).unwrap();
-        let tx = conn.transaction().unwrap();
-        let snap = store::latest_snapshot(&tx).unwrap().unwrap();
-        let found = importers(&tx, snap.id, "p/q/q.go").unwrap();
-        assert_eq!(paths_of(&found), ["main.go"]);
+        ];
+        assert_eq!(paths_of(&importers_of(files, "p/q/q.go")), ["main.go"]);
+    }
+
+    #[test]
+    fn importers_go_has_no_bare_name_match() {
+        let files: &[(&str, &[u8])] = &[
+            ("errors/errors.go", b"package errors\n\nfunc New() {}\n"),
+            (
+                "main.go",
+                b"package main\n\nimport \"errors\"\n\nfunc main() {}\n",
+            ),
+        ];
+        // The stdlib path `errors` is not the local package `errors/`.
+        assert!(importers_of(files, "errors/errors.go").is_empty());
     }
 
     #[test]
     fn importers_rust_use_crate() {
-        let root = repo_with(&[
+        let files: &[(&str, &[u8])] = &[
             ("src/a/b.rs", b"pub fn thing() {}\n"),
             (
                 "src/main.rs",
                 b"mod a;\nuse crate::a::b::thing;\nfn main() { thing(); }\n",
             ),
             ("src/other.rs", b"use crate::a::bx;\n"),
-        ]);
-        let home = indexed(&root);
-        let mut conn = store::open_live(&store::db_path(&home, "r")).unwrap();
-        let tx = conn.transaction().unwrap();
-        let snap = store::latest_snapshot(&tx).unwrap().unwrap();
-        let found = importers(&tx, snap.id, "src/a/b.rs").unwrap();
-        assert_eq!(paths_of(&found), ["src/main.rs"]);
+        ];
+        assert_eq!(
+            paths_of(&importers_of(files, "src/a/b.rs")),
+            ["src/main.rs"]
+        );
     }
 
-    /// Three files: `lib.py` defines `helper`; `a.py` and `b.py` call it.
+    #[test]
+    fn importers_rust_requires_the_same_crate() {
+        let files: &[(&str, &[u8])] = &[
+            ("crates/a/src/index.rs", b"pub fn x() {}\n"),
+            (
+                "crates/b/src/main.rs",
+                b"use crate::index::x;\nfn main() {}\n",
+            ),
+            (
+                "crates/a/src/main.rs",
+                b"use crate::index::x;\nfn main() {}\n",
+            ),
+        ];
+        assert_eq!(
+            paths_of(&importers_of(files, "crates/a/src/index.rs")),
+            ["crates/a/src/main.rs"]
+        );
+    }
+
+    #[test]
+    fn importers_rust_grouped_use_names_the_module() {
+        let files: &[(&str, &[u8])] = &[
+            ("src/index.rs", b"pub fn x() {}\n"),
+            ("src/other.rs", b"pub fn y() {}\n"),
+            ("src/main.rs", b"use crate::{index, other};\nfn main() {}\n"),
+        ];
+        assert_eq!(
+            paths_of(&importers_of(files, "src/index.rs")),
+            ["src/main.rs"]
+        );
+    }
+
+    #[test]
+    fn importers_rust_mod_declaration_in_the_parent_file() {
+        let files: &[(&str, &[u8])] = &[
+            ("src/a.rs", b"pub mod b;\n"),
+            ("src/a/b.rs", b"pub fn thing() {}\n"),
+        ];
+        let found = importers_of(files, "src/a/b.rs");
+        assert_eq!(paths_of(&found), ["src/a.rs"]);
+        assert_eq!(found[0].via, "mod b");
+        assert_eq!(found[0].basis, "import-text-match");
+    }
+
+    #[test]
+    fn importers_rust_mod_declaration_in_lib_rs() {
+        let files: &[(&str, &[u8])] = &[
+            ("src/lib.rs", b"pub mod a;\n"),
+            ("src/a.rs", b"pub fn thing() {}\n"),
+        ];
+        assert_eq!(paths_of(&importers_of(files, "src/a.rs")), ["src/lib.rs"]);
+    }
+
+    #[test]
+    fn name_offset_is_the_first_whole_word() {
+        let source = b"MyType helper_t(void)\nMyType helper(void) {}\n";
+        let text = std::str::from_utf8(source).unwrap();
+        let expected = text.find("helper(void) {").unwrap();
+        assert_eq!(
+            name_offset(source, "helper", 0, source.len()),
+            Some(expected)
+        );
+        assert_eq!(name_offset(source, "help", 0, source.len()), None);
+        assert_eq!(name_offset(source, "helper", 0, 10), None);
+    }
+
+    /// Caller companions of `lib.py` (the `helper` definition) in an index of
+    /// three files: `lib.py`, and `a.py` and `b.py` calling it.
     fn caller_fixture() -> PathBuf {
         repo_with(&[
             ("lib.py", b"def helper():\n    return 1\n"),
@@ -583,7 +898,7 @@ mod tests {
     fn companion_callers_match_callers_tool() {
         let root = caller_fixture();
         let home = indexed(&root);
-        // The callers tool's answer for the anchor inside `helper`.
+        // The callers tool's answer for the anchor at the name `helper`.
         let request = index::EdgeRequest {
             anchor: index::SpanQuery {
                 rel: "lib.py",
@@ -618,13 +933,42 @@ mod tests {
             .filter(|s| s.name == "helper")
             .collect();
         let canon = root.canonicalize().unwrap();
-        let found = callers(&tx, "r", &canon, snap.id, "lib.py", &defs, ("fresh", &[])).unwrap();
-        let companion_files: BTreeSet<String> = found.iter().map(|c| c.path.clone()).collect();
+        let inputs = index::CallerInputs::load(&tx, snap.id).unwrap();
+        let finds = callers(&inputs, &tx, &canon, snap.id, "lib.py", &defs).unwrap();
+        assert!(finds.gaps.is_empty(), "{:?}", finds.gaps);
+        let companion_files: BTreeSet<String> =
+            finds.companions.iter().map(|c| c.path.clone()).collect();
         assert_eq!(companion_files, tool_files);
-        assert!(found.iter().all(|c| c.why == "caller" && c.via == "helper"));
-        assert!(found
+        assert!(finds
+            .companions
+            .iter()
+            .all(|c| c.why == "caller" && c.via == "helper"));
+        assert!(finds
+            .companions
             .iter()
             .all(|c| c.basis == "CALLS" || c.basis == "POTENTIAL_CALL"));
+    }
+
+    #[test]
+    fn definition_that_cannot_be_named_is_a_gap_not_an_error() {
+        let root = caller_fixture();
+        let home = indexed(&root);
+        let mut conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let tx = conn.transaction().unwrap();
+        let snap = store::latest_snapshot(&tx).unwrap().unwrap();
+        let defs = vec![store::SymbolSpan {
+            name: "missing".to_string(),
+            kind: "function".to_string(),
+            start_line: 1,
+            end_line: 2,
+            byte_start: 0,
+            byte_end: 26,
+        }];
+        let canon = root.canonicalize().unwrap();
+        let inputs = index::CallerInputs::load(&tx, snap.id).unwrap();
+        let finds = callers(&inputs, &tx, &canon, snap.id, "lib.py", &defs).unwrap();
+        assert!(finds.companions.is_empty());
+        assert_eq!(finds.gaps, [GAP_NOT_RESOLVED]);
     }
 
     #[test]

@@ -8636,6 +8636,39 @@ fn mcp_grep_matches_cli_bytes() {
 }
 
 #[test]
+fn mcp_grep_companions_match_cli_bytes() {
+    let h = home("grep-mcp-companions-parity");
+    let dir = home("grep-mcp-companions-parity-repo");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("lib/core.py"), b"def helper():\n    return 1\n").unwrap();
+    std::fs::write(dir.join("lib/core.pyi"), b"def helper() -> int: ...\n").unwrap();
+    std::fs::write(
+        dir.join("app.py"),
+        b"from lib.core import helper\n\ndef run():\n    return helper()\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &dir, "r");
+    let (code, cli_out, err) = run_cli(&h, &["grep", "--repo", "r", "--pattern", "helper()"]);
+    assert_eq!(code, 0, "grep: {err}");
+    assert!(cli_out.contains("\"why\":\"caller\""), "{cli_out}");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "helper()"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(
+        result["content"][0]["text"].as_str().unwrap(),
+        cli_out.trim_end_matches('\n'),
+        "the MCP text is the CLI document"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
 fn mcp_grep_companions_without_index_only_name_pairs() {
     let h = home("grep-mcp-companions-noindex");
     let dir = grep_repo_dir("grep-mcp-companions-noindex-repo");

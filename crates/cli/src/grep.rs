@@ -8,7 +8,7 @@
 //! digest; `in_reason` says why it has none otherwise.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use crate::companions::{self, Companion};
@@ -79,6 +79,8 @@ pub(crate) struct GrepResult {
     pub files: Vec<GrepFile>,
     pub totals: GrepTotals,
     pub truncated: Option<&'static str>,
+    /// Reasons caller companions were skipped, sorted and unique; `[]` when none.
+    pub caller_gaps: Vec<&'static str>,
     pub snapshot: Option<store::Snapshot>,
     pub freshness: String,
     pub reasons: Vec<String>,
@@ -251,18 +253,12 @@ fn grep_repo_with_budget(
             companions: Vec::new(),
         });
     }
-    attach_companions(
-        root,
-        tx,
-        snapshot.as_ref(),
-        (freshness.as_str(), reasons.as_slice()),
-        &walk,
-        &mut files,
-    )?;
+    let caller_gaps = attach_companions(root, tx, snapshot.as_ref(), &walk, &mut files)?;
     Ok(GrepResult {
         files,
         totals,
         truncated,
+        caller_gaps,
         snapshot,
         freshness,
         reasons,
@@ -270,20 +266,32 @@ fn grep_repo_with_budget(
 }
 
 /// Companions for the first `COMPANION_FILES` files. Name pairs need no
-/// snapshot; importers and callers need one, and callers need a fresh file.
-/// Storage errors propagate: a failed query is never an empty list.
+/// snapshot. Importers and callers need one, and callers need a fresh file.
+/// Returns the reasons caller lookups were skipped, sorted and unique. A
+/// storage failure is an `Err`: a failed query is never an empty list.
 fn attach_companions(
     root: &Path,
     tx: Option<&rusqlite::Transaction<'_>>,
     snapshot: Option<&store::Snapshot>,
-    freshness: (&str, &[String]),
     walk: &[String],
     files: &mut [GrepFile],
-) -> Result<(), String> {
+) -> Result<Vec<&'static str>, String> {
+    let mut gaps: BTreeSet<&'static str> = BTreeSet::new();
+    // One snapshot input load per request, shared by every file.
+    let indexed = match (tx, snapshot) {
+        (Some(tx), Some(snap)) => {
+            let canon = root
+                .canonicalize()
+                .map_err(|e| format!("cannot resolve root: {e}"))?;
+            let inputs = index::CallerInputs::load(tx, snap.id)?;
+            Some((tx, snap.id, inputs, canon))
+        }
+        _ => None,
+    };
     for file in files.iter_mut().take(COMPANION_FILES) {
         let mut found = companions::name_pairs(&file.path, walk);
-        if let (Some(tx), Some(snap)) = (tx, snapshot) {
-            found.extend(companions::importers(tx, snap.id, &file.path)?);
+        if let Some((tx, snapshot_id, inputs, canon)) = &indexed {
+            found.extend(companions::importers(inputs, canon, walk, &file.path)?);
             if file.fresh {
                 let mut defs: Vec<store::SymbolSpan> = Vec::new();
                 for span in file.hits.iter().filter_map(|h| h.enclosing.as_ref()) {
@@ -291,19 +299,15 @@ fn attach_companions(
                         defs.push(span.clone());
                     }
                 }
-                let canon = root
-                    .canonicalize()
-                    .map_err(|e| format!("cannot resolve root: {e}"))?;
-                // The repository name only labels the edge document, which
-                // the companion does not read.
-                found.extend(companions::callers(
-                    tx, "", &canon, snap.id, &file.path, &defs, freshness,
-                )?);
+                let finds =
+                    companions::callers(inputs, tx, canon, *snapshot_id, &file.path, &defs)?;
+                found.extend(finds.companions);
+                gaps.extend(finds.gaps);
             }
         }
         file.companions = found;
     }
-    Ok(())
+    Ok(gaps.into_iter().collect())
 }
 
 fn refusal(message: &str) -> String {
@@ -820,6 +824,7 @@ mod tests {
                 ..GrepTotals::default()
             },
             truncated: None,
+            caller_gaps: Vec::new(),
             snapshot: None,
             freshness: "unknown".to_string(),
             reasons: vec!["no-index".to_string()],
@@ -846,7 +851,7 @@ mod tests {
             "{json}"
         );
         assert!(json.ends_with(
-            "\"truncated\":null,\"snapshot\":null,\"empty\":{\"searched\":\"text-lines\",\"mode\":\"literal\",\"next\":[\"code_search\",\"code_query\"]}}"
+            "\"truncated\":null,\"caller_gaps\":[],\"snapshot\":null,\"empty\":{\"searched\":\"text-lines\",\"mode\":\"literal\",\"next\":[\"code_search\",\"code_query\"]}}"
         ), "{json}");
     }
 

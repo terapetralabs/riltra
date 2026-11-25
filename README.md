@@ -184,13 +184,15 @@ guide](docs/guide/capabilities.md#known-limitations).
 
 ## Stability (pre-1.0)
 
-Within `0.2.x`, CLI exit codes (`0` success, `2` usage error, `3` repository or
+Within `0.3.x`, CLI exit codes (`0` success, `2` usage error, `3` repository or
 data error), JSON key order, and MCP tool names are stable. New JSON keys are
 opt-in or appended; changes to existing keys are released in a minor version
 and described in the release notes. The on-disk index schema is versioned: an
 older schema is reported as stale or `schema_outdated` and rebuilt with
-`riltra index`, never silently reused. These are compatibility commitments for
-the `0.2.x` line only. They are not API guarantees for a 1.0 release, and this
+`riltra index`, never silently reused. Since `0.3.0`, `riltra mcp` lists nine
+core tools by default and `riltra mcp --all-tools` lists all of them; the tool
+names did not change. These are compatibility commitments for the `0.3.x` line
+only. They are not API guarantees for a 1.0 release, and this
 release makes no claim about measured results on real projects.
 
 Platform support for the `0.2.1` archives is Windows x64, Linux x64, and macOS

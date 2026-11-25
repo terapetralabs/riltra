@@ -913,7 +913,7 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves twenty-two local stdio tools; by default it lists eight core tools, and `riltra mcp --all-tools` lists all of them. Twenty-one read repository,
+`riltra mcp` serves twenty-two local stdio tools; by default it lists nine core tools, and `riltra mcp --all-tools` lists all of them. Twenty-one read repository,
 index, code, text-in-files, knowledge, project overview, area map, selected-anchor packet, change-check, and documents-linked-to-code data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the

@@ -113,7 +113,7 @@ network. Riltra's MCP handlers do not create, migrate, or replace a database.
 A missing index returns `no-index`; an unsupported schema is refused with
 `schema_outdated`. Prepare repositories with the CLI before querying them.
 
-By default `riltra mcp` lists eight core tools; `riltra mcp --all-tools` lists
+By default `riltra mcp` lists nine core tools; `riltra mcp --all-tools` lists
 all twenty-two. A client that lets the model call only listed tools needs
 `--all-tools` in its MCP configuration to reach the rest; calling by name helps
 only a client that calls by name directly.

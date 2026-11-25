@@ -170,7 +170,7 @@ jsonrpc="$(grep -c '^{"jsonrpc":"2.0"' "$work/mcp.out" || true)"
 [ "$lines" -gt 0 ] && [ "$lines" = "$jsonrpc" ] && pass "stdout carries only JSON-RPC ($lines lines)" \
   || fail "stdout carries only JSON-RPC (lines=$lines jsonrpc=$jsonrpc)"
 tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp.out" | sort -u | wc -l | tr -d ' ')"
-[ "$tools" = "8" ] && pass "eight core tools advertised by default" || fail "eight core tools advertised by default (got $tools)"
+[ "$tools" = "9" ] && pass "nine core tools advertised by default" || fail "nine core tools advertised by default (got $tools)"
 expect "overview tool advertised" '"name":"riltra_project_overview"' "$out"
 expect "initialize carries instructions" '"instructions"' "$out"
 {

@@ -29,7 +29,7 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Changed
 
-- MCP `tools/list` shows eight core tools by default. The other tools stay callable by name;
+- MCP `tools/list` shows nine core tools by default. The other tools stay callable by name;
   `riltra mcp --all-tools` lists all of them.
 - MCP tool descriptions are rewritten. `riltra_health` lists the core tools.
 - The release-candidate package and acceptance jobs run on pinned runner images.
@@ -40,7 +40,7 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 - No reindex is needed after upgrading from `0.2.1`: the code-index schema, the parser version
   and the knowledge store are unchanged.
-- The MCP server exposes twenty-two tools, and eight of them are listed by default. Agent
+- The MCP server exposes twenty-two tools, and nine of them are listed by default. Agent
   instructions that rely on an unlisted tool need `riltra mcp --all-tools`.
 
 ## [0.2.1] - 2026-11-25

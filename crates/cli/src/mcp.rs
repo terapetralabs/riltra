@@ -442,7 +442,7 @@ struct SemanticInput {
 
 /// Tools the default `riltra mcp` lists, in the order `riltra_health` reports
 /// them. Tools outside this set stay callable by name.
-pub(crate) const CORE_TOOLS: [&str; 8] = [
+pub(crate) const CORE_TOOLS: [&str; 9] = [
     "riltra_code_grep",
     "riltra_code_search",
     "riltra_code_query",
@@ -451,10 +451,11 @@ pub(crate) const CORE_TOOLS: [&str; 8] = [
     "riltra_context",
     "riltra_project_overview",
     "riltra_knowledge_search",
+    "riltra_knowledge_at_anchor",
 ];
 
 /// Sent as the MCP `instructions` at `initialize`; at most 600 bytes.
-const SERVER_INSTRUCTIONS: &str = "Riltra answers code questions from a local index; confirm results against the source. Exact text, an error message or an option: riltra_code_grep (it also gives the enclosing function and paired files; plain grep works too). Symbol name: riltra_code_search. Description in words: riltra_code_query. Before changing code: riltra_code_impact (UNKNOWN or partial means not established, not safe). Recorded project decisions: riltra_knowledge_search. The repo argument may be omitted when one repository is registered.";
+const SERVER_INSTRUCTIONS: &str = "Riltra answers code questions from a local index; confirm results against the source. Exact text, an error message or an option: riltra_code_grep (it also gives the enclosing function and paired files; plain grep works too). Symbol name: riltra_code_search. Description in words: riltra_code_query. Before changing code: riltra_code_impact (UNKNOWN or partial means not established, not safe) and riltra_knowledge_at_anchor (notes bound to that code, Unverified). Recorded project decisions: riltra_knowledge_search. The repo argument may be omitted when one repository is registered.";
 
 struct RiltraMcp {
     all_tools: bool,

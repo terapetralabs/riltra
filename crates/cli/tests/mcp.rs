@@ -17,9 +17,8 @@ use serde_json::{json, Value};
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The core set the default `riltra mcp` lists, in the order `health` reports
-/// it. `riltra_code_grep` joins the server in Task 2; until then the default
-/// list holds only the core tools that exist.
-const CORE_TOOLS: [&str; 8] = [
+/// it.
+const CORE_TOOLS: [&str; 9] = [
     "riltra_code_grep",
     "riltra_code_search",
     "riltra_code_query",
@@ -28,6 +27,7 @@ const CORE_TOOLS: [&str; 8] = [
     "riltra_context",
     "riltra_project_overview",
     "riltra_knowledge_search",
+    "riltra_knowledge_at_anchor",
 ];
 
 fn all_tools_flag(cmd: &mut Command) {
@@ -734,7 +734,7 @@ fn default_tools_list_is_the_core_set() {
     assert_eq!(
         tool_names(&mut s, 2),
         expected,
-        "the default list is exactly the eight core tools"
+        "the default list is exactly the nine core tools"
     );
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
@@ -809,6 +809,7 @@ fn initialize_carries_instructions() {
         "riltra_code_search",
         "riltra_code_impact",
         "riltra_knowledge_search",
+        "riltra_knowledge_at_anchor",
     ] {
         assert!(text.contains(name), "instructions must name {name}: {text}");
     }

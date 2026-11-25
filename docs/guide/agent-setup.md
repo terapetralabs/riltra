@@ -68,7 +68,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 
 ## Which tool for which question
 
-`riltra mcp` lists only eight tools by default: `riltra_code_grep`, `riltra_code_search`, `riltra_code_query`, `riltra_code_callers`, `riltra_code_impact`, `riltra_context`, `riltra_project_overview` and `riltra_knowledge_search`. Every other tool in the table below needs `riltra mcp --all-tools` in the client's MCP configuration to be listed; a client that lets the model call only listed tools cannot reach them otherwise. Calling by name helps only a client that calls by name directly.
+`riltra mcp` lists only nine tools by default: `riltra_code_grep`, `riltra_code_search`, `riltra_code_query`, `riltra_code_callers`, `riltra_code_impact`, `riltra_context`, `riltra_project_overview`, `riltra_knowledge_search` and `riltra_knowledge_at_anchor`. Every other tool in the table below needs `riltra mcp --all-tools` in the client's MCP configuration to be listed; a client that lets the model call only listed tools cannot reach them otherwise. Calling by name helps only a client that calls by name directly.
 
 | You want to know | Call | Notes |
 |---|---|---|
@@ -293,7 +293,7 @@ Paste this into your agent's instruction file (for example `AGENTS.md` or `CLAUD
 
 Riltra is a local code map, not a source of truth. Confirm answers against the cited source; index freshness and evidence labels limit what an answer establishes.
 
-- `riltra mcp` lists only a core tool set by default. The tools this block names that are outside it (`riltra_health`, `riltra_repo_status`, `riltra_code_packet`, `riltra_code_changes` and `riltra_knowledge_at_anchor`) are listed only by `riltra mcp --all-tools`. Add `--all-tools` to the client's MCP configuration so the model can call them; a client that lets the model call only listed tools cannot reach them otherwise. Calling by name helps only a client that calls by name directly.
+- `riltra mcp` lists only a core tool set by default. The tools this block names that are outside it (`riltra_health`, `riltra_repo_status`, `riltra_code_packet` and `riltra_code_changes`) are listed only by `riltra mcp --all-tools`. Add `--all-tools` to the client's MCP configuration so the model can call them; a client that lets the model call only listed tools cannot reach them otherwise. Calling by name helps only a client that calls by name directly.
 - For a new folder, run `riltra start [--path <directory>] [--name <name>]` in a terminal. The wizard shows readiness and the effective `RILTRA_HOME`; registration and indexing each require a separate default-no approval. `--client` selects an integration only; it does not approve writes.
 - In the wizard, choose a definition from the overview menu. Riltra builds a packet from that selection, so do not guess line or column coordinates. Entry points are candidates from indexed definitions or conventional locations, not proof of runtime flow. Document and manifest excerpts are labelled live evidence.
 - `fresh` describes the selected index snapshot. On `stale`, `unknown`, `source-changed`, or a changed menu snapshot, reindex and select again.

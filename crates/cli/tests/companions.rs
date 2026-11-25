@@ -542,6 +542,43 @@ fn grep_module_level_calls_name_their_caller_files() {
 }
 
 #[test]
+fn grep_scip_cpp_out_of_line_method_names_its_callers() {
+    let h = home("scip-cpp");
+    // The definition is `Widget::run`, defined out of line. The parser keeps the
+    // qualified name; the SCIP definition occurrence covers only `run`.
+    let files: &[(&str, &[u8])] = &[
+        (
+            "widget.h",
+            b"class Widget {\npublic:\n    void run();\n};\n",
+        ),
+        (
+            "widget.cc",
+            b"#include \"widget.h\"\nvoid Widget::run() {\n}\n",
+        ),
+        (
+            "m.cc",
+            b"#include \"widget.h\"\nvoid use(Widget& w) {\n  w.run();\n}\n",
+        ),
+    ];
+    let dir = repo_with(&h, "cppsem", files);
+    index(&h, "cppsem");
+    let run = "scip-test test test-pkg 1.0.0 widget/Widget#run().";
+    let widget = document(
+        "widget.cc",
+        &[occurrence(run, 0x1, 1, 13, 16)],
+        &[symbol_info(run, "run")],
+    );
+    let m = document("m.cc", &[occurrence(run, 0x0, 2, 4, 7)], &[]);
+    scip_import(&h, &dir, "cppsem", &[widget, m]);
+
+    let (code, doc) = grep(&h, "cppsem", "void Widget::run");
+    assert_eq!(code, 0, "C++ out-of-line method failed the search");
+    let doc = doc.unwrap();
+    assert_eq!(callers_of(&doc, "widget.cc"), [pair("m.cc", "CALLS")]);
+    assert_eq!(doc["caller_gaps"], serde_json::json!([]));
+}
+
+#[test]
 fn grep_cli_companions_match_golden() {
     let h = home("golden");
     let files: &[(&str, &[u8])] = &[

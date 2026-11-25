@@ -575,7 +575,10 @@ pub(crate) fn callers(
             finds.gaps.push(GAP_NOT_RESOLVED);
             continue;
         };
-        let candidates = name_candidates(&source, &def.name, start, end, &facts);
+        // The SCIP definition occurrence covers the terminal name only (`run` of
+        // `Widget::run`), so the candidates are searched for that name.
+        let candidates =
+            name_candidates(&source, index::called_name(&def.name), start, end, &facts);
         let anchor = resolve_name(
             tx,
             snapshot_id,

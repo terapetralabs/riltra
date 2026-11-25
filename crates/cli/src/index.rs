@@ -2036,7 +2036,7 @@ fn unique_suffix_match<'a>(
 /// terminal name (`run` in `w.run()`), while an out-of-line C++ definition
 /// keeps its qualified text (`Widget::run`), so the part after the last `::`
 /// is what the call sites are matched against.
-fn called_name(definition: &str) -> &str {
+pub(crate) fn called_name(definition: &str) -> &str {
     definition.rsplit("::").next().unwrap_or(definition)
 }
 

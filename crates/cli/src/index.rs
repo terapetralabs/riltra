@@ -2106,18 +2106,18 @@ pub(crate) fn companion_anchor(
     )
 }
 
-/// The inbound caller edges of an anchor, page by page in the order the
-/// `callers` query uses, with the same candidate and selection rules. `visit`
-/// sees each edge and returns `false` to stop. Coverage, live state and counts
-/// are not computed: this is the lean path the grep companions use.
-pub(crate) fn companion_caller_edges(
+/// The distinct `(caller path, edge kind)` pairs of the inbound edges of an
+/// anchor, with the same candidate and selection rules as `callers`. Coverage,
+/// live state and counts are not computed: this is the lean path the grep
+/// companions use. A named anchor is one query; a data member, which takes no
+/// call by name, reads its endpoint's edges in the largest pages the store gives.
+pub(crate) fn companion_caller_pairs(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
     inputs: &CallerInputs,
     anchor: &EdgeAnchor,
-    mut visit: impl FnMut(&store::EdgeRow) -> bool,
-) -> Result<(), GraphQueryError> {
-    const PAGE: i64 = DEFAULT_SEARCH_LIMIT as i64;
+) -> Result<Vec<(String, String)>, GraphQueryError> {
+    const PAGE: i64 = 1000;
     let endpoint = anchor_endpoint(anchor)
         .ok_or_else(|| GraphQueryError::Anchor("anchor has no endpoint".to_string()))?;
     // Same rule as `edge_query_tx_classified`: a data member takes no call by name.
@@ -2144,23 +2144,25 @@ pub(crate) fn companion_caller_edges(
         candidate_aliases: &candidates.aliases,
         syntax_aliases: &[],
     };
+    if candidate_name.is_some() {
+        return Ok(store::selected_edge_callers(tx, &selection)?);
+    }
+    let mut pairs = Vec::new();
     let mut offset = 0;
     loop {
-        let page = if candidate_name.is_some() {
-            store::selected_edge_page(tx, &selection, PAGE, offset)?
-        } else {
-            store::edges_inbound(tx, snapshot_id, &endpoint, PAGE, offset)?
-        };
-        for edge in &page {
-            if !visit(edge) {
-                return Ok(());
-            }
-        }
+        let page = store::edges_inbound(tx, snapshot_id, &endpoint, PAGE, offset)?;
+        pairs.extend(
+            page.iter()
+                .map(|edge| (edge.caller_path.clone(), edge.edge_kind.clone())),
+        );
         if (page.len() as i64) < PAGE {
-            return Ok(());
+            break;
         }
         offset += PAGE;
     }
+    pairs.sort();
+    pairs.dedup();
+    Ok(pairs)
 }
 
 struct CallerCandidates {

@@ -103,8 +103,9 @@ pub(crate) fn name_pairs(path: &str, walk: &[String]) -> Vec<Companion> {
 }
 
 /// Files whose import text, or Rust parent `mod` declaration, names `path`,
-/// one entry per file. Uses the snapshot's inputs, loaded once per request.
-/// `Err` only when a file cannot be read for a Rust parent check.
+/// one entry per file. Uses the snapshot's inputs, loaded once per request. A
+/// Rust parent that is over the size limit or cannot be read is skipped. `Err`
+/// only when an import row names a file the snapshot does not hold.
 pub(crate) fn importers(
     inputs: &index::CallerInputs,
     canon: &Path,
@@ -134,7 +135,7 @@ pub(crate) fn importers(
             found.insert(importer.to_string(), via);
         }
     }
-    for (importer, via) in mod_declarations(canon, walk, path)? {
+    for (importer, via) in mod_declarations(canon, walk, path) {
         found.entry(importer).or_insert(via);
     }
     Ok(found
@@ -269,25 +270,24 @@ fn go_import(target: &str, text: &str) -> Option<String> {
 }
 
 /// Rust: `use crate::a::b` names `src/a/b.rs` (or `src/a/b/mod.rs`) when the
-/// importer is in the same crate. Grouped and glob uses are read through
-/// `use_paths`. Parent `mod` declarations are a separate check (`mod_declarations`).
+/// importer is in the same crate. Grouped and glob uses are read by
+/// `use_tree_names`. Parent `mod` declarations are a separate check
+/// (`mod_declarations`).
 fn rust_import(target: &str, importer: &str, text: &str) -> Option<String> {
     let root = index::rust_crate_src_root(target)?;
     if index::rust_crate_src_root(importer) != Some(root) {
         return None;
     }
     let module = rust_module(target)?.join("::");
-    let mut paths = Vec::new();
     for (at, _) in text.match_indices("crate::") {
         if text[..at].chars().next_back().is_some_and(is_word_char) {
             continue;
         }
-        use_paths(&text[at + "crate::".len()..], "", &mut paths);
+        if use_tree_names(&text[at + "crate::".len()..], &module) {
+            return Some(format!("crate::{module}"));
+        }
     }
-    let named = paths
-        .iter()
-        .any(|p| *p == module || p.starts_with(&format!("{module}::")));
-    named.then(|| format!("crate::{module}"))
+    None
 }
 
 /// The module segments of a Rust file under its crate's source root. `None`
@@ -308,34 +308,86 @@ fn rust_module(path: &str) -> Option<Vec<&str>> {
     }
 }
 
-/// Full paths named by a `use` tree that follows `crate::`: `a::b`,
-/// `a::{b, c::d}`, `a::*`, `a::{self}`, `a::b as c`. `prefix` is the path read
-/// so far; the tree ends at `;` or at the closing brace of its group.
-fn use_paths(text: &str, prefix: &str, out: &mut Vec<String>) {
-    let text = text.trim_start();
-    if let Some(inner) = text.strip_prefix('{') {
-        let inner = &inner[..group_end(inner)];
-        for item in split_top_level(inner) {
-            use_paths(item, prefix, out);
+/// Bytes of `use` tree text one importer check may scan. A tree past this bound
+/// is not read further, so its importer is not claimed. This bounds the work on
+/// untrusted sources, since a nested group is rescanned at each level.
+// shortcut: a use tree of this size is never a real import; upgrade if one is.
+const USE_TREE_SCAN_BYTES: usize = 1 << 20;
+
+/// Whether a `use` tree (the text after `crate::`) names `module` or an item of
+/// it. The walk is iterative, so no depth of the tree can exhaust the call stack.
+/// A branch whose path can no longer lead to `module` is dropped at once, so a
+/// path never grows past the module's own length.
+fn use_tree_names(tree: &str, module: &str) -> bool {
+    let mut scanned = 0usize;
+    let mut pending: Vec<(String, &str)> = vec![(String::new(), tree)];
+    while let Some((prefix, rest)) = pending.pop() {
+        scanned += rest.len();
+        if scanned > USE_TREE_SCAN_BYTES {
+            return false;
         }
-        return;
+        let mut prefix = prefix;
+        let mut rest = rest.trim_start();
+        loop {
+            if let Some(inner) = rest.strip_prefix('{') {
+                let inner = &inner[..group_end(inner)];
+                for item in split_top_level(inner).into_iter().rev() {
+                    pending.push((prefix.clone(), item));
+                }
+                break;
+            }
+            if rest.starts_with('*') {
+                if names_module(&prefix, module) {
+                    return true;
+                }
+                break;
+            }
+            let end = rest.find(|c: char| !is_word_char(c)).unwrap_or(rest.len());
+            let segment = &rest[..end];
+            if segment.is_empty() {
+                break;
+            }
+            if let Some(next) = rest[end..].trim_start().strip_prefix("::") {
+                let joined = join_path(&prefix, segment);
+                if names_module(&joined, module) {
+                    return true;
+                }
+                if !is_ancestor(&joined, module) {
+                    break;
+                }
+                prefix = joined;
+                rest = next.trim_start();
+                continue;
+            }
+            let full = if segment == "self" {
+                prefix.clone()
+            } else {
+                join_path(&prefix, segment)
+            };
+            if names_module(&full, module) {
+                return true;
+            }
+            break;
+        }
     }
-    if text.starts_with('*') {
-        out.push(prefix.to_string());
-        return;
-    }
-    let end = text.find(|c: char| !is_word_char(c)).unwrap_or(text.len());
-    let segment = &text[..end];
-    if segment.is_empty() {
-        return;
-    }
-    if let Some(after) = text[end..].trim_start().strip_prefix("::") {
-        use_paths(after, &join_path(prefix, segment), out);
-    } else if segment == "self" {
-        out.push(prefix.to_string());
-    } else {
-        out.push(join_path(prefix, segment));
-    }
+    false
+}
+
+/// Whether `path` is `module` or an item or submodule of it.
+fn names_module(path: &str, module: &str) -> bool {
+    path == module
+        || path
+            .strip_prefix(module)
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
+/// Whether `module` is `path` or lies below it: `path` can still lead to it.
+fn is_ancestor(path: &str, module: &str) -> bool {
+    path.is_empty()
+        || module == path
+        || module
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.starts_with("::"))
 }
 
 fn join_path(prefix: &str, segment: &str) -> String {
@@ -384,16 +436,12 @@ fn split_top_level(text: &str) -> Vec<&str> {
 /// parent of `a/b` is `a.rs` or `a/mod.rs`; the parent of `a` is `lib.rs` or
 /// `main.rs`. Only files of the walk are read; a comment line is not a
 /// declaration.
-fn mod_declarations(
-    canon: &Path,
-    walk: &[String],
-    path: &str,
-) -> Result<Vec<(String, String)>, String> {
+fn mod_declarations(canon: &Path, walk: &[String], path: &str) -> Vec<(String, String)> {
     let (Some(root), Some(segments)) = (index::rust_crate_src_root(path), rust_module(path)) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let Some((last, parents)) = segments.split_last() else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let parent_files = if parents.is_empty() {
         vec![format!("{root}/lib.rs"), format!("{root}/main.rs")]
@@ -406,36 +454,89 @@ fn mod_declarations(
         if index::is_test_path(&parent_file) || !walk.contains(&parent_file) {
             continue;
         }
-        let bytes = semantic::confined_read(canon, &parent_file, scan::MAX_FILE_BYTES)?;
+        // A parent over the size limit, or one that cannot be read, is skipped as
+        // grep skips such files: it is not evidence, and the search goes on.
+        let oversize = std::fs::metadata(canon.join(&parent_file))
+            .is_ok_and(|meta| meta.len() > scan::MAX_FILE_BYTES);
+        if oversize {
+            continue;
+        }
+        let Ok(bytes) = semantic::confined_read(canon, &parent_file, scan::MAX_FILE_BYTES) else {
+            continue;
+        };
         if declares_mod(&String::from_utf8_lossy(&bytes), last) {
             out.push((parent_file, format!("mod {last}")));
         }
     }
-    Ok(out)
+    out
 }
 
-/// Whether some non-comment line holds the words `mod <name>`.
+/// `text` with its comments and string literals blanked, so a word inside them
+/// is never read as code. Raw strings (`r#"..."#`) and char literals are not
+/// recognised: a `"` inside one of them can hide a later declaration.
+// shortcut: a `"` in a raw string or char literal hides code up to the next
+// quote; upgrade with a lexer when a real file shows it.
+fn strip_comments_and_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'/') => {
+                while chars.peek().is_some_and(|&n| n != '\n') {
+                    chars.next();
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                out.push(' ');
+            }
+            '"' => {
+                let mut escaped = false;
+                for n in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if n == '\\' {
+                        escaped = true;
+                    } else if n == '"' {
+                        break;
+                    }
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Whether a `mod <name>;` declaration stands in `text` outside comments and
+/// string literals. An inline `mod <name> { ... }` is not a file and is not one.
 fn declares_mod(text: &str, name: &str) -> bool {
-    text.lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .any(|line| {
-            let words: Vec<&str> = line
-                .split(|c: char| !is_word_char(c))
-                .filter(|w| !w.is_empty())
-                .collect();
-            words
-                .windows(2)
-                .any(|pair| pair[0] == "mod" && pair[1] == name)
-        })
+    let code = strip_comments_and_strings(text).replace(';', " ; ");
+    let words: Vec<&str> = code
+        .split(|c: char| !is_word_char(c) && c != ';')
+        .filter(|w| !w.is_empty())
+        .collect();
+    words
+        .windows(3)
+        .any(|w| w[0] == "mod" && w[1] == name && w[2] == ";")
 }
 
 /// Caller companions of the definitions that enclose one file's hits, and the
-/// reasons lookups were skipped. Each definition is anchored at its name, the
-/// position `callers` is asked about, so a proven SCIP identity is used when
-/// the import has one. A definition the resolver does not map back to itself
-/// is skipped and named in `gaps`. A storage failure is an `Err`. The caller
-/// set is the one `callers` gives for the same name, read page by page until
-/// `MAX_PER_KIND` CALLS files are found or the edges run out.
+/// reasons lookups were skipped. Each definition is anchored at its name: its
+/// SCIP definition occurrence when the import has one (that position must
+/// resolve to the same symbol), else a whole-word occurrence of the name that
+/// resolves to the definition itself. A definition with no such position is
+/// skipped and named in `gaps`. A storage failure is an `Err`. The caller set is
+/// the one the `callers` query gives for the same anchor: the distinct caller
+/// files of its edges, read in one query per definition.
 pub(crate) fn callers(
     inputs: &index::CallerInputs,
     tx: &rusqlite::Connection,
@@ -463,9 +564,9 @@ pub(crate) fn callers(
     }
     let validated = semantic::validate_doc_path(canon, path)?;
     let source = semantic::confined_read(canon, &validated, scan::MAX_FILE_BYTES)?;
+    let facts = store::semantic_facts_at(tx, snapshot_id, &validated)?;
     // Caller path → (0 for CALLS or 1 for POTENTIAL_CALL, the definition's name).
     let mut found: BTreeMap<String, (u8, String)> = BTreeMap::new();
-    let mut calls = 0;
     for def in defs {
         let (Ok(start), Ok(end)) = (
             usize::try_from(def.byte_start),
@@ -474,63 +575,41 @@ pub(crate) fn callers(
             finds.gaps.push(GAP_NOT_RESOLVED);
             continue;
         };
-        let Some((line1, col1)) =
-            name_offset(&source, &def.name, start, end).and_then(|at| position_of(&source, at))
-        else {
+        let candidates = name_candidates(&source, &def.name, start, end, &facts);
+        let anchor = resolve_name(
+            tx,
+            snapshot_id,
+            canon,
+            &validated,
+            &source,
+            &candidates,
+            (start, end),
+        )?;
+        let Some(anchor) = anchor else {
             finds.gaps.push(GAP_NOT_RESOLVED);
             continue;
         };
-        let anchor =
-            match index::companion_anchor(tx, snapshot_id, canon, &validated, line1, col1, &source)
-            {
-                Ok(anchor) => anchor,
-                Err(index::GraphQueryError::Anchor(_)) => {
-                    finds.gaps.push(GAP_NOT_RESOLVED);
-                    continue;
-                }
-                Err(index::GraphQueryError::Store(message)) => return Err(message),
-            };
-        // A syntax anchor must be this very definition. A semantic identity is
-        // the one the import proves at the name, so it is accepted as it is.
-        if anchor.kind == index::AnchorKind::SyntaxFallback
-            && anchor.span_bytes != Some((start, end))
-        {
-            finds.gaps.push(GAP_NOT_RESOLVED);
-            continue;
-        }
-        let walked = index::companion_caller_edges(tx, snapshot_id, inputs, &anchor, |edge| {
-            let rank: u8 = match edge.edge_kind.as_str() {
+        let pairs = match index::companion_caller_pairs(tx, snapshot_id, inputs, &anchor) {
+            Ok(pairs) => pairs,
+            Err(index::GraphQueryError::Anchor(_)) => {
+                finds.gaps.push(GAP_NOT_RESOLVED);
+                continue;
+            }
+            Err(index::GraphQueryError::Store(message)) => return Err(message),
+        };
+        for (caller, kind) in pairs {
+            let rank: u8 = match kind.as_str() {
                 "CALLS" => 0,
                 "POTENTIAL_CALL" => 1,
-                _ => return true,
+                _ => continue,
             };
-            let caller = edge.caller_path.as_str();
-            if caller != path && !index::is_test_path(caller) {
-                let current = found.get(caller).map(|(known, _)| *known);
-                match current {
-                    Some(0) => {}
-                    Some(_) if rank == 1 => {}
-                    Some(_) => {
-                        found.insert(caller.to_string(), (0, def.name.clone()));
-                        calls += 1;
-                    }
-                    None => {
-                        if rank == 0 {
-                            calls += 1;
-                        }
-                        found.insert(caller.to_string(), (rank, def.name.clone()));
-                    }
-                }
+            if caller == path || index::is_test_path(&caller) {
+                continue;
             }
-            calls < MAX_PER_KIND
-        });
-        match walked {
-            Ok(()) => {}
-            Err(index::GraphQueryError::Anchor(_)) => finds.gaps.push(GAP_NOT_RESOLVED),
-            Err(index::GraphQueryError::Store(message)) => return Err(message),
-        }
-        if calls >= MAX_PER_KIND {
-            break;
+            let entry = found.entry(caller).or_insert((rank, def.name.clone()));
+            if rank < entry.0 {
+                *entry = (rank, def.name.clone());
+            }
         }
     }
     let mut ranked: Vec<(u8, String, String)> = found
@@ -551,23 +630,115 @@ pub(crate) fn callers(
     Ok(finds)
 }
 
-/// Byte offset of the first whole-word `name` inside `source[start..end]`. A
-/// word character is a letter, digit, `_` or `$`, as in identifiers of the
-/// supported languages.
-fn name_offset(source: &[u8], name: &str, start: usize, end: usize) -> Option<usize> {
-    let body = source.get(start..end)?;
+/// The `definition` role bit of a SCIP occurrence.
+const DEFINITION_ROLE: u32 = 0x1;
+/// Positions tried for one definition's name, in order. Enough for the
+/// definition occurrence and the first few words of a name.
+const MAX_NAME_CANDIDATES: usize = 16;
+
+/// A position to anchor a definition's name at. `symbol` is the SCIP identity
+/// the position must resolve to, or `None` for a syntax position, which must
+/// resolve to the definition itself.
+struct NameCandidate {
+    at: usize,
+    symbol: Option<String>,
+}
+
+/// Where a definition's name can be anchored, in the order they are tried: its
+/// SCIP definition occurrences inside its byte range first, then every
+/// whole-word occurrence of the name inside it. A whole-word occurrence is not
+/// the name just because it comes first (a receiver type or a return type can
+/// precede it), so the caller checks what each position resolves to.
+fn name_candidates(
+    source: &[u8],
+    name: &str,
+    start: usize,
+    end: usize,
+    facts: &[store::SemanticFact],
+) -> Vec<NameCandidate> {
     let needle = name.as_bytes();
+    let mut out: Vec<NameCandidate> = facts
+        .iter()
+        .filter(|fact| {
+            fact.roles & DEFINITION_ROLE != 0
+                && start <= fact.byte_start
+                && fact.byte_end <= end
+                && source.get(fact.byte_start..fact.byte_end) == Some(needle)
+        })
+        .filter_map(|fact| {
+            fact.symbol_uri.as_ref().map(|symbol| NameCandidate {
+                at: fact.byte_start,
+                symbol: Some(symbol.clone()),
+            })
+        })
+        .collect();
+    out.extend(
+        whole_word_offsets(source, needle, start, end)
+            .into_iter()
+            .map(|at| NameCandidate { at, symbol: None }),
+    );
+    out.truncate(MAX_NAME_CANDIDATES);
+    out
+}
+
+/// Byte offsets of every whole-word `needle` inside `source[start..end]`. A word
+/// character is a letter, digit, `_` or `$`, as in identifiers of the supported
+/// languages.
+fn whole_word_offsets(source: &[u8], needle: &[u8], start: usize, end: usize) -> Vec<usize> {
+    let Some(body) = source.get(start..end) else {
+        return Vec::new();
+    };
     if needle.is_empty() || needle.len() > body.len() {
-        return None;
+        return Vec::new();
     }
     let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
     (0..=body.len() - needle.len())
-        .find(|&at| {
+        .filter(|&at| {
             body[at..].starts_with(needle)
                 && (at == 0 || !word(body[at - 1]))
                 && !body.get(at + needle.len()).is_some_and(|&b| word(b))
         })
         .map(|at| start + at)
+        .collect()
+}
+
+/// The first candidate position whose resolution is the candidate's own: a SCIP
+/// identity equal to the candidate's symbol, or, for a syntax position, the
+/// definition's own byte range. `Ok(None)` when no candidate qualifies; a
+/// storage failure is an `Err`.
+fn resolve_name(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    validated: &str,
+    source: &[u8],
+    candidates: &[NameCandidate],
+    span: (usize, usize),
+) -> Result<Option<index::EdgeAnchor>, String> {
+    for candidate in candidates {
+        let Some((line1, col1)) = position_of(source, candidate.at) else {
+            continue;
+        };
+        let anchor =
+            match index::companion_anchor(tx, snapshot_id, canon, validated, line1, col1, source) {
+                Ok(anchor) => anchor,
+                Err(index::GraphQueryError::Anchor(_)) => continue,
+                Err(index::GraphQueryError::Store(message)) => return Err(message),
+            };
+        let accepted = match &candidate.symbol {
+            Some(symbol) => {
+                anchor.kind == index::AnchorKind::Semantic
+                    && anchor.symbol_uri.as_deref() == Some(symbol.as_str())
+            }
+            None => {
+                anchor.kind == index::AnchorKind::SyntaxFallback && anchor.span_bytes == Some(span)
+            }
+        };
+        if accepted {
+            return Ok(Some(anchor));
+        }
+    }
+    Ok(None)
 }
 
 /// The 1-based line and byte column of `offset`. The resolver maps them back to
@@ -866,16 +1037,16 @@ mod tests {
     }
 
     #[test]
-    fn name_offset_is_the_first_whole_word() {
+    fn whole_word_offsets_skip_longer_words() {
         let source = b"MyType helper_t(void)\nMyType helper(void) {}\n";
         let text = std::str::from_utf8(source).unwrap();
         let expected = text.find("helper(void) {").unwrap();
         assert_eq!(
-            name_offset(source, "helper", 0, source.len()),
-            Some(expected)
+            whole_word_offsets(source, b"helper", 0, source.len()),
+            [expected]
         );
-        assert_eq!(name_offset(source, "help", 0, source.len()), None);
-        assert_eq!(name_offset(source, "helper", 0, 10), None);
+        assert!(whole_word_offsets(source, b"help", 0, source.len()).is_empty());
+        assert!(whole_word_offsets(source, b"helper", 0, 10).is_empty());
     }
 
     /// Caller companions of `lib.py` (the `helper` definition) in an index of
@@ -1000,6 +1171,17 @@ mod tests {
             .map(|c| c.path.as_str())
             .collect();
         assert!(callers_of_lib.contains(&"b.py"), "{callers_of_lib:?}");
+    }
+
+    #[test]
+    fn declares_mod_counts_only_a_declaration_outside_comments_and_strings() {
+        assert!(declares_mod("pub mod a;\n", "a"));
+        assert!(declares_mod("#[cfg(test)]\nmod a ;\n", "a"));
+        assert!(!declares_mod("// mod a;\n", "a"));
+        assert!(!declares_mod("/* mod a; */\n", "a"));
+        assert!(!declares_mod("let s = \"mod a;\";\n", "a"));
+        assert!(!declares_mod("mod a { fn f() {} }\n", "a"));
+        assert!(!declares_mod("mod ab;\n", "a"));
     }
 
     #[test]

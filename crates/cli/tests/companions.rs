@@ -246,45 +246,201 @@ fn grep_scip_python_calls_win_over_potential_calls() {
 }
 
 #[test]
-fn grep_scip_typescript_and_c_definitions_do_not_fail_the_search() {
+fn grep_scip_typescript_and_c_methods_name_their_callers() {
     let h = home("scip-ts-c");
     let files: &[(&str, &[u8])] = &[
-        ("a.ts", b"export class Box {\n  fill() {}\n}\nnew Box().fill();\n"),
+        ("a.ts", b"export function fill() {}\n"),
+        (
+            "b.ts",
+            b"import { fill } from \"./a\";\nexport function run() {\n  fill();\n}\n",
+        ),
+        ("c.h", b"typedef int MyType;\nMyType helper(void);\n"),
         (
             "c.c",
-            b"typedef int MyType;\nMyType helper(void) {\n    return 1;\n}\nint main(void) {\n    return helper();\n}\n",
+            b"#include \"c.h\"\nMyType helper(void) {\n    return 1;\n}\n",
+        ),
+        (
+            "main.c",
+            b"#include \"c.h\"\nint main(void) {\n    return helper();\n}\n",
         ),
     ];
     let dir = repo_with(&h, "sem", files);
     index(&h, "sem");
-    let fill = "scip-test test test-pkg 1.0.0 a/Box#fill().";
+    let fill = "scip-test test test-pkg 1.0.0 a/fill().";
     let c_helper = "scip-test test test-pkg 1.0.0 c/helper().";
     let a = document(
         "a.ts",
-        &[
-            occurrence(fill, 0x1, 1, 2, 6),
-            occurrence(fill, 0x0, 3, 8, 12),
-        ],
+        &[occurrence(fill, 0x1, 0, 16, 20)],
         &[symbol_info(fill, "fill")],
     );
+    let b = document("b.ts", &[occurrence(fill, 0x0, 2, 2, 6)], &[]);
     let c = document(
         "c.c",
-        &[
-            occurrence(c_helper, 0x1, 1, 7, 13),
-            occurrence(c_helper, 0x0, 5, 11, 17),
-        ],
+        &[occurrence(c_helper, 0x1, 1, 7, 13)],
         &[symbol_info(c_helper, "helper")],
     );
-    scip_import(&h, &dir, "sem", &[a, c]);
+    let main = document("main.c", &[occurrence(c_helper, 0x0, 2, 11, 17)], &[]);
+    scip_import(&h, &dir, "sem", &[a, b, c, main]);
 
-    // A definition the resolver maps through its SCIP identity must not turn
-    // the whole search into an error (exit 3).
+    // The method and the C function are named by their SCIP identity: the
+    // search succeeds and the caller with CALLS is listed for each.
     let (code, doc) = grep(&h, "sem", "fill() {}");
     assert_eq!(code, 0, "TypeScript class method failed the search");
-    assert!(doc.unwrap()["caller_gaps"].is_array());
+    let doc = doc.unwrap();
+    assert_eq!(callers_of(&doc, "a.ts"), [pair("b.ts", "CALLS")]);
+    assert_eq!(doc["caller_gaps"], serde_json::json!([]));
     let (code, doc) = grep(&h, "sem", "MyType helper");
     assert_eq!(code, 0, "C function with a return type failed the search");
-    assert!(doc.unwrap()["caller_gaps"].is_array());
+    let doc = doc.unwrap();
+    assert_eq!(callers_of(&doc, "c.c"), [pair("main.c", "CALLS")]);
+    assert_eq!(doc["caller_gaps"], serde_json::json!([]));
+}
+
+#[test]
+fn grep_scip_go_method_is_named_by_its_name_not_its_receiver() {
+    let h = home("scip-go");
+    let err_go: &[u8] =
+        b"package p\n\ntype Error struct{}\n\nfunc (e *Error) Error() string {\n\treturn \"x\"\n}\n";
+    let use_go: &[u8] = b"package p\n\nfunc use(e *Error) string {\n\treturn e.Error()\n}\n";
+    let dir = repo_with(&h, "gosem", &[("p/err.go", err_go), ("p/use.go", use_go)]);
+    index(&h, "gosem");
+    let type_sym = "scip-test test test-pkg 1.0.0 p/Error#";
+    let method_sym = "scip-test test test-pkg 1.0.0 p/Error#Error().";
+    // The receiver type `Error` is the first whole word of the method, but it
+    // is a reference to the type. The method's own name is the definition.
+    let err_doc = document(
+        "p/err.go",
+        &[
+            occurrence(type_sym, 0x1, 2, 5, 10),
+            occurrence(method_sym, 0x1, 4, 16, 21),
+            occurrence(type_sym, 0x0, 4, 9, 14),
+        ],
+        &[
+            symbol_info(type_sym, "Error"),
+            symbol_info(method_sym, "Error"),
+        ],
+    );
+    let use_doc = document(
+        "p/use.go",
+        &[
+            occurrence(type_sym, 0x0, 2, 12, 17),
+            occurrence(method_sym, 0x0, 3, 10, 15),
+        ],
+        &[],
+    );
+    scip_import(&h, &dir, "gosem", &[err_doc, use_doc]);
+
+    let (code, doc) = grep(&h, "gosem", "func (e *Error) Error");
+    assert_eq!(code, 0, "Go method failed the search");
+    let doc = doc.unwrap();
+    assert_eq!(callers_of(&doc, "p/err.go"), [pair("p/use.go", "CALLS")]);
+    assert_eq!(doc["caller_gaps"], serde_json::json!([]));
+}
+
+#[test]
+fn grep_rust_use_trees_of_any_depth_do_not_crash_the_search() {
+    let h = home("rust-deep");
+    // 20,000 path segments that name the module `a` first, a chain that never
+    // names it, and 20,000 nested braces. None may exhaust the call stack.
+    let mut chain = String::from("use crate::");
+    for _ in 0..20_000 {
+        chain.push_str("a::");
+    }
+    chain.push_str("a;\n");
+    let mut other_chain = String::from("use crate::");
+    for _ in 0..20_000 {
+        other_chain.push_str("b::");
+    }
+    other_chain.push_str("b;\n");
+    let mut braces = String::from("use crate::");
+    for _ in 0..20_000 {
+        braces.push('{');
+    }
+    braces.push('x');
+    for _ in 0..20_000 {
+        braces.push('}');
+    }
+    braces.push_str(";\n");
+    let files: &[(&str, &[u8])] = &[
+        ("src/a.rs", b"pub fn thing() {}\n"),
+        ("src/chain.rs", chain.as_bytes()),
+        ("src/other.rs", other_chain.as_bytes()),
+        ("src/braces.rs", braces.as_bytes()),
+    ];
+    repo_with(&h, "deep", files);
+    index(&h, "deep");
+    let (code, doc) = grep(&h, "deep", "pub fn thing");
+    assert_eq!(code, 0, "a deep use tree failed the search");
+    let doc = doc.unwrap();
+    let importers: Vec<&str> = file_of(&doc, "src/a.rs")["companions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["why"] == "importer")
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(importers, ["src/chain.rs"]);
+}
+
+#[test]
+fn grep_oversize_rust_parent_is_skipped_not_fatal() {
+    let h = home("rust-big-parent");
+    // src/lib.rs declares `mod a` but is over the size limit, so it is not
+    // read; the search still succeeds and names no importer from it.
+    let mut big = String::from("pub mod a;\n");
+    big.push_str(&"// padding\n".repeat(140_000));
+    let files: &[(&str, &[u8])] = &[
+        ("src/lib.rs", big.as_bytes()),
+        ("src/a.rs", b"pub fn thing() {}\n"),
+    ];
+    repo_with(&h, "big", files);
+    index(&h, "big");
+    let (code, doc) = grep(&h, "big", "pub fn thing");
+    assert_eq!(code, 0, "an oversize parent failed the search");
+    let doc = doc.unwrap();
+    let importers: Vec<&str> = file_of(&doc, "src/a.rs")["companions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["why"] == "importer")
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert!(importers.is_empty(), "{importers:?}");
+}
+
+#[test]
+fn grep_many_callers_keep_the_same_caller_set() {
+    let h = home("many-callers");
+    let mut many = String::from("from lib import helper\n\n");
+    for i in 1..=2_500 {
+        many.push_str(&format!("def f{i}():\n    return helper()\n\n"));
+    }
+    let mut test_file = String::from("from lib import helper\n\n");
+    for i in 1..=50 {
+        test_file.push_str(&format!("def t{i}():\n    return helper()\n\n"));
+    }
+    let files: Vec<(&str, Vec<u8>)> = vec![
+        ("lib.py", b"def helper():\n    return 1\n".to_vec()),
+        ("many.py", many.into_bytes()),
+        ("aaa/test_x.py", test_file.into_bytes()),
+        (
+            "prod.py",
+            b"from lib import helper\n\ndef prod():\n    return helper()\n".to_vec(),
+        ),
+    ];
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (*p, b.as_slice())).collect();
+    repo_with(&h, "many", &refs);
+    index(&h, "many");
+    let (code, doc) = grep(&h, "many", "def helper");
+    assert_eq!(code, 0);
+    let callers = callers_of(&doc.unwrap(), "lib.py");
+    assert_eq!(
+        callers,
+        [
+            pair("many.py", "POTENTIAL_CALL"),
+            pair("prod.py", "POTENTIAL_CALL"),
+        ]
+    );
 }
 
 #[test]
@@ -346,6 +502,43 @@ fn grep_graph_proof_mismatch_skips_callers_and_names_the_gap() {
         .iter()
         .any(|c| c["why"] == "importer" && c["path"] == "app.py"));
     assert!(callers_of(&doc, "lib.py").is_empty());
+}
+
+#[test]
+fn grep_rust_callers_name_their_caller_files() {
+    let h = home("rust-callers");
+    // Rust call edges carry the caller's file in `caller_file` only; the
+    // `caller_path` column is NULL for them. The caller companion must read the file.
+    let files: &[(&str, &[u8])] = &[
+        ("src/a.rs", b"pub fn helper() -> u32 {\n    1\n}\n"),
+        (
+            "src/b.rs",
+            b"use crate::a::helper;\n\npub fn run() -> u32 {\n    helper()\n}\n",
+        ),
+    ];
+    repo_with(&h, "rustc", files);
+    index(&h, "rustc");
+    let (code, doc) = grep(&h, "rustc", "pub fn helper");
+    assert_eq!(code, 0, "a Rust caller edge failed the search");
+    let callers = callers_of(&doc.unwrap(), "src/a.rs");
+    assert_eq!(callers, [pair("src/b.rs", "POTENTIAL_CALL")], "{callers:?}");
+}
+
+#[test]
+fn grep_module_level_calls_name_their_caller_files() {
+    let h = home("module-level");
+    // A call outside any definition has no caller definition: its edge keeps
+    // the file in `caller_file` and has no `caller_path`.
+    let files: &[(&str, &[u8])] = &[
+        ("lib.py", b"def helper():\n    return 1\n"),
+        ("top.py", b"from lib import helper\n\nVALUE = helper()\n"),
+    ];
+    repo_with(&h, "top", files);
+    index(&h, "top");
+    let (code, doc) = grep(&h, "top", "def helper");
+    assert_eq!(code, 0, "a module-level call failed the search");
+    let callers = callers_of(&doc.unwrap(), "lib.py");
+    assert_eq!(callers, [pair("top.py", "POTENTIAL_CALL")], "{callers:?}");
 }
 
 #[test]

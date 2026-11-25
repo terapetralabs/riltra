@@ -2345,6 +2345,27 @@ pub fn selected_edge_page(
         .map_err(|e| e.to_string())
 }
 
+/// The distinct `(caller_path, edge_kind)` pairs one selection matches, in a
+/// single query. Callers read them as sets, so no page offset is involved.
+pub fn selected_edge_callers(
+    conn: &Connection,
+    selection: &EdgeSelection<'_>,
+) -> Result<Vec<(String, String)>, String> {
+    let (predicate, values) = selection.sql();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT DISTINCT caller_file, edge_kind FROM code_edges WHERE {predicate} ORDER BY caller_file, edge_kind"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 /// Outbound edges of one endpoint (callees direction), deterministic order.
 pub fn edges_outbound(
     conn: &Connection,

@@ -65,7 +65,8 @@ each with `path`, `why`, `basis` and `via`. Evidence labels:
   JS/TS relative specifiers; C/C++ `#include "..."`; Go import paths that end at
   the package folder; Rust `use crate::` (grouped and glob uses too, same crate
   only). Other languages, Java included, have no importer rule, so they get
-  none. Needs an index, except that the Rust `mod` check reads the walk.
+  none. Needs an index. A Rust parent file that is over the size limit or cannot
+  be read is skipped, as grep skips such files, so it gives no importer.
 - `caller` (`CALLS` or `POTENTIAL_CALL`): a file that calls the enclosing
   definition of a hit, found with the anchor resolution and edge selection of
   `callers`, anchored at the definition's name, so a SCIP identity is used when

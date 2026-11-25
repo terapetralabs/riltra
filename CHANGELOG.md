@@ -4,6 +4,40 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
+### Added
+
+- `riltra grep` and the MCP tool `riltra_code_grep`: text search in the repository's files that
+  names the definition enclosing each hit. Literal text by default; `--regex` and `--ignore-case`
+  change the match, and `--path` limits the files searched.
+- Companion files for a grep hit, each with an evidence label: `name-pair` (same base name,
+  `path-convention`), `importer` (`import-text-match`: a file whose indexed import text names the
+  hit's file, a guess from text and never a proven import), and `caller` (`CALLS` or
+  `POTENTIAL_CALL`). The grep document carries `caller_gaps`: the reasons a caller lookup was
+  skipped, or `[]` when none.
+- MCP server instructions: the server tells the client which tool answers which kind of question.
+- `riltra mcp --all-tools`: lists every MCP tool, not only the core set.
+- A macOS ARM64 check and package workflow (`macos-arm64.yml`). It runs on push to `master` and
+  by hand, and keeps its archive as a workflow artifact only. It is not a release, and the
+  installers still refuse macOS ARM64.
+
+### Changed
+
+- MCP `tools/list` shows eight core tools by default. The other tools stay callable by name;
+  `riltra mcp --all-tools` lists all of them.
+- MCP tool descriptions are rewritten. `riltra_health` lists the core tools.
+- The release-candidate package and acceptance jobs run on pinned runner images.
+- The release-candidate workflow runs the installer acceptance suite (`acceptance` job) on each
+  archive it builds.
+
+### Upgrading
+
+- No reindex is needed after upgrading from `0.2.1`: the code-index schema, the parser version
+  and the knowledge store are unchanged.
+- The MCP server exposes twenty-two tools, and eight of them are listed by default. Agent
+  instructions that rely on an unlisted tool need `riltra mcp --all-tools`.
+
 ## [0.2.1] - 2026-11-25
 
 ### Added

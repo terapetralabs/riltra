@@ -14,7 +14,7 @@ body:
     attributes:
       label: Riltra version
       description: Include the full output of `riltra --version`.
-      placeholder: riltra 0.2.0
+      placeholder: riltra 0.2.1
     validations:
       required: true
   - type: dropdown

@@ -4,6 +4,15 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-25
+
+### Added
+
+- `riltra_code_search` and CLI `search`: an empty result now carries an `empty` object that names
+  what was searched (`definition-names`, prefix or substring match), the shape of the query
+  (`identifier` or `text`), and where to look next (`query`, `text-search`). A non-empty result
+  is unchanged.
+
 ### Changed
 
 - MCP tools: `repo` is optional when exactly one repository is registered. A call that omits
@@ -11,6 +20,12 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   `not_registered`, with several it answers `invalid_input` naming them, and an unreadable
   registry answers `store_error`. A call with a non-empty `repo` behaves as before and does not
   read the registry first. The CLI still requires `--repo`.
+
+### Upgrading
+
+- No reindex is needed after upgrading from `0.2.0`: the code-index schema, the parser version
+  and the knowledge store are unchanged.
+- The MCP server still exposes twenty-one tools.
 
 ## [0.2.0] - 2026-11-22
 

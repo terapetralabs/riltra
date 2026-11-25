@@ -8636,6 +8636,38 @@ fn mcp_grep_matches_cli_bytes() {
 }
 
 #[test]
+fn mcp_grep_companions_without_index_only_name_pairs() {
+    let h = home("grep-mcp-companions-noindex");
+    let dir = grep_repo_dir("grep-mcp-companions-noindex-repo");
+    std::fs::write(dir.join("index.js"), b"export const a = 1;\n// needle\n").unwrap();
+    std::fs::write(dir.join("index.d.ts"), b"export declare const a: number;\n").unwrap();
+    init_repo(&h, &dir, "r");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "needle"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    let body = doc(&result);
+    assert_eq!(body["snapshot"], json!(null), "no index was built");
+    let file = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "index.js")
+        .expect("index.js is a hit");
+    let companions = file["companions"].as_array().unwrap();
+    assert_eq!(companions.len(), 1, "{companions:?}");
+    assert_eq!(companions[0]["path"], "index.d.ts");
+    assert_eq!(companions[0]["why"], "name-pair");
+    assert_eq!(companions[0]["basis"], "path-convention");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
 fn mcp_grep_repo_may_be_omitted() {
     let h = home("grep-mcp-omit");
     let dir = grep_repo_dir("grep-mcp-omit-repo");

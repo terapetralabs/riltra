@@ -118,7 +118,8 @@ all twenty-two. Every tool stays callable by name.
 
 `riltra grep --repo <name> --pattern <text> [--regex] [--ignore-case] [--path <prefix>] [--limit <n>]`
 (MCP `riltra_code_grep`) searches the repository's text files, including
-languages without a parser, and gives each hit its enclosing indexed definition.
+languages without a parser, gives each hit its enclosing indexed definition, and
+names up to five paired files (`companions`) with their evidence labels.
 
 For tool selection, result labels, and troubleshooting, see the [agent setup
 guide](docs/guide/agent-setup.md).

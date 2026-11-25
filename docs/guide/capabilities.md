@@ -51,6 +51,26 @@ skipped and counted. `limit` counts files (default 20, maximum 200); hits are
 capped per file and in total, and `truncated` names the limit reached. A search
 without an index still runs and creates nothing.
 
+The first five files of the answer carry `companions`: at most three per `why`,
+each with `path`, `why`, `basis` and `via`. Evidence labels:
+
+- `name-pair` (`path-convention`): same base name and an extension of the same
+  group (`.c .h .cc .cpp .hpp .hh`; `.js .mjs .cjs .ts .tsx .d.ts`; `.y .l`;
+  `.py .pyi`), from the walk. Works without an index. A file in the same folder
+  comes first.
+- `importer` (`import-text-match`): a file whose indexed import text names this
+  file. A guess from text, never proven. Rules exist for Python dotted modules,
+  JS/TS relative specifiers, C/C++ `#include "..."`, Go package paths and Rust
+  `use crate::`. Other languages, Java included, have no importer rule, so they
+  get none. Rust `mod` declarations are not matched because `mod` is not an
+  indexed import. Needs an index.
+- `caller` (`CALLS` or `POTENTIAL_CALL`): a file that calls the enclosing
+  definition of a hit, from the same edge query as `callers`. `via` names that
+  definition. Only for fresh files. `POTENTIAL_CALL` is syntax-only and never
+  `CALLS`. Needs an index.
+
+Test files are not companions in 0.3.0.
+
 `query --repo <name> --text <text> [--limit <n>]` (MCP `riltra_code_query`) is
 lexical concept search: it ranks indexed definitions for a free text by the
 words of their names, paths and doc comments (BM25 over the concept index). It

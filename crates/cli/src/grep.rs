@@ -11,11 +11,13 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::companions::Companion;
+use crate::companions::{self, Companion};
 use crate::{index, scan, store};
 
 pub(crate) const DEFAULT_LIMIT: usize = 20;
 pub(crate) const MAX_LIMIT: usize = 200;
+/// Companions are named for the first files of the answer only.
+const COMPANION_FILES: usize = 5;
 /// Matching lines kept per file; the true count is still reported.
 const MAX_HITS_PER_FILE: usize = 5;
 /// Hits kept across one response.
@@ -52,9 +54,8 @@ pub(crate) struct GrepFile {
     pub path: String,
     pub hit_count: usize,
     pub hits: Vec<GrepHit>,
-    /// The file's digest matches its indexed digest. Task 3 reads this to
-    /// choose which files get callers; the document does not show it.
-    #[allow(dead_code)]
+    /// The file's digest matches its indexed digest. Only fresh files get
+    /// caller companions; the document does not show this flag.
     pub fresh: bool,
     pub companions: Vec<Companion>,
 }
@@ -120,6 +121,17 @@ fn grep_repo_with_budget(
     let prefix = normalize_prefix(req.path_prefix)?;
     let (plan, skips) = scan::plan_walk(root)?;
     let (snapshot, digests, freshness, reasons) = snapshot_state(root, tx)?;
+    // The walk's candidate files, reused for name pairs (no second walk).
+    let walk: Vec<String> = plan
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.action,
+                scan::PlanAction::Parse(_) | scan::PlanAction::Unsupported(_)
+            )
+        })
+        .map(|p| p.rel.clone())
+        .collect();
     let mut totals = GrepTotals {
         dirs_unreadable: skips.unreadable,
         dirs_escaped: skips.escape,
@@ -239,6 +251,14 @@ fn grep_repo_with_budget(
             companions: Vec::new(),
         });
     }
+    attach_companions(
+        root,
+        tx,
+        snapshot.as_ref(),
+        (freshness.as_str(), reasons.as_slice()),
+        &walk,
+        &mut files,
+    )?;
     Ok(GrepResult {
         files,
         totals,
@@ -247,6 +267,43 @@ fn grep_repo_with_budget(
         freshness,
         reasons,
     })
+}
+
+/// Companions for the first `COMPANION_FILES` files. Name pairs need no
+/// snapshot; importers and callers need one, and callers need a fresh file.
+/// Storage errors propagate: a failed query is never an empty list.
+fn attach_companions(
+    root: &Path,
+    tx: Option<&rusqlite::Transaction<'_>>,
+    snapshot: Option<&store::Snapshot>,
+    freshness: (&str, &[String]),
+    walk: &[String],
+    files: &mut [GrepFile],
+) -> Result<(), String> {
+    for file in files.iter_mut().take(COMPANION_FILES) {
+        let mut found = companions::name_pairs(&file.path, walk);
+        if let (Some(tx), Some(snap)) = (tx, snapshot) {
+            found.extend(companions::importers(tx, snap.id, &file.path)?);
+            if file.fresh {
+                let mut defs: Vec<store::SymbolSpan> = Vec::new();
+                for span in file.hits.iter().filter_map(|h| h.enclosing.as_ref()) {
+                    if !defs.contains(span) {
+                        defs.push(span.clone());
+                    }
+                }
+                let canon = root
+                    .canonicalize()
+                    .map_err(|e| format!("cannot resolve root: {e}"))?;
+                // The repository name only labels the edge document, which
+                // the companion does not read.
+                found.extend(companions::callers(
+                    tx, "", &canon, snap.id, &file.path, &defs, freshness,
+                )?);
+            }
+        }
+        file.companions = found;
+    }
+    Ok(())
 }
 
 fn refusal(message: &str) -> String {
@@ -729,6 +786,51 @@ mod tests {
             "totals stay truthful"
         );
         assert!(value["files"].as_array().unwrap().len() < 200);
+    }
+
+    #[test]
+    fn grep_response_budget_counts_companion_bytes() {
+        let files: Vec<GrepFile> = (0..30)
+            .map(|i| GrepFile {
+                path: format!("{i:02}.txt"),
+                hit_count: 1,
+                hits: vec![GrepHit {
+                    line: 1,
+                    col: 1,
+                    text: "needle".to_string(),
+                    enclosing: None,
+                    in_reason: "no-index",
+                }],
+                fresh: false,
+                companions: (0..3)
+                    .map(|k| Companion {
+                        path: format!("{}{k}", "c".repeat(900)),
+                        why: "name-pair",
+                        basis: "path-convention",
+                        via: "x".to_string(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let result = GrepResult {
+            files,
+            totals: GrepTotals {
+                files_matched: 30,
+                hits: 30,
+                ..GrepTotals::default()
+            },
+            truncated: None,
+            snapshot: None,
+            freshness: "unknown".to_string(),
+            reasons: vec!["no-index".to_string()],
+        };
+        let req = request("needle");
+        let json = crate::response::grep_response_json("r", &req, &result);
+        assert!(json.len() <= MAX_RESPONSE_BYTES, "{} bytes", json.len());
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["truncated"]["reason"], "response-bytes");
+        assert!(value["files"].as_array().unwrap().len() < 30);
+        assert_eq!(value["files"][0]["companions"].as_array().unwrap().len(), 3);
     }
 
     #[test]

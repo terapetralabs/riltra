@@ -547,7 +547,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_grep",
-        description = "Lines of text or a regular expression in the repository's files (same document as CLI `grep`), each with its enclosing indexed definition. When to call: when a string literal, error message, option or comment is quoted and its location is needed. Not for: a definition name; use riltra_code_search, or a description in words; use riltra_code_query. Files without a parser are searched too (in_reason `not-indexed`); a file changed since indexing gets no enclosing definition (in_reason `file-changed-since-index`). Binary files and files over 1 MiB are skipped and counted; `truncated` names any limit reached.",
+        description = "Lines of text or a regular expression in the repository's files (same document as CLI `grep`), each with its enclosing definition and up to five paired `companions`. When to call: when a string literal, error message, option or comment is quoted and its location is needed. Not for: a definition name; use riltra_code_search, or a description in words; use riltra_code_query. Files without a parser are searched too (in_reason `not-indexed`); a file changed since indexing gets no enclosing definition (in_reason `file-changed-since-index`). Name-pair and importer are guesses; POTENTIAL_CALL is not CALLS. Binary files and files over 1 MiB are skipped and counted; `truncated` names any limit reached.",
         annotations(
             title = "Search text in files",
             read_only_hint = true,

@@ -839,10 +839,8 @@ pub struct SymbolSpan {
     pub kind: String,
     pub start_line: u32,
     pub end_line: u32,
-    // shortcut: byte range is read by the companion matcher (Task 3) only.
-    #[allow(dead_code)]
+    /// Byte range of the definition: the companion callers query anchors on it.
     pub byte_start: i64,
-    #[allow(dead_code)]
     pub byte_end: i64,
 }
 

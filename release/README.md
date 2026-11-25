@@ -19,7 +19,8 @@ for a `v*-rc*` tag, only from `master`, on Windows, Linux and macOS x64, and for
 5. keeps the archive and its checksum as a workflow artifact.
 
 The macOS runner is the x64 pool (see the comment in `ci.yml`); macOS ARM64 is
-not covered.
+not covered here. `macos-arm64.yml` tests and packages it as a workflow artifact
+only; it is not released.
 
 Only `master` may start the workflow. A `guard` job (2026-10-26) refuses a
 `workflow_dispatch` from any other branch, and a `v*-rc*` tag whose commit is not

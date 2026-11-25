@@ -29,7 +29,10 @@ bin="${3:-$root/target/release/riltra}"
 if [ "$platform" = macos-arm64 ]; then
   command -v lipo >/dev/null 2>&1 || { echo "package: lipo is required for macos-arm64" >&2; exit 2; }
   archs="$(lipo -archs "$bin")" || { echo "package: lipo could not read $bin" >&2; exit 2; }
-  [ "$archs" = arm64 ] || { echo "package: $bin is '$archs', expected arm64 for macos-arm64" >&2; exit 2; }
+  # lipo may pad its answer with whitespace; only the surrounding whitespace goes.
+  arch_word="${archs#"${archs%%[![:space:]]*}"}"
+  arch_word="${arch_word%"${arch_word##*[![:space:]]}"}"
+  [ "$arch_word" = arm64 ] || { echo "package: $bin is '$archs', expected arm64 for macos-arm64" >&2; exit 2; }
 fi
 
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }

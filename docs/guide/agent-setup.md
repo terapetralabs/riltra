@@ -68,7 +68,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 
 ## Which tool for which question
 
-`riltra mcp` lists only the core tool set by default. `riltra_health`, `riltra_repo_status`, `riltra_code_packet`, `riltra_code_changes` and `riltra_knowledge_at_anchor` appear only with `riltra mcp --all-tools`; calling them by name works either way.
+`riltra mcp` lists only seven tools by default: `riltra_code_search`, `riltra_code_query`, `riltra_code_callers`, `riltra_code_impact`, `riltra_context`, `riltra_project_overview` and `riltra_knowledge_search`. Every other tool in the table below needs `riltra mcp --all-tools` to be listed; calling them by name works either way.
 
 | You want to know | Call | Notes |
 |---|---|---|

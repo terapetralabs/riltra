@@ -17615,6 +17615,7 @@
         "pkg:cargo/ort@2.0.0-rc.15",
         "pkg:cargo/petgraph@0.8.3",
         "pkg:cargo/protobuf@3.7.2",
+        "pkg:cargo/regex@1.13.1",
         "pkg:cargo/rmcp@3.9.0",
         "pkg:cargo/rusqlite@0.41.1",
         "pkg:cargo/serde@1.0.229",
@@ -17632,7 +17633,7 @@
         "pkg:cargo/tree-sitter-typescript@0.23.2",
         "pkg:cargo/tree-sitter@0.25.10"
       ],
-      "ref": "pkg:cargo/riltra@0.2.1"
+      "ref": "pkg:cargo/riltra@0.3.0"
     },
     {
       "dependsOn": [
@@ -19005,16 +19006,16 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "pkg:cargo/riltra@0.2.1",
+      "bom-ref": "pkg:cargo/riltra@0.3.0",
       "licenses": [
         {
           "expression": "Apache-2.0"
         }
       ],
       "name": "riltra",
-      "purl": "pkg:cargo/riltra@0.2.1",
+      "purl": "pkg:cargo/riltra@0.3.0",
       "type": "application",
-      "version": "0.2.1"
+      "version": "0.3.0"
     }
   },
   "specVersion": "1.5",

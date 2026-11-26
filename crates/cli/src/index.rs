@@ -1891,7 +1891,7 @@ pub(crate) fn resolve_edge_anchor_classified(
 /// Only the enclosing conventional root is used: custom target paths and
 /// `src/bin` are not resolved as separate crate roots. A path with no `src`
 /// component yields no candidate rather than a repo-root guess.
-fn rust_crate_src_root(importer: &str) -> Option<&str> {
+pub(crate) fn rust_crate_src_root(importer: &str) -> Option<&str> {
     if let Some((head, _)) = importer.rsplit_once("/src/") {
         return Some(&importer[..head.len() + "/src".len()]);
     }
@@ -1969,10 +1969,31 @@ fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str
             let Some(src_root) = rust_crate_src_root(importer) else {
                 return false;
             };
-            return (1..=parts.len()).any(|n| {
-                let path = parts[..n].join("/");
-                target == format!("{src_root}/{path}.rs")
-                    || target == format!("{src_root}/{path}/mod.rs")
+            let Some(rest) = target
+                .strip_prefix(src_root)
+                .and_then(|t| t.strip_prefix('/'))
+            else {
+                return false;
+            };
+            // `target` is `<path>.rs` or `<path>/mod.rs` for a prefix `<path>`
+            // of the module parts. Grow the prefix only while it is still a
+            // prefix of the stem, so a long `use` line costs linear time.
+            let stems = [rest.strip_suffix(".rs"), rest.strip_suffix("/mod.rs")];
+            return stems.into_iter().flatten().any(|stem| {
+                let mut path = String::new();
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 {
+                        path.push('/');
+                    }
+                    path.push_str(part);
+                    if !stem.starts_with(path.as_str()) {
+                        return false;
+                    }
+                    if path == stem {
+                        return true;
+                    }
+                }
+                false
             });
         }
     }
@@ -2036,7 +2057,7 @@ fn unique_suffix_match<'a>(
 /// terminal name (`run` in `w.run()`), while an out-of-line C++ definition
 /// keeps its qualified text (`Widget::run`), so the part after the last `::`
 /// is what the call sites are matched against.
-fn called_name(definition: &str) -> &str {
+pub(crate) fn called_name(definition: &str) -> &str {
     definition.rsplit("::").next().unwrap_or(definition)
 }
 
@@ -2082,6 +2103,89 @@ pub(crate) fn indexed_inbound_total(
     Ok(store::selected_edge_counts(tx, &selection)?.total)
 }
 
+/// The anchor of one definition for the grep companions, resolved as `callers`
+/// resolves a position: a proven semantic identity when the import has one,
+/// else the syntax definition at that position. Errors are the resolver's own.
+pub(crate) fn companion_anchor(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    validated: &str,
+    line1: u32,
+    col1: u32,
+    source: &[u8],
+) -> Result<EdgeAnchor, GraphQueryError> {
+    resolve_edge_anchor_classified(
+        tx,
+        snapshot_id,
+        canon,
+        validated,
+        line1 - 1,
+        col1 - 1,
+        None,
+        Some(source),
+    )
+}
+
+/// The distinct `(caller path, edge kind)` pairs of the inbound edges of an
+/// anchor, with the same candidate and selection rules as `callers`. Coverage,
+/// live state and counts are not computed: this is the lean path the grep
+/// companions use. A named anchor is one query; a data member, which takes no
+/// call by name, reads its endpoint's edges in the largest pages the store gives.
+pub(crate) fn companion_caller_pairs(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    inputs: &CallerInputs,
+    anchor: &EdgeAnchor,
+) -> Result<Vec<(String, String)>, GraphQueryError> {
+    const PAGE: i64 = 1000;
+    let endpoint = anchor_endpoint(anchor)
+        .ok_or_else(|| GraphQueryError::Anchor("anchor has no endpoint".to_string()))?;
+    // Same rule as `edge_query_tx_classified`: a data member takes no call by name.
+    let by_name = !anchor.data_member;
+    let candidates = if by_name {
+        caller_candidate_paths_with(tx, snapshot_id, inputs, anchor)?
+    } else {
+        CallerCandidates {
+            paths: Vec::new(),
+            aliases: Vec::new(),
+        }
+    };
+    let candidate_name = if by_name {
+        anchor.candidate_display.as_deref().map(called_name)
+    } else {
+        None
+    };
+    let selection = store::EdgeSelection {
+        snapshot_id,
+        endpoint: &endpoint,
+        inbound: true,
+        candidate_name,
+        candidate_paths: &candidates.paths,
+        candidate_aliases: &candidates.aliases,
+        syntax_aliases: &[],
+    };
+    if candidate_name.is_some() {
+        return Ok(store::selected_edge_callers(tx, &selection)?);
+    }
+    let mut pairs = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = store::edges_inbound(tx, snapshot_id, &endpoint, PAGE, offset)?;
+        pairs.extend(
+            page.iter()
+                .map(|edge| (edge.caller_path.clone(), edge.edge_kind.clone())),
+        );
+        if (page.len() as i64) < PAGE {
+            break;
+        }
+        offset += PAGE;
+    }
+    pairs.sort();
+    pairs.dedup();
+    Ok(pairs)
+}
+
 struct CallerCandidates {
     paths: Vec<String>,
     aliases: Vec<(String, String)>,
@@ -2089,8 +2193,10 @@ struct CallerCandidates {
 
 /// The snapshot-wide inputs every caller seed reads. Loaded once per query.
 pub(crate) struct CallerInputs {
-    id_map: BTreeMap<String, (i64, String)>,
-    imports: Vec<store::ImportRow>,
+    /// Path → (file id, digest) of every indexed file of the snapshot.
+    pub(crate) id_map: BTreeMap<String, (i64, String)>,
+    /// Every import row of the snapshot.
+    pub(crate) imports: Vec<store::ImportRow>,
 }
 
 impl CallerInputs {
@@ -7000,6 +7106,38 @@ mod tests {
             "use crate::helper;",
             "crates/a/src/helper.rs"
         ));
+    }
+
+    #[test]
+    fn rust_use_matches_every_module_prefix_and_mod_rs() {
+        let import = "use crate::a::b::c;";
+        let matches = |target: &str| import_mentions_path("src/main.rs", "rust", import, target);
+        assert!(matches("src/a.rs"));
+        assert!(matches("src/a/mod.rs"));
+        assert!(matches("src/a/b.rs"));
+        assert!(matches("src/a/b/c/mod.rs"));
+        assert!(!matches("src/a/b/c/d.rs"));
+        assert!(!matches("src/b.rs"));
+        assert!(!matches("src/ab.rs"));
+    }
+
+    #[test]
+    fn rust_long_use_path_is_checked_in_linear_time() {
+        // A crafted `use crate::a::a::...` line that matches no target used to
+        // rebuild every prefix from the start: quadratic in the line length.
+        let import = format!("use crate::{}x;", "a::".repeat(30_000));
+        let start = std::time::Instant::now();
+        assert!(!import_mentions_path(
+            "src/main.rs",
+            "rust",
+            &import,
+            "src/b.rs"
+        ));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

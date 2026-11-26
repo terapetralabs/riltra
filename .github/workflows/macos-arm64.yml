@@ -1,0 +1,92 @@
+name: macos-arm64
+
+# Non-required macOS ARM64 check and package, kept as a workflow artifact only.
+# None of these jobs is a required status check, and nothing here creates a
+# release, a tag, a signature or an installer. The check jobs run the same
+# steps as the `check` job in ci.yml, without the ubuntu-only documentation
+# boundary step. There is no continue-on-error: a cancelled job is reported as
+# cancelled, never as a pass.
+#
+# Installer support for macOS ARM64 is not part of 0.3.0. release/install.sh
+# must keep refusing it with "unsupported platform", and the package job checks
+# that refusal on the archive it built.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-15, runner: macos-15 }
+          - { name: macos-latest, runner: macos-latest }
+    name: arm64-check (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Fetch locked sources for dependency audit
+        run: cargo fetch --locked
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo check --locked
+      - name: Test core suite and offline dependency audit
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --locked
+      - run: cargo run -q -p riltra -- --help
+      - run: cargo run -q -p riltra -- --version
+      - run: cargo run -q -p riltra -- status
+
+  arm64-package:
+    name: arm64-package (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch locked sources for complete SBOM and notices
+        run: cargo fetch --locked
+      - name: Release build
+        run: cargo build --release --locked -p riltra
+      - name: Release documents match the locked dependency graph
+        run: cargo run --locked -q --example release_docs -- --check
+      - name: Package
+        shell: bash
+        run: bash release/package.sh macos-arm64 tar.gz
+      - name: Clean-install smoke of the archive
+        shell: bash
+        run: bash release/smoke.sh dist/riltra-*-macos-arm64.tar.gz
+      - uses: actions/upload-artifact@v6
+        with:
+          name: riltra-macos-arm64
+          path: dist/riltra-*
+          if-no-files-found: error
+      - name: Installer refuses macOS ARM64 cleanly
+        shell: bash
+        run: |
+          archive=
+          for candidate in dist/riltra-*-macos-arm64.tar.gz; do archive=$candidate; break; done
+          [ -f "$archive" ] || { echo "no macOS ARM64 archive in dist" >&2; exit 1; }
+          status=0
+          stderr="$(bash release/install.sh --archive "$archive" 2>&1 1>/dev/null)" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "install.sh accepted macOS ARM64; it must refuse with unsupported platform" >&2
+            exit 1
+          fi
+          case "$stderr" in
+            *"unsupported platform"*) echo "installer refused cleanly: $stderr" ;;
+            *) echo "installer exited $status without the unsupported platform refusal: $stderr" >&2; exit 1 ;;
+          esac

@@ -97,7 +97,7 @@ Run `riltra --help` for the full command list. Git is needed for repository
 fingerprints; without it, Riltra reports that status as unavailable instead of
 guessing.
 
-## MCP server (twenty read-only tools, one provider-backed tool)
+## MCP server (twenty-one read-only tools, one provider-backed tool)
 
 <a id="mcp-server-twelve-read-only-tools-one-provider-backed-tool"></a>
 <a id="mcp-server-sixteen-read-only-tools-one-provider-backed-tool"></a>
@@ -105,13 +105,24 @@ guessing.
 <a id="mcp-server-nineteen-read-only-tools-one-provider-backed-tool"></a>
 <a id="mcp-server-twenty-read-only-tools-one-provider-backed-tool"></a>
 
-Run `riltra mcp` to start a local stdio MCP server with twenty-one tools: twenty
-read-only tools for repository, code, knowledge, project overview, the area map, selected-anchor packets, change checks, and documents linked to code, plus
+Run `riltra mcp` to start a local stdio MCP server with twenty-two tools: twenty-one
+read-only tools for repository, code, text search in files, knowledge, project overview, the area map, selected-anchor packets, change checks, and documents linked to code, plus
 `riltra_code_semantic`, which starts the language server configured by the
 operator. That server may write its own cache, run project tools, or access the
 network. Riltra's MCP handlers do not create, migrate, or replace a database.
 A missing index returns `no-index`; an unsupported schema is refused with
 `schema_outdated`. Prepare repositories with the CLI before querying them.
+
+By default `riltra mcp` lists nine core tools; `riltra mcp --all-tools` lists
+all twenty-two. A client that lets the model call only listed tools needs
+`--all-tools` in its MCP configuration to reach the rest; calling by name helps
+only a client that calls by name directly.
+
+`riltra grep --repo <name> --pattern <text> [--regex] [--ignore-case] [--path <prefix>] [--limit <n>]`
+(MCP `riltra_code_grep`) searches the repository's text files, including
+languages without a parser, gives each hit its enclosing indexed definition, and
+gives companion files (`companions`) with their evidence labels for the first
+five files of the answer only (at most three per kind; test files excluded).
 
 For tool selection, result labels, and troubleshooting, see the [agent setup
 guide](docs/guide/agent-setup.md).
@@ -173,13 +184,15 @@ guide](docs/guide/capabilities.md#known-limitations).
 
 ## Stability (pre-1.0)
 
-Within `0.2.x`, CLI exit codes (`0` success, `2` usage error, `3` repository or
+Within `0.3.x`, CLI exit codes (`0` success, `2` usage error, `3` repository or
 data error), JSON key order, and MCP tool names are stable. New JSON keys are
 opt-in or appended; changes to existing keys are released in a minor version
 and described in the release notes. The on-disk index schema is versioned: an
 older schema is reported as stale or `schema_outdated` and rebuilt with
-`riltra index`, never silently reused. These are compatibility commitments for
-the `0.2.x` line only. They are not API guarantees for a 1.0 release, and this
+`riltra index`, never silently reused. Since `0.3.0`, `riltra mcp` lists nine
+core tools by default and `riltra mcp --all-tools` lists all of them; no
+existing tool was renamed or removed. These are compatibility commitments for the `0.3.x` line
+only. They are not API guarantees for a 1.0 release, and this
 release makes no claim about measured results on real projects.
 
 Platform support for the `0.2.1` archives is Windows x64, Linux x64, and macOS

@@ -16,6 +16,39 @@ use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The core set the default `riltra mcp` lists, in the order `health` reports
+/// it.
+const CORE_TOOLS: [&str; 9] = [
+    "riltra_code_grep",
+    "riltra_code_search",
+    "riltra_code_query",
+    "riltra_code_callers",
+    "riltra_code_impact",
+    "riltra_context",
+    "riltra_project_overview",
+    "riltra_knowledge_search",
+    "riltra_knowledge_at_anchor",
+];
+
+fn all_tools_flag(cmd: &mut Command) {
+    cmd.arg("--all-tools");
+}
+
+/// Sorted tool names from one `tools/list` request on a ready session.
+fn tool_names(s: &mut Session, id: i64) -> Vec<String> {
+    s.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {}}).to_string());
+    let v = s.recv();
+    assert_eq!(v["id"], id, "tools/list response: {v}");
+    let mut names: Vec<String> = v["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
 #[path = "common/mock_lsp.rs"]
 mod mock_lsp;
 #[path = "common/rust_alias.rs"]
@@ -225,7 +258,7 @@ fn mcp_initialize_handshake_reports_identity() {
 #[test]
 fn mcp_tools_list_advertises_the_twenty_one_tools() {
     let h = home("tools");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let v = s.recv();
     assert_eq!(v["id"], 2);
@@ -242,6 +275,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
             "riltra_code_callees",
             "riltra_code_callers",
             "riltra_code_changes",
+            "riltra_code_grep",
             "riltra_code_impact",
             "riltra_code_packet",
             "riltra_code_query",
@@ -260,7 +294,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the twenty-one tools"
+        "the server advertises exactly the twenty-two tools"
     );
     assert!(
         !names.iter().any(|n| n.contains("ingest")),
@@ -661,7 +695,7 @@ fn mcp_tools_list_advertises_the_twenty_one_tools() {
 #[test]
 fn every_tool_description_says_when_to_call_it() {
     let h = home("when-to-call");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let v = s.recv();
     let tools = v["result"]["tools"].as_array().expect("tools array");
@@ -679,6 +713,144 @@ fn every_tool_description_says_when_to_call_it() {
         missing.is_empty(),
         "tools whose description has no \"When to call: \" clause: {missing:?}"
     );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn default_tools_list_is_the_core_set() {
+    let h = home("core-default");
+    let mut all = ready_with(&h, all_tools_flag);
+    let all_names = tool_names(&mut all, 2);
+    assert_eq!(
+        all_names.len(),
+        22,
+        "--all-tools lists every tool: {all_names:?}"
+    );
+    let mut expected: Vec<String> = CORE_TOOLS.iter().map(|name| name.to_string()).collect();
+    expected.sort_unstable();
+    let mut s = ready(&h);
+    assert_eq!(
+        tool_names(&mut s, 2),
+        expected,
+        "the default list is exactly the nine core tools"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    let (code, _) = all.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn all_tools_flag_lists_every_tool() {
+    let h = home("all-tools");
+    let mut all = ready_with(&h, all_tools_flag);
+    let all_names = tool_names(&mut all, 2);
+    assert_eq!(
+        all_names.len(),
+        22,
+        "--all-tools lists every tool: {all_names:?}"
+    );
+    let mut core = ready(&h);
+    let core_names = tool_names(&mut core, 2);
+    assert!(
+        core_names.len() < all_names.len(),
+        "the default list is smaller than --all-tools: {core_names:?}"
+    );
+    assert!(
+        core_names.iter().all(|n| all_names.contains(n)),
+        "every default tool is also listed by --all-tools: {core_names:?}"
+    );
+    let (code, _) = core.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    let (code, _) = all.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn hidden_tool_still_callable() {
+    let h = home("hidden-callable");
+    let r = home("hidden-callable-repo");
+    let lines = graph_repo(&h, &r, "g", &[vec![1], vec![2], vec![]]);
+    let mut s = ready(&h);
+    let res = call_tool(
+        &mut s,
+        2,
+        "riltra_code_trace",
+        &json!({"repo": "g", "path": "graph.py", "line": lines[0], "col": 6, "depth": 3}),
+    );
+    assert!(
+        !is_error(&res),
+        "a tool outside the core set must stay callable: {res}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
+fn initialize_carries_instructions() {
+    let h = home("instructions");
+    let mut s = spawn(&h);
+    s.send(initialize_request());
+    let v = s.recv();
+    let text = v["result"]["instructions"]
+        .as_str()
+        .unwrap_or_else(|| panic!("initialize must carry instructions: {v}"));
+    assert!(
+        text.len() <= 600,
+        "instructions are {} bytes: {text}",
+        text.len()
+    );
+    for name in [
+        "riltra_code_grep",
+        "riltra_code_search",
+        "riltra_code_impact",
+        "riltra_knowledge_search",
+        "riltra_knowledge_at_anchor",
+    ] {
+        assert!(text.contains(name), "instructions must name {name}: {text}");
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
+fn every_tool_description_follows_template() {
+    let h = home("template");
+    let mut s = ready_with(&h, all_tools_flag);
+    s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    let v = s.recv();
+    let tools = v["result"]["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    for tool in tools {
+        let name = tool["name"].as_str().expect("tool name");
+        let desc = tool["description"].as_str().unwrap_or_default();
+        assert!(
+            desc.contains("When to call:"),
+            "{name} has no When to call: {desc}"
+        );
+        assert!(desc.contains("Not for:"), "{name} has no Not for: {desc}");
+        assert!(
+            desc.find("When to call:") < desc.find("Not for:"),
+            "{name}: When to call: must come before Not for: {desc}"
+        );
+        for token in desc
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| t.starts_with("riltra_"))
+        {
+            assert!(
+                names.contains(&token),
+                "{name} names {token}, which is not a tool"
+            );
+        }
+    }
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
     assert_home_untouched(&h);
@@ -1026,6 +1198,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_code_callees",
             "riltra_code_callers",
             "riltra_code_changes",
+            "riltra_code_grep",
             "riltra_code_impact",
             "riltra_code_packet",
             "riltra_code_query",
@@ -1044,7 +1217,12 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the twenty-one tools"
+        "the health document must list the twenty-two tools"
+    );
+    assert_eq!(
+        d["capabilities"]["core_tools"],
+        json!(CORE_TOOLS),
+        "the health document must mark the core set"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -7858,15 +8036,15 @@ fn code_query_refuses_outdated_and_newer_databases_with_their_own_kinds() {
 #[test]
 fn mcp_tools_list_2026_07_28_advertises_twenty_one_tools_with_cache_hints() {
     let h = home("tools-list-modern");
-    let mut legacy = ready(&h);
+    let mut legacy = ready_with(&h, all_tools_flag);
     legacy.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let legacy_result = legacy.recv()["result"].clone();
 
-    let mut modern = spawn(&h);
+    let mut modern = spawn_with(&h, all_tools_flag);
     let result = modern_request(&mut modern, 3, "tools/list", json!({}));
     assert_eq!(result["ttlMs"], 0);
     assert_eq!(result["cacheScope"], "public");
-    assert_eq!(result["tools"].as_array().unwrap().len(), 21);
+    assert_eq!(result["tools"].as_array().unwrap().len(), 22);
     assert_eq!(result["tools"], legacy_result["tools"]);
     let (code, _) = modern.finish();
     assert_eq!(code, 0);
@@ -8169,8 +8347,9 @@ fn mcp_project_map_no_index_creates_nothing() {
 // names them; a named repo adds no registry read.
 
 /// Valid non-`repo` arguments for every tool that takes `repo`.
-const TOOL_ARGS: [(&str, &str); 19] = [
+const TOOL_ARGS: [(&str, &str); 20] = [
     ("riltra_repo_status", "{}"),
+    ("riltra_code_grep", r#"{"pattern":"alpha"}"#),
     ("riltra_project_overview", "{}"),
     ("riltra_project_map", "{}"),
     ("riltra_code_changes", "{}"),
@@ -8312,7 +8491,7 @@ fn omitted_repo_every_tool_one_registered() {
     let r = home("optrepo-all-one-repo");
     write_alpha(&r);
     indexed_repo(&h, &r, "solo");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     let mut table: Vec<String> = TOOL_ARGS.iter().map(|(n, _)| n.to_string()).collect();
     table.sort_unstable();
     assert_eq!(
@@ -8393,7 +8572,7 @@ fn omitted_repo_with_corrupt_registry_is_store_error() {
 #[test]
 fn repo_is_optional_and_documented_in_every_schema() {
     let h = home("optrepo-schema");
-    let mut s = ready(&h);
+    let mut s = ready_with(&h, all_tools_flag);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
     let v = s.recv();
     let mut seen = 0;
@@ -8416,5 +8595,209 @@ fn repo_is_optional_and_documented_in_every_schema() {
         );
         assert_eq!(schema["additionalProperties"], false, "{}", tool["name"]);
     }
-    assert_eq!(seen, 19);
+    assert_eq!(seen, 20);
+}
+
+// ---------------------------------------------------------------------------
+// `riltra_code_grep`.
+// ---------------------------------------------------------------------------
+
+const GREP_FIXTURE: &[u8] =
+    b"def alpha():\n    return 1\n\n\ndef beta():\n    alpha()\n    return 2\n";
+
+fn grep_repo_dir(tag: &str) -> PathBuf {
+    let dir = home(tag);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/app.py"), GREP_FIXTURE).unwrap();
+    dir
+}
+
+#[test]
+fn mcp_grep_matches_cli_bytes() {
+    let h = home("grep-mcp-cli");
+    let dir = grep_repo_dir("grep-mcp-cli-repo");
+    indexed_repo(&h, &dir, "r");
+    let (code, cli_out, err) = run_cli(&h, &["grep", "--repo", "r", "--pattern", "alpha()"]);
+    assert_eq!(code, 0, "grep: {err}");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "alpha()"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(
+        result["content"][0]["text"].as_str().unwrap(),
+        cli_out.trim_end_matches('\n'),
+        "the MCP text is the CLI document"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
+fn mcp_grep_companions_match_cli_bytes() {
+    let h = home("grep-mcp-companions-parity");
+    let dir = home("grep-mcp-companions-parity-repo");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("lib/core.py"), b"def helper():\n    return 1\n").unwrap();
+    std::fs::write(dir.join("lib/core.pyi"), b"def helper() -> int: ...\n").unwrap();
+    std::fs::write(
+        dir.join("app.py"),
+        b"from lib.core import helper\n\ndef run():\n    return helper()\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &dir, "r");
+    let (code, cli_out, err) = run_cli(&h, &["grep", "--repo", "r", "--pattern", "helper()"]);
+    assert_eq!(code, 0, "grep: {err}");
+    assert!(cli_out.contains("\"why\":\"caller\""), "{cli_out}");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "helper()"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(
+        result["content"][0]["text"].as_str().unwrap(),
+        cli_out.trim_end_matches('\n'),
+        "the MCP text is the CLI document"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
+fn mcp_grep_companions_without_index_only_name_pairs() {
+    let h = home("grep-mcp-companions-noindex");
+    let dir = grep_repo_dir("grep-mcp-companions-noindex-repo");
+    std::fs::write(dir.join("index.js"), b"export const a = 1;\n// needle\n").unwrap();
+    std::fs::write(dir.join("index.d.ts"), b"export declare const a: number;\n").unwrap();
+    init_repo(&h, &dir, "r");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "needle"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    let body = doc(&result);
+    assert_eq!(body["snapshot"], json!(null), "no index was built");
+    let file = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "index.js")
+        .expect("index.js is a hit");
+    let companions = file["companions"].as_array().unwrap();
+    assert_eq!(companions.len(), 1, "{companions:?}");
+    assert_eq!(companions[0]["path"], "index.d.ts");
+    assert_eq!(companions[0]["why"], "name-pair");
+    assert_eq!(companions[0]["basis"], "path-convention");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
+fn mcp_grep_repo_may_be_omitted() {
+    let h = home("grep-mcp-omit");
+    let dir = grep_repo_dir("grep-mcp-omit-repo");
+    indexed_repo(&h, &dir, "solo");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"pattern": "alpha()"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(doc(&result)["repo"], "solo");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
+fn mcp_grep_without_index_creates_no_database() {
+    let h = home("grep-mcp-noindex");
+    let dir = grep_repo_dir("grep-mcp-noindex-repo");
+    init_repo(&h, &dir, "r");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "alpha()"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    let d = doc(&result);
+    assert!(d["snapshot"].is_null(), "{d}");
+    assert_eq!(d["files"][0]["hits"][0]["in_reason"], "no-index", "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert!(
+        !h.join("index").join("r.db").exists(),
+        "a grep must never create the index database"
+    );
+}
+
+#[test]
+fn mcp_grep_empty_result_has_hint() {
+    let h = home("grep-mcp-empty");
+    let dir = grep_repo_dir("grep-mcp-empty-repo");
+    indexed_repo(&h, &dir, "r");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "zzz-absent"}),
+    );
+    assert!(!is_error(&result), "{result}");
+    let d = doc(&result);
+    assert_eq!(d["totals"]["hits"], 0, "{d}");
+    assert_eq!(
+        d["empty"]["next"],
+        json!(["code_search", "code_query"]),
+        "{d}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+}
+
+#[test]
+fn mcp_grep_refuses_bad_input_and_moved_root() {
+    let h = home("grep-mcp-refuse");
+    let dir = grep_repo_dir("grep-mcp-refuse-repo");
+    indexed_repo(&h, &dir, "r");
+    let mut s = ready(&h);
+    let bad = call_tool(
+        &mut s,
+        2,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "(", "regex": true}),
+    );
+    assert!(is_error(&bad), "{bad}");
+    assert_eq!(doc(&bad)["kind"], "invalid_input", "{bad}");
+    let empty = call_tool(
+        &mut s,
+        3,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": ""}),
+    );
+    assert_eq!(doc(&empty)["kind"], "invalid_input", "{empty}");
+    let moved = h.join("moved-away");
+    std::fs::rename(&dir, &moved).unwrap();
+    let gone = call_tool(
+        &mut s,
+        4,
+        "riltra_code_grep",
+        &json!({"repo": "r", "pattern": "alpha()"}),
+    );
+    assert!(is_error(&gone), "{gone}");
+    assert_eq!(doc(&gone)["kind"], "not_registered", "{gone}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
 }

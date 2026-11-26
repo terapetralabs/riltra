@@ -861,3 +861,9 @@ The generated SBOM combines the Cargo crate license expression with BSD-2-Clause
 `option-ext` 0.2.0 is MPL-2.0 and is reached through the optional Lance index/dirs graph. The official archive remains feature-off and excludes this package. The release notice generator includes the crate license text. Mozilla describes MPL-2.0 as file-level copyleft and says unchanged executable distributors must tell recipients where source for the MPL-covered code is available; optional executable distribution must meet that source notice requirement before it is offered: https://www.mozilla.org/en-US/MPL/2.0/FAQ/.
 
 The remaining optional SPDX expressions are reviewed as exact alternatives in the feature audit. In particular, `LGPL-2.1-or-later` appears only as an alternative alongside MIT and Apache-2.0; `BSL-1.0` is Boost Software License 1.0, and is distinct from the Business Source License.
+
+## 0.3.0 addition: text search (`riltra grep`, `riltra_code_grep`)
+
+| Package | Version | License | Origin | Distribution |
+|---|---|---|---|---|
+| regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex (crates.io) | Shipped in the core build; pattern matching for `grep`. Linear-time engine, no backtracking; the compiled pattern size is limited. Already in the lock file as a transitive dependency; now a direct one. |

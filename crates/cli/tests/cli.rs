@@ -74,6 +74,7 @@ const AGENT_BLOCK: &str = r#"## Code intelligence (Riltra)
 
 Riltra is a local code map, not a source of truth. Confirm answers against the cited source; index freshness and evidence labels limit what an answer establishes.
 
+- `riltra mcp` lists only a core tool set by default. The tools this block names that are outside it (`riltra_health`, `riltra_repo_status`, `riltra_code_packet` and `riltra_code_changes`) are listed only by `riltra mcp --all-tools`. Add `--all-tools` to the client's MCP configuration so the model can call them; a client that lets the model call only listed tools cannot reach them otherwise. Calling by name helps only a client that calls by name directly.
 - For a new folder, run `riltra start [--path <directory>] [--name <name>]` in a terminal. The wizard shows readiness and the effective `RILTRA_HOME`; registration and indexing each require a separate default-no approval. `--client` selects an integration only; it does not approve writes.
 - In the wizard, choose a definition from the overview menu. Riltra builds a packet from that selection, so do not guess line or column coordinates. Entry points are candidates from indexed definitions or conventional locations, not proof of runtime flow. Document and manifest excerpts are labelled live evidence.
 - `fresh` describes the selected index snapshot. On `stale`, `unknown`, `source-changed`, or a changed menu snapshot, reindex and select again.
@@ -93,7 +94,7 @@ const AGENT_BLOCK_MARKERS: [&str; 10] = [
     "`riltra start [--path <directory>] [--name <name>]`",
     "`unsupported-schema:<found>`",
     "`riltra_health.versions.code_index_schema`",
-    "`riltra_repo_status`",
+    "Call `riltra_repo_status` for this repo",
     "`schema_ahead` (`<found>` is higher)",
     "separate approval before running it",
     "`probe_scope: in_process_handler`",
@@ -693,4 +694,118 @@ fn index_exits_3_while_the_writer_lock_is_held() {
     assert!(err.contains("index-busy:"), "stderr: {err:?}");
     drop(held);
     assert_eq!(run(&h, &["index", "--repo", "tiny"]).0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// `riltra grep`. The golden is written by hand from GREP_FIXTURE: 65 bytes;
+// `alpha()` is on line 1 (inside alpha) and line 6 (inside beta, lines 5-7).
+// ---------------------------------------------------------------------------
+
+const GREP_FIXTURE: &[u8] =
+    b"def alpha():\n    return 1\n\n\ndef beta():\n    alpha()\n    return 2\n";
+
+/// Repository `repo` with one Python file, initialized and indexed.
+fn grep_fixture_indexed(h: &Path) -> PathBuf {
+    let repo = mkrepo(h, "repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/app.py"), GREP_FIXTURE).unwrap();
+    assert_eq!(
+        run(
+            h,
+            &["init", "--repo", repo.to_str().unwrap(), "--name", "repo"]
+        )
+        .0,
+        0
+    );
+    let (code, _, err) = run(h, &["index", "--repo", "repo"]);
+    assert_eq!(code, 0, "stderr: {err:?}");
+    repo
+}
+
+#[test]
+fn grep_cli_matches_golden() {
+    let h = home("grep-golden");
+    grep_fixture_indexed(&h);
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "alpha()"]);
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, include_str!("golden/grep-basic.json"));
+}
+
+#[test]
+fn grep_cli_invalid_regex_exits_2() {
+    let h = home("grep-regex");
+    grep_fixture_indexed(&h);
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "(", "--regex"]);
+    assert_eq!(code, 2, "stderr: {err:?}");
+    assert!(out.is_empty(), "stdout: {out:?}");
+    assert!(err.contains("pattern does not compile"), "stderr: {err:?}");
+}
+
+#[test]
+fn grep_cli_bad_limit_exits_2() {
+    let h = home("grep-limit");
+    grep_fixture_indexed(&h);
+    for limit in ["0", "201"] {
+        let (code, out, _) = run(
+            &h,
+            &[
+                "grep",
+                "--repo",
+                "repo",
+                "--pattern",
+                "alpha",
+                "--limit",
+                limit,
+            ],
+        );
+        assert_eq!(code, 2, "limit {limit}");
+        assert!(out.is_empty(), "limit {limit}: {out:?}");
+    }
+}
+
+#[test]
+fn grep_cli_unregistered_exits_3() {
+    let h = home("grep-unknown");
+    let (code, out, err) = run(&h, &["grep", "--repo", "nope", "--pattern", "alpha"]);
+    assert_eq!(code, 3, "stderr: {err:?}");
+    assert!(out.is_empty(), "stdout: {out:?}");
+    assert!(err.contains("unknown repository"), "stderr: {err:?}");
+}
+
+#[test]
+fn grep_cli_missing_root_exits_3() {
+    let h = home("grep-moved");
+    let repo = grep_fixture_indexed(&h);
+    std::fs::rename(&repo, h.join("moved")).unwrap();
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "alpha"]);
+    assert_eq!(code, 3, "stderr: {err:?}");
+    assert!(out.is_empty(), "stdout: {out:?}");
+    assert!(
+        err.contains("registered root is missing"),
+        "stderr: {err:?}"
+    );
+}
+
+#[test]
+fn grep_cli_without_index_searches_and_creates_nothing() {
+    let h = home("grep-noindex");
+    let repo = mkrepo(&h, "repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/app.py"), GREP_FIXTURE).unwrap();
+    assert_eq!(
+        run(
+            &h,
+            &["init", "--repo", repo.to_str().unwrap(), "--name", "repo"]
+        )
+        .0,
+        0
+    );
+    let (code, out, err) = run(&h, &["grep", "--repo", "repo", "--pattern", "alpha()"]);
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert!(out.contains("\"in_reason\":\"no-index\""), "stdout: {out}");
+    assert!(out.contains("\"snapshot\":null"), "stdout: {out}");
+    assert!(
+        !h.join("index").join("repo.db").exists(),
+        "grep must not create an index"
+    );
 }

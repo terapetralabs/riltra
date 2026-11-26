@@ -23,6 +23,18 @@ bin="${3:-$root/target/release/riltra}"
 [ -x "$bin" ] || bin="$bin.exe"
 [ -x "$bin" ] || { echo "package: no release binary (run cargo build --release --locked)" >&2; exit 2; }
 
+# The macOS ARM64 archive must carry an arm64 binary; a build from another
+# architecture would ship under the wrong platform name. Other platforms are
+# not checked here.
+if [ "$platform" = macos-arm64 ]; then
+  command -v lipo >/dev/null 2>&1 || { echo "package: lipo is required for macos-arm64" >&2; exit 2; }
+  archs="$(lipo -archs "$bin")" || { echo "package: lipo could not read $bin" >&2; exit 2; }
+  # lipo may pad its answer with whitespace; only the surrounding whitespace goes.
+  arch_word="${archs#"${archs%%[![:space:]]*}"}"
+  arch_word="${arch_word%"${arch_word##*[![:space:]]}"}"
+  [ "$arch_word" = arm64 ] || { echo "package: $bin is '$archs', expected arm64 for macos-arm64" >&2; exit 2; }
+fi
+
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 

@@ -6,7 +6,10 @@
 //! completed the design-gate inventory (§3) at eighteen tools, and the area
 //! map (`riltra_project_map`) makes it nineteen, and the change checks tool
 //! (`riltra_change_checks`) makes it twenty, and the documents tool
-//! (`riltra_docs_scan`) makes it twenty-one, through the rmcp tool macros.
+//! (`riltra_docs_scan`) makes it twenty-one, and the text search tool
+//! (`riltra_code_grep`) makes it twenty-two, through the rmcp tool macros.
+//! The default `tools/list` shows only `CORE_TOOLS`; `riltra mcp --all-tools`
+//! shows every tool. Every tool stays callable by name either way.
 //! Tool calls reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
 //! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
@@ -34,7 +37,7 @@ use crate::json;
 use crate::knowledge_store_absent;
 use crate::lexical;
 use crate::{
-    context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_search,
+    context, doctor, git, grep, ignore, index, knowledge, knowledge_binding, knowledge_search,
     knowledge_store, map, overview, packet, paths, registry, response, store,
 };
 
@@ -84,6 +87,25 @@ struct CodeSearchInput {
     /// the address of a member, same-file macro arguments): a name census,
     /// not a binding. Off by default; the document is unchanged without it.
     occurrences: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct GrepInput {
+    /// Registered repository name. Optional when exactly one repository is registered.
+    #[serde(default)]
+    repo: String,
+    /// Text to find, matched literally unless `regex` is true. Must not be empty.
+    pattern: String,
+    /// Read `pattern` as a regular expression (linear time, no backreferences). Default false.
+    regex: Option<bool>,
+    /// Match letters regardless of case. Default false.
+    ignore_case: Option<bool>,
+    /// Repository-relative directory or file that limits the search, for example `src/parser`.
+    path: Option<String>,
+    /// Maximum files in the answer (default 20, range 1 to 200).
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -418,13 +440,32 @@ struct SemanticInput {
     operation: Operation,
 }
 
-struct RiltraMcp;
+/// Tools the default `riltra mcp` lists, in the order `riltra_health` reports
+/// them. Tools outside this set stay callable by name.
+pub(crate) const CORE_TOOLS: [&str; 9] = [
+    "riltra_code_grep",
+    "riltra_code_search",
+    "riltra_code_query",
+    "riltra_code_callers",
+    "riltra_code_impact",
+    "riltra_context",
+    "riltra_project_overview",
+    "riltra_knowledge_search",
+    "riltra_knowledge_at_anchor",
+];
+
+/// Sent as the MCP `instructions` at `initialize`; at most 600 bytes.
+const SERVER_INSTRUCTIONS: &str = "Riltra answers code questions from a local index; confirm results against the source. Exact text, an error message or an option: riltra_code_grep (it also gives the enclosing function and paired files; plain grep works too). Symbol name: riltra_code_search. Description in words: riltra_code_query. Before changing code: riltra_code_impact (UNKNOWN or partial means not established, not safe) and riltra_knowledge_at_anchor (notes bound to that code, Unverified). Recorded project decisions: riltra_knowledge_search. The repo argument may be omitted when one repository is registered.";
+
+struct RiltraMcp {
+    all_tools: bool,
+}
 
 #[tool_router]
 impl RiltraMcp {
     #[tool(
         name = "riltra_repo_list",
-        description = "List registered repositories (same document as CLI `repo list`). When to call: when more than one repository is registered, to learn the `repo` name the other tools need; with one repository, `repo` may be omitted.",
+        description = "List registered repositories (same document as CLI `repo list`). When to call: when more than one repository is registered, to learn the `repo` name the other tools need; with one repository, `repo` may be omitted. Not for: one repository; omit repo instead.",
         annotations(
             title = "List registered repositories",
             read_only_hint = true,
@@ -442,7 +483,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_repo_status",
-        description = "Repository status (same document as CLI `repo status`) plus a read-only `index_status` member (same document as CLI `index status`). When to call: before relying on other answers, to see whether the index exists and still matches the source.",
+        description = "Repository status (same document as CLI `repo status`) plus a read-only `index_status` member (same document as CLI `index status`). When to call: before relying on other answers, to see whether the index exists and still matches the source. Not for: installation health; use riltra_health.",
         annotations(
             title = "Repository status",
             read_only_hint = true,
@@ -459,7 +500,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_project_overview",
-        description = "Summarize a registered project from bounded index and document evidence (same document as CLI `overview`). No-index and stale states remain explicit. Read-only; does not run build, test, package-manager, model, or provider commands. When to call: to orient on a registered project before choosing a definition or reading its build instructions.",
+        description = "Summarize a registered project from bounded index and document evidence (same document as CLI `overview`). When to call: to orient on a registered project before choosing a definition or reading its build instructions. Not for: area map and flows; use riltra_project_map. No-index and stale states remain explicit. Read-only; does not run build, test, package-manager, model, or provider commands.",
         annotations(
             title = "Project overview",
             read_only_hint = true,
@@ -476,7 +517,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_project_map",
-        description = "Area map of one indexed snapshot (same document as CLI `map`): directory areas, entry points, hubs, proven links between areas, separate name-match candidates, and up to three bounded static flows. Areas are navigation hints; flows are not proof of execution. When to call: to choose where to look before tracing a feature across components.",
+        description = "Area map of one indexed snapshot (same document as CLI `map`): directory areas, entry points, hubs, proven links between areas, separate name-match candidates, and up to three bounded static flows. When to call: to choose where to look before tracing a feature across components. Not for: a short summary; use riltra_project_overview. Areas are navigation hints; flows are not proof of execution.",
         annotations(
             title = "Project area map",
             read_only_hint = true,
@@ -490,7 +531,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_search",
-        description = "Search indexed definitions by name (same document as CLI `search`): a prefix match, then a case-insensitive substring match, over definition names only. String literals, comments, error messages and names defined outside the repository (imports) are not searched: use `riltra_code_query` for a description in words and your text search (grep) for literal text. A zero result adds an `empty` object with the query shape and `next` (`query`, `text-search`). A missing index reports `no-index` without creating storage. When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take.",
+        description = "Search indexed definitions by name (same document as CLI `search`): a prefix match, then a case-insensitive substring match, over definition names only. A zero result adds an `empty` object with the query shape and `next` (`query`, `text-search`). When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take. Not for: text inside strings or comments; use riltra_code_grep. String literals, comments, error messages and names defined outside the repository (imports) are not searched: use `riltra_code_query` for a description in words and text search (`riltra_code_grep`) for literal text. A missing index reports `no-index` without creating storage.",
         annotations(
             title = "Search indexed symbols",
             read_only_hint = true,
@@ -506,8 +547,22 @@ impl RiltraMcp {
     }
 
     #[tool(
+        name = "riltra_code_grep",
+        description = "Lines of text or a regular expression in the repository's files (same document as CLI `grep`), each with its enclosing definition and `companions` for the first five files only (at most three per kind; test files excluded). When to call: when a string literal, error message, option or comment is quoted and its location is needed. Not for: a definition name; use riltra_code_search, or a description in words; use riltra_code_query. Files without a parser are searched too (in_reason `not-indexed`); a file changed since indexing gets no enclosing definition (in_reason `file-changed-since-index`). Name-pair and importer are guesses; POTENTIAL_CALL is not CALLS. Binary files and files over 1 MiB are skipped and counted; `truncated` names any limit reached.",
+        annotations(
+            title = "Search text in files",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_grep(&self, Parameters(input): Parameters<GrepInput>) -> CallToolResult {
+        with_repo(input, move |input| grep_doc(&input)).await
+    }
+
+    #[tool(
         name = "riltra_code_query",
-        description = "Rank indexed symbols by the words of a free text (same document as CLI `query`). Lexical only: BM25 over symbol names, paths and doc comments, with no semantic matching; test paths rank last unless a term names tests. Expansion along proven call edges is opt-in with `expand: true`; it adds an `expansion` object and never changes `results`. When to call: to find a definition from a description in words, before the graph tools that take a `path`, `line` and `col`.",
+        description = "Rank indexed symbols by the words of a free text (same document as CLI `query`). Expansion along proven call edges is opt-in with `expand: true`; it adds an `expansion` object and never changes `results`. When to call: to find a definition from a description in words, before the graph tools that take a `path`, `line` and `col`. Not for: exact text; use riltra_code_grep. Lexical only: BM25 over symbol names, paths and doc comments, with no semantic matching; test paths rank last unless a term names tests.",
         annotations(
             title = "Search indexed symbols by free text",
             read_only_hint = true,
@@ -521,7 +576,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callers",
-        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: before changing a function or method, to see what appears to call it.",
+        description = "Call sites that reference the anchor symbol (same document as CLI `callers`). A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: before changing a function or method, to see what appears to call it. Not for: transitive impact; use riltra_code_impact. Heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution.",
         annotations(
             title = "Find callers",
             read_only_hint = true,
@@ -538,7 +593,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_changes",
-        description = "Definitions a git change touches (same document as CLI `changes`): the live parse of each changed Python, JavaScript, TypeScript, Rust, C, C++, Go or Java file names the definitions a hunk meets, added, removed or modified, with the hunks outside every definition. Symbols never depend on the index; caller counts (`inbound_edges`) come from it and say why they are null when they cannot be given. It is a map of structure, not an impact verdict. When to call: after editing, to see which functions or classes a change actually touches before reviewing or testing them.",
+        description = "Definitions a git change touches (same document as CLI `changes`): the live parse of each changed Python, JavaScript, TypeScript, Rust, C, C++, Go or Java file names the definitions a hunk meets, added, removed or modified, with the hunks outside every definition. Symbols never depend on the index; caller counts (`inbound_edges`) come from it and say why they are null when they cannot be given. When to call: after editing, to see which functions or classes a change actually touches before reviewing or testing them. Not for: choosing tests; use riltra_change_checks. It is a map of structure, not an impact verdict.",
         annotations(
             title = "Changed definitions",
             read_only_hint = true,
@@ -555,7 +610,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_change_checks",
-        description = "Test candidates and coverage limits for one git change (same document as CLI `checks`): the test files a change may affect, each with the reasons that name it, the changed definitions and review areas, quoted verification instructions found in the repository, and the limits that bound the answer. Each candidate carries one basis: `proven-edge`, `unproven-edge`, `name-candidate` or `path-convention`; quoted instructions are marked `explicit-instruction`. Riltra runs no test, and an empty `test_candidates` list does not mean no test is needed. The project's required checks still apply. When to call: after a change, to choose which tests and areas to check before running the project's required suite.",
+        description = "Test candidates and coverage limits for one git change (same document as CLI `checks`): the test files a change may affect, each with the reasons that name it, the changed definitions and review areas, quoted verification instructions found in the repository, and the limits that bound the answer. Each candidate carries one basis: `proven-edge`, `unproven-edge`, `name-candidate` or `path-convention`; quoted instructions are marked `explicit-instruction`. When to call: after a change, to choose which tests and areas to check before running the project's required suite. Not for: a list of changed definitions; use riltra_code_changes. Riltra runs no test, and an empty `test_candidates` list does not mean no test is needed. The project's required checks still apply.",
         annotations(
             title = "Test candidates and coverage limits",
             read_only_hint = true,
@@ -572,7 +627,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_docs_scan",
-        description = "Local Markdown documents of one registered repository (same document as CLI `docs scan`): their sections, inline links to project files and definitions, the knowledge records that already cite them, and proposals for bindings. Proposals come only from explicit links to indexed definitions; no link is guessed from text similarity. Riltra writes nothing: the scan opens no store for writing and changes no record. Ingesting a proposal is CLI-only (`docs ingest`) and needs the user's approval. When to call: to find which documented rules and decisions point at code, before proposing records for the user to ingest.",
+        description = "Local Markdown documents of one registered repository (same document as CLI `docs scan`): their sections, inline links to project files and definitions, the knowledge records that already cite them, and proposals for bindings. When to call: to find which documented rules and decisions point at code, before proposing records for the user to ingest. Not for: decisions already stored; use riltra_knowledge_search. Proposals come only from explicit links to indexed definitions; no link is guessed from text similarity. Riltra writes nothing: the scan opens no store for writing and changes no record. Ingesting a proposal is CLI-only (`docs ingest`) and needs the user's approval.",
         annotations(
             title = "Documents linked to code",
             read_only_hint = true,
@@ -589,7 +644,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callees",
-        description = "Symbols the anchor definition calls (same document as CLI `callees`). A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to see what a function or method appears to depend on.",
+        description = "Symbols the anchor definition calls (same document as CLI `callees`). A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to see what a function or method appears to depend on. Not for: multi-level paths; use riltra_code_trace. Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution.",
         annotations(
             title = "Find callees",
             read_only_hint = true,
@@ -606,7 +661,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_trace",
-        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: to check whether and how one symbol might reach another.",
+        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`). A name may be given instead of a position (`target`, optionally `in` and `kind`). When to call: to check whether and how one symbol might reach another. Not for: one level only; use riltra_code_callees. Paths are plausible traversal, not execution. Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution.",
         annotations(
             title = "Trace call paths",
             read_only_hint = true,
@@ -620,7 +675,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_impact",
-        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe. Name-matched callers are listed as `candidate-name` paths and never followed further. `summary` adds counts over this traversal (a small `limit` caps candidates per node and can lower them); `include_tests` needs `summary`.",
+        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`). A name may be given instead of a position (`target`, optionally `in` and `kind`). `summary` adds counts over this traversal (a small `limit` caps candidates per node and can lower them); `include_tests` needs `summary`. When to call: before changing a symbol, to see what it might affect. Not for: one level only; use riltra_code_callers. Impact is plausible, not execution. `UNKNOWN` or `partial` means not established, not safe. Name-matched callers are listed as `candidate-name` paths and never followed further. Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution.",
         annotations(
             title = "Estimate impact",
             read_only_hint = true,
@@ -637,7 +692,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_context",
-        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. A name may be given instead of a position (`target`, optionally `in` and `kind`). Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution. The result also carries four read-only sections: `containment` (enclosing scopes and direct members), `heritage` (declared supertypes, name-matched implementations and subtypes), `imports` (file imports and importers) and `callees` (the callees edges), each with per-list counts. When to call: to inspect code impact and its recorded rationale together.",
+        description = "Compose bounded What, Impact and Why context from one pinned code-index snapshot and a separate knowledge generation. A name may be given instead of a position (`target`, optionally `in` and `kind`). The result also carries four read-only sections: `containment` (enclosing scopes and direct members), `heritage` (declared supertypes, name-matched implementations and subtypes), `imports` (file imports and importers) and `callees` (the callees edges), each with per-list counts. When to call: to inspect code impact and its recorded rationale together. Not for: many anchors without knowledge; use riltra_code_packet. Explicit code bindings remain distinct from lexical and optional semantic relevance candidates; no cross-store transaction or causal link is implied. Each POTENTIAL_CALL edge also carries `candidates` and `candidate_scope`: a name-matched definition count and its place relative to the caller, never a resolution.",
         annotations(
             title = "Read graph context",
             read_only_hint = true,
@@ -651,7 +706,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_packet",
-        description = "Read bounded source snippets and graph context for one to five explicitly selected code anchors. Source snippets are capped and freshness evidence is retained. When to call: after choosing anchors with search or query.",
+        description = "Read bounded source snippets and graph context for one to five explicitly selected code anchors. When to call: after choosing anchors with search or query. Not for: locating code; use riltra_code_search. Source snippets are capped and freshness evidence is retained.",
         annotations(
             title = "Read selected code context",
             read_only_hint = true,
@@ -668,7 +723,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_search",
-        description = "Search knowledge records by literal text and/or an exact stored evidence path (same document as CLI `knowledge search`). Set semantic=true to use the local vector index; it requires provisioned assets at RILTRA_MODEL_DIR and falls back to FTS5 with an explicit reason when unavailable. A missing store answers with an empty result and creates nothing. When to call: to look for recorded decisions or notes by text or by an evidence path.",
+        description = "Search knowledge records by literal text and/or an exact stored evidence path (same document as CLI `knowledge search`). When to call: to look for recorded decisions or notes by text or by an evidence path. Not for: reading one record; use riltra_knowledge_show. Set semantic=true to use the local vector index; it requires provisioned assets at RILTRA_MODEL_DIR and falls back to FTS5 with an explicit reason when unavailable. A missing store answers with an empty result and creates nothing.",
         annotations(
             title = "Search knowledge records",
             read_only_hint = true,
@@ -685,7 +740,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_show",
-        description = "Read one knowledge revision with its evidence freshness (same document as CLI `knowledge show`). Confirmation is reported as stored provenance, never as promotion. When to call: to read a record that a search, a relation or an anchor lookup returned.",
+        description = "Read one knowledge revision with its evidence freshness (same document as CLI `knowledge show`). When to call: to read a record that a search, a relation or an anchor lookup returned. Not for: searching; use riltra_knowledge_search. Confirmation is reported as stored provenance, never as promotion.",
         annotations(
             title = "Read a knowledge revision",
             read_only_hint = true,
@@ -702,7 +757,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_related",
-        description = "One-hop knowledge relations in either direction (same document as CLI `knowledge related`); retracted relations are hidden unless requested. When to call: to follow the links from a record to the records it relates to.",
+        description = "One-hop knowledge relations in either direction (same document as CLI `knowledge related`). When to call: to follow links from a record to related records. Not for: code positions; use riltra_knowledge_at_anchor. Retracted relations are hidden unless requested.",
         annotations(
             title = "Read knowledge relations",
             read_only_hint = true,
@@ -719,7 +774,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_at_anchor",
-        description = "Read explicit code-anchor bindings to exact knowledge revisions (same document as CLI `knowledge at`). This operation is read-only and never creates or migrates a store; unlinked anchors remain unlinked. When to call: to check whether a decision is recorded for the code at a position.",
+        description = "Read explicit code-anchor bindings to exact knowledge revisions (same document as CLI `knowledge at`). When to call: to check whether a decision is recorded for the code at a position. Not for: free text; use riltra_knowledge_search. This operation is read-only and never creates or migrates a store; unlinked anchors remain unlinked.",
         annotations(
             title = "Read knowledge at a code anchor",
             read_only_hint = true,
@@ -736,7 +791,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_semantic",
-        description = "Definition or references of the symbol at a position, answered by a language server (the same document as CLI `semantic query --lsp-server`). References are locations, not call edges: they are never edges, and they are never a completeness claim — the provider's project index and compilation database may be incomplete. An empty answer means the provider found nothing at this position; it is not a claim that the symbol does not exist. A path that does not exist is reported as a path-containment refusal (`document path escapes repository`), never as an empty answer. The answer carries the provider's verification state and its diagnostics. The language server is a local process that the operator configured; it reads the project and may write its own index cache, and what it runs is provider-dependent — some servers run the project's build tools — so this tool is not read-only. When to call: only when an operator has set `RILTRA_LSP_SERVER` to a language server, to get a definition or references from it.",
+        description = "Definition or references of the symbol at a position, answered by a language server (the same document as CLI `semantic query --lsp-server`). The answer carries the provider's verification state and its diagnostics. When to call: only when an operator has set `RILTRA_LSP_SERVER` to a language server, to get a definition or references from it. Not for: a project without a provider; use riltra_code_search or riltra_code_callers. References are locations, not call edges: they are never edges, and they are never a completeness claim — the provider's project index and compilation database may be incomplete. An empty answer means the provider found nothing at this position; it is not a claim that the symbol does not exist. A path that does not exist is reported as a path-containment refusal (`document path escapes repository`), never as an empty answer. The language server is a local process that the operator configured; it reads the project and may write its own index cache, and what it runs is provider-dependent — some servers run the project's build tools — so this tool is not read-only.",
         annotations(
             title = "Semantic definition or references",
             read_only_hint = false,
@@ -754,7 +809,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_health",
-        description = "Environment health: bootstrap status, environment doctor, versions, capabilities, limits, and the registered repository count. Read-only; creates and opens no storage. When to call: to check that Riltra is reachable and which versions and limits apply.",
+        description = "Environment health: bootstrap status, environment doctor, versions, capabilities, limits, and the registered repository count. When to call: to check that Riltra is reachable and which versions and limits apply. Not for: one repo's status; use riltra_repo_status. Read-only; creates and opens no storage.",
         annotations(
             title = "Health",
             read_only_hint = true,
@@ -774,6 +829,7 @@ impl ServerHandler for RiltraMcp {
         // rmcp's own crate name) with this binary's identity.
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(crate::NAME, env!("CARGO_PKG_VERSION")))
+            .with_instructions(SERVER_INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -784,7 +840,11 @@ impl ServerHandler for RiltraMcp {
         let supports_cache_hints = context
             .protocol_version()
             .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
-        let mut result = ListToolsResult::with_all_items(sorted_tool_definitions());
+        let mut tools = sorted_tool_definitions();
+        if !self.all_tools {
+            tools.retain(|tool| CORE_TOOLS.contains(&tool.name.as_ref()));
+        }
+        let mut result = ListToolsResult::with_all_items(tools);
         if supports_cache_hints {
             result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Public);
         }
@@ -843,6 +903,7 @@ has_repo!(
     OverviewInput,
     MapInput,
     CodeSearchInput,
+    GrepInput,
     QueryInput,
     EdgeInput,
     TraceInput,
@@ -1316,6 +1377,63 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                 crate::search_hint::empty_hint(&input.query, total).as_ref(),
             )
         }
+    }
+}
+
+fn grep_doc(input: &GrepInput) -> CallToolResult {
+    let limit = input.limit.unwrap_or(grep::DEFAULT_LIMIT);
+    if limit == 0 || limit > grep::MAX_LIMIT {
+        return tool_error(
+            "invalid_input",
+            &format!("limit must be between 1 and {}", grep::MAX_LIMIT),
+        );
+    }
+    let (home, root) = match repo_root(&input.repo) {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let req = grep::GrepRequest {
+        pattern: &input.pattern,
+        regex: input.regex.unwrap_or(false),
+        ignore_case: input.ignore_case.unwrap_or(false),
+        path_prefix: input.path.as_deref(),
+        limit,
+    };
+    let outcome = match store::open_read(&store::db_path(&home, &input.repo)) {
+        store::IndexRead::Missing => grep::grep_repo(&root, None, &req),
+        store::IndexRead::Outdated(version) => {
+            return tool_error("schema_outdated", &outdated_message(&input.repo, version))
+        }
+        store::IndexRead::Ahead(version) => {
+            return tool_error(
+                "schema_ahead",
+                &format!(
+                    "database schema v{version} is newer than supported v{}",
+                    store::SCHEMA_VERSION
+                ),
+            )
+        }
+        store::IndexRead::Error(message) => return tool_error("store_error", &message),
+        store::IndexRead::Ready(mut conn) => {
+            let tx = match conn.transaction() {
+                Ok(tx) => tx,
+                Err(e) => return tool_error("store_error", &e.to_string()),
+            };
+            let found = grep::grep_repo(&root, Some(&tx), &req);
+            if found.is_ok() {
+                if let Err(e) = tx.commit() {
+                    return tool_error("store_error", &e.to_string());
+                }
+            }
+            found
+        }
+    };
+    match outcome {
+        Ok(result) => exact_doc(&response::grep_response_json(&input.repo, &req, &result)),
+        Err(e) => match grep::refusal_message(&e) {
+            Some(message) => tool_error("invalid_input", message),
+            None => tool_error("store_error", &e),
+        },
     }
 }
 
@@ -2539,6 +2657,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_code_callees",
                 "riltra_code_callers",
                 "riltra_code_changes",
+                "riltra_code_grep",
                 "riltra_code_impact",
                 "riltra_code_packet",
                 "riltra_code_query",
@@ -2557,6 +2676,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_repo_list",
                 "riltra_repo_status",
             ],
+            "core_tools": CORE_TOOLS,
         },
         "limits": {
             "code_search": {
@@ -2604,8 +2724,9 @@ fn health_doc() -> CallToolResult {
 }
 
 /// Run the MCP stdio server to completion. Exit codes follow the CLI:
-/// 0 clean shutdown (client EOF/disconnect), 3 runtime failure.
-pub(crate) fn run() -> i32 {
+/// 0 clean shutdown (client EOF/disconnect), 3 runtime failure. `all_tools`
+/// is `--all-tools`: list every tool instead of the core set.
+pub(crate) fn run(all_tools: bool) -> i32 {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -2614,13 +2735,14 @@ pub(crate) fn run() -> i32 {
         }
     };
     runtime.block_on(async {
-        let service = match serve_server(RiltraMcp, rmcp::transport::io::stdio()).await {
-            Ok(service) => service,
-            Err(e) => {
-                eprintln!("error: mcp initialize failed: {e}");
-                return 3;
-            }
-        };
+        let service =
+            match serve_server(RiltraMcp { all_tools }, rmcp::transport::io::stdio()).await {
+                Ok(service) => service,
+                Err(e) => {
+                    eprintln!("error: mcp initialize failed: {e}");
+                    return 3;
+                }
+            };
         match service.waiting().await {
             Ok(rmcp::service::QuitReason::JoinError(e)) => {
                 eprintln!("error: mcp task failed: {e}");
@@ -2657,7 +2779,10 @@ fn in_process_self_test_after_startup(
         let (server_io, client_io) = tokio::io::duplex(BUFFER_BYTES);
         let (reader, mut writer) = tokio::io::split(client_io);
         let mut reader = BufReader::new(reader);
-        let mut server_task = Some(tokio::spawn(serve_server(RiltraMcp, server_io)));
+        let mut server_task = Some(tokio::spawn(serve_server(
+            RiltraMcp { all_tools: false },
+            server_io,
+        )));
         let operation = async {
             let initialize = serde_json::json!({
                 "jsonrpc": "2.0",
@@ -2946,7 +3071,10 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let (server_io, client_io) = tokio::io::duplex(64);
-            let startup = tokio::spawn(super::serve_server(super::RiltraMcp, server_io));
+            let startup = tokio::spawn(super::serve_server(
+                super::RiltraMcp { all_tools: false },
+                server_io,
+            ));
             let error =
                 match super::await_server_startup(startup, std::time::Duration::from_millis(10))
                     .await

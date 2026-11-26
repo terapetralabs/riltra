@@ -68,6 +68,8 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 
 ## Which tool for which question
 
+`riltra mcp` lists only nine tools by default: `riltra_code_grep`, `riltra_code_search`, `riltra_code_query`, `riltra_code_callers`, `riltra_code_impact`, `riltra_context`, `riltra_project_overview`, `riltra_knowledge_search` and `riltra_knowledge_at_anchor`. Every other tool in the table below needs `riltra mcp --all-tools` in the client's MCP configuration to be listed; a client that lets the model call only listed tools cannot reach them otherwise. Calling by name helps only a client that calls by name directly.
+
 | You want to know | Call | Notes |
 |---|---|---|
 | Is Riltra working, and which repositories are registered? | `riltra_health`, `riltra_repo_list` | Read-only; they create and open no storage. With exactly one repository registered, every other tool may omit `repo`; with several, a call without it answers `invalid_input` and names them. |
@@ -75,6 +77,7 @@ model/runtime assets. This feature requires a Riltra build with the default-off
 | Where do I start in this project? | `riltra_project_overview` | Read-only summary from index and document evidence. Entry points are candidates, not proof of a runtime flow. |
 | Which areas does the project have, and how are they linked? | `riltra_project_map` | Directory areas, proven links and bounded static flows. Areas are navigation hints, not architecture boundaries. |
 | Where is a symbol defined? | `riltra_code_search` | `query` is the symbol text. `limit` (default 50, maximum 1000) and `offset` page the results. `occurrences: true` adds a name census for C++ only. |
+| Where does this text appear, such as an error message, string, option or comment? | `riltra_code_grep` | Literal text, or a regex with `regex: true`. Each hit carries its enclosing definition (`in`) and `in_reason`; a file changed since indexing gets no enclosing definition. `path` limits the search; `limit` counts files (default 20, maximum 200). |
 | Which definitions match a description in words? | `riltra_code_query` | Lexical ranking over names, paths and doc comments. Results carry `path` and `line` but no column; pass `name` as `target` and `path` as `in`. |
 | Which definitions does my git change touch? | `riltra_code_changes` | Live parse of the changed files: definitions added, removed or modified. A map of structure, not an impact verdict. |
 | Which tests and areas should I check for my git change? | `riltra_change_checks` | Suggestions from git changes, stored relations and file names. Riltra runs no test, and an empty list does not mean no test is needed; run the checks your project requires. |
@@ -290,6 +293,7 @@ Paste this into your agent's instruction file (for example `AGENTS.md` or `CLAUD
 
 Riltra is a local code map, not a source of truth. Confirm answers against the cited source; index freshness and evidence labels limit what an answer establishes.
 
+- `riltra mcp` lists only a core tool set by default. The tools this block names that are outside it (`riltra_health`, `riltra_repo_status`, `riltra_code_packet` and `riltra_code_changes`) are listed only by `riltra mcp --all-tools`. Add `--all-tools` to the client's MCP configuration so the model can call them; a client that lets the model call only listed tools cannot reach them otherwise. Calling by name helps only a client that calls by name directly.
 - For a new folder, run `riltra start [--path <directory>] [--name <name>]` in a terminal. The wizard shows readiness and the effective `RILTRA_HOME`; registration and indexing each require a separate default-no approval. `--client` selects an integration only; it does not approve writes.
 - In the wizard, choose a definition from the overview menu. Riltra builds a packet from that selection, so do not guess line or column coordinates. Entry points are candidates from indexed definitions or conventional locations, not proof of runtime flow. Document and manifest excerpts are labelled live evidence.
 - `fresh` describes the selected index snapshot. On `stale`, `unknown`, `source-changed`, or a changed menu snapshot, reindex and select again.

@@ -39,6 +39,66 @@ adds an exact-name census of occurrences such as member accesses, address of a
 member, and same-file macro arguments. It is a name census, not a resolved
 binding; an empty result does not prove that a name is unused.
 
+`grep --repo <name> --pattern <text> [--regex] [--ignore-case] [--path <prefix>] [--limit <n>]`
+(MCP `riltra_code_grep`) searches the text of the repository's files, read from
+disk when the search runs. Literal matching is the default; `--regex` uses the
+`regex` crate, which runs in linear time with no backtracking, and a pattern
+over its size limit is refused with exit 2. Each hit carries its enclosing
+indexed definition (`in`) only when the file still matches its indexed digest;
+`in_reason` says `indexed`, `file-changed-since-index`, `not-indexed` (a
+language without a parser) or `no-index`. Binary files and files over 1 MiB are
+skipped and counted. `limit` counts files (default 20, maximum 200); hits are
+capped per file and in total, and `truncated` names the limit reached. A search
+without an index still runs and creates nothing.
+
+Files are searched in path order, from the walk that `scan` and `index` share,
+with dependency folders (below) last.
+`.riltraignore` is honoured and `.gitignore` is not, so `node_modules/` or
+`target/` are searched unless a `.riltraignore` entry excludes them. Files under
+a folder named `node_modules`, `vendor`, `target`, `dist`, `build`, `.venv`,
+`venv`, `__pycache__` or `third_party` are read after every other file and are
+ranked after them in the answer, so the read budget reaches the project's own
+files first; they are never skipped for that name. The first
+8 KiB of a file decide whether it is binary; a binary file is counted as skipped
+and costs no read budget. The text read in one search is capped at 256 MiB
+(`totals.bytes_read`). A search cut short by that cap with no hits says so:
+`empty.searched` is `text-lines-incomplete` and the suggested next steps are
+`path` or `.riltraignore`, not a plain "not found". A `path` of `.`, `./` or an
+empty value names the whole repository. A pattern that contains a newline is
+refused with `invalid_input` (exit 2), since matching runs line by line.
+
+The first five files of the answer carry `companions`: at most three per `why`,
+each with `path`, `why`, `basis` and `via`. Evidence labels:
+
+- `name-pair` (`path-convention`): same base name and an extension of the same
+  group (`.c .h .cc .cpp .hpp .hh`; `.js .mjs .cjs .ts .tsx .d.ts`; `.y .l`;
+  `.py .pyi`), from the walk. Works without an index. A file in the same folder
+  comes first.
+- `importer` (`import-text-match`): a file whose indexed import text names this
+  file, or a Rust parent file that declares it with `mod` (`via` is `mod name`).
+  A guess from text, never proven. Rules: Python dotted modules, at the module
+  position of `import` and `from ... import` (an `as` alias is never a module);
+  JS/TS relative specifiers; C/C++ `#include "..."`; Go import paths that end at
+  the package folder; Rust `use crate::` (grouped and glob uses too, same crate
+  only). Other languages, Java included, have no importer rule, so they get
+  none. Needs an index. A Rust parent file that is over the size limit or cannot
+  be read is skipped, as grep skips such files, so it gives no importer.
+- `caller` (`CALLS` or `POTENTIAL_CALL`): a file that calls the enclosing
+  definition of a hit, found with the anchor resolution and edge selection of
+  `callers`, anchored at the definition's name, so a SCIP identity is used when
+  the import has one. `via` names that definition. Only for fresh files.
+  `POTENTIAL_CALL` is syntax-only and never `CALLS`. Needs an index.
+
+`caller_gaps` (after `truncated`) names why an attempted caller lookup could not
+run, sorted and unique, and is `[]` when none did. `graph-proof-incompatible`
+means the snapshot's graph proof is not current, so no caller lookup ran.
+`definition-not-resolved` means the resolver did not map a definition back to
+itself, so that definition was skipped. No caller lookup is attempted without an
+index, for a stale file, for a hit outside any definition, or beyond the first
+five files; those add no reason. A storage failure is an error, not a gap.
+
+Test files are not companions in 0.3.0.
+
 `query --repo <name> --text <text> [--limit <n>]` (MCP `riltra_code_query`) is
 lexical concept search: it ranks indexed definitions for a free text by the
 words of their names, paths and doc comments (BM25 over the concept index). It
@@ -854,8 +914,8 @@ limits.
 
 ## MCP and trust boundary
 
-`riltra mcp` serves twenty-one local stdio tools. Twenty read repository,
-index, code, knowledge, project overview, area map, selected-anchor packet, change-check, and documents-linked-to-code data. The remaining tool,
+`riltra mcp` serves twenty-two local stdio tools; by default it lists nine core tools, and `riltra mcp --all-tools` lists all of them. Twenty-one read repository,
+index, code, text-in-files, knowledge, project overview, area map, selected-anchor packet, change-check, and documents-linked-to-code data. The remaining tool,
 `riltra_code_semantic`, starts the language server configured by the
 operator. That process may write a cache, run project tools, or reach the
 network. The MCP handlers themselves do not create, migrate, or replace a

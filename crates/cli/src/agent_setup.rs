@@ -901,6 +901,13 @@ fn opencode_entry(value: &serde_json::Value) -> Result<Option<&serde_json::Value
     Ok(servers.get("riltra"))
 }
 
+/// Whether an entry's arguments after the binary start the MCP server: `mcp`,
+/// or `mcp --all-tools`, which lists every tool of the same server.
+fn serves_mcp(words: &[String]) -> bool {
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    matches!(words.as_slice(), ["mcp"] | ["mcp", "--all-tools"])
+}
+
 fn opencode_matches(entry: &serde_json::Value, binary: &Path, home: &Path) -> bool {
     let expected_keys = ["type", "command", "environment"];
     let Some(object) = entry.as_object() else {
@@ -925,7 +932,9 @@ fn opencode_matches(entry: &serde_json::Value, binary: &Path, home: &Path) -> bo
     has_only_expected_keys
         && enabled
         && entry.get("type").and_then(serde_json::Value::as_str) == Some("local")
-        && command == [binary.display().to_string(), "mcp".into()]
+        && command.split_first().is_some_and(|(first, words)| {
+            *first == binary.display().to_string() && serves_mcp(words)
+        })
         && env.is_some_and(|e| {
             e.len() == 1
                 && e.get("RILTRA_HOME").and_then(serde_json::Value::as_str)
@@ -1072,7 +1081,7 @@ fn claude_matches(entry: &serde_json::Value, binary: &Path, home: &Path) -> bool
         )
         && entry.get("command").and_then(serde_json::Value::as_str)
             == Some(binary.to_string_lossy().as_ref())
-        && args == ["mcp"]
+        && serves_mcp(&args)
         && env.is_some_and(|e| {
             e.len() == 1
                 && e.get("RILTRA_HOME").and_then(serde_json::Value::as_str)
@@ -1247,7 +1256,7 @@ fn codex_report_from_get(
         && env_vars_empty
         && transport.get("command").and_then(serde_json::Value::as_str)
             == Some(binary.to_string_lossy().as_ref())
-        && args == ["mcp"]
+        && serves_mcp(&args)
         && env.is_some_and(|e| {
             e.len() == 1
                 && e.get("RILTRA_HOME").and_then(serde_json::Value::as_str)
@@ -2437,6 +2446,83 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("exceeded the capture limit"));
+    }
+
+    #[test]
+    fn all_tools_entry_is_already_configured_for_every_client() {
+        let root = crate::testutil::tmpdir("agent-setup-all-tools");
+        let binary = root.join("riltra.exe");
+        let home = root.join("riltra-home");
+        fs::write(&binary, b"test executable").unwrap();
+        let bin = binary.display().to_string();
+        let home_text = home.display().to_string();
+
+        let opencode = root.join("opencode.json");
+        fs::write(
+            &opencode,
+            serde_json::json!({"mcp":{"servers":{"riltra":{
+                "type":"local", "command":[bin.clone(), "mcp", "--all-tools"],
+                "environment":{"RILTRA_HOME":home_text.clone()}
+            }}}})
+            .to_string(),
+        )
+        .unwrap();
+        let report = inspect_opencode(
+            &[ConfigSource {
+                path: opencode,
+                scope: SetupScope::UserGlobal,
+            }],
+            true,
+            &binary,
+            &home,
+        );
+        assert_eq!(report.status, SetupStatus::AlreadyConfigured);
+        assert_eq!(report.configuration, ConfigurationStatus::Found);
+
+        let claude = root.join(".mcp.json");
+        fs::write(
+            &claude,
+            serde_json::json!({"mcpServers":{"riltra":{
+                "command":bin.clone(), "args":["mcp", "--all-tools"],
+                "env":{"RILTRA_HOME":home_text.clone()}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let report = inspect_claude(
+            &[ClaudeConfigSource {
+                config: ConfigSource {
+                    path: claude,
+                    scope: SetupScope::ProjectLocal,
+                },
+                project_root: None,
+            }],
+            true,
+            &binary,
+            &home,
+        );
+        assert_eq!(report.status, SetupStatus::AlreadyConfigured);
+
+        let codex = serde_json::json!({
+            "name":"riltra",
+            "enabled":true,
+            "disabled_reason":null,
+            "enabled_tools":null,
+            "disabled_tools":null,
+            "transport":{
+                "type":"stdio",
+                "command":bin,
+                "args":["mcp", "--all-tools"],
+                "env":{"RILTRA_HOME":home_text},
+                "env_vars":[],
+                "cwd":null
+            },
+            "startup_timeout_sec":null,
+            "tool_timeout_sec":null
+        })
+        .to_string();
+        let report = codex_report_from_get("codex", &binary, &home, Some(0), codex.as_bytes());
+        assert_eq!(report.status, SetupStatus::AlreadyConfigured);
     }
 
     #[test]

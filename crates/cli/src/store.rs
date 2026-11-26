@@ -3,7 +3,7 @@
 //! FTS5 lexical search, and snapshot-scoped facts. Symbol rowids are
 //! per-snapshot only — never permanent cross-revision identities.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -829,6 +829,84 @@ pub fn symbols_for(conn: &Connection, snapshot_id: i64) -> Result<Vec<SymbolRow>
     mapped
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
+}
+
+/// One named definition's span, for mapping a text hit to its enclosing
+/// definition. Only named rows are returned.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymbolSpan {
+    pub name: String,
+    pub kind: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// Byte range of the definition: the companion callers query anchors on it.
+    pub byte_start: i64,
+    pub byte_end: i64,
+}
+
+/// Path → content digest of every file one snapshot indexed. Files the
+/// parser does not support have no row, so they are absent here.
+pub fn indexed_file_digests(
+    conn: &Connection,
+    snapshot_id: i64,
+) -> Result<HashMap<String, String>, String> {
+    let mut statement = conn
+        .prepare("SELECT path, digest FROM files WHERE snapshot_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([snapshot_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Named definitions of the given files of one snapshot, grouped by path and
+/// ordered by start byte within each file. One query serves every path; an
+/// empty path list runs no query at all.
+pub fn symbols_in_files(
+    conn: &Connection,
+    snapshot_id: i64,
+    paths: &[&str],
+) -> Result<HashMap<String, Vec<SymbolSpan>>, String> {
+    let mut grouped: HashMap<String, Vec<SymbolSpan>> = HashMap::new();
+    if paths.is_empty() {
+        return Ok(grouped);
+    }
+    let placeholders = vec!["?"; paths.len()].join(",");
+    let sql = format!(
+        "SELECT f.path, s.name, s.kind, s.start_line, s.end_line, s.byte_start, s.byte_end \
+         FROM symbols s JOIN files f ON f.id = s.file_id AND f.snapshot_id = s.snapshot_id \
+         WHERE s.snapshot_id = ? AND s.name IS NOT NULL AND f.path IN ({placeholders}) \
+         ORDER BY s.byte_start"
+    );
+    let mut values = vec![rusqlite::types::Value::Integer(snapshot_id)];
+    values.extend(
+        paths
+            .iter()
+            .map(|path| rusqlite::types::Value::Text((*path).to_string())),
+    );
+    let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            let path: String = row.get(0)?;
+            let span = SymbolSpan {
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                start_line: row.get::<_, i64>(3)? as u32,
+                end_line: row.get::<_, i64>(4)? as u32,
+                byte_start: row.get(5)?,
+                byte_end: row.get(6)?,
+            };
+            Ok((path, span))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (path, span) = row.map_err(|e| e.to_string())?;
+        grouped.entry(path).or_default().push(span);
+    }
+    Ok(grouped)
 }
 
 /// All imports of one snapshot, ordered by file then start byte.
@@ -2267,6 +2345,27 @@ pub fn selected_edge_page(
         .map_err(|e| e.to_string())
 }
 
+/// The distinct `(caller_path, edge_kind)` pairs one selection matches, in a
+/// single query. Callers read them as sets, so no page offset is involved.
+pub fn selected_edge_callers(
+    conn: &Connection,
+    selection: &EdgeSelection<'_>,
+) -> Result<Vec<(String, String)>, String> {
+    let (predicate, values) = selection.sql();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT DISTINCT caller_file, edge_kind FROM code_edges WHERE {predicate} ORDER BY caller_file, edge_kind"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 /// Outbound edges of one endpoint (callees direction), deterministic order.
 pub fn edges_outbound(
     conn: &Connection,
@@ -2761,8 +2860,8 @@ pub(crate) mod tests {
         insert_symbol, is_readable_db, latest_snapshot, live_base, map_edges, meta_get, meta_set,
         migrate, open_live, open_memory, open_read, promote_staging, proven_edge_count,
         proven_edge_page, search_symbols, semantic_facts_for, semantic_generation,
-        semantic_imports_for, staging_path, EdgeEndpoint, EdgeRow, FileRow, IndexRead,
-        SemanticFact, SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
+        semantic_imports_for, staging_path, symbols_in_files, EdgeEndpoint, EdgeRow, FileRow,
+        IndexRead, SemanticFact, SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
     };
     use crate::testutil::tmpdir;
     use std::path::Path;
@@ -3342,6 +3441,39 @@ pub(crate) mod tests {
         assert_eq!(content_digest(b""), "cbf29ce484222325");
         assert_eq!(content_digest(b"a"), content_digest(b"a"));
         assert_ne!(content_digest(b"a"), content_digest(b"b"));
+    }
+
+    #[test]
+    fn symbols_in_files_groups_named_definitions_by_path() {
+        let conn = open_memory().unwrap();
+        let snap = insert_snapshot(&conn, &sample_snapshot()).unwrap();
+        let file = |path: &str, digest: &str| FileRow {
+            path: path.to_string(),
+            language: "python".to_string(),
+            bytes: 10,
+            digest: digest.to_string(),
+            errors: 0,
+        };
+        let b = insert_file(&conn, snap, &file("b.py", "d1")).unwrap();
+        let a = insert_file(&conn, snap, &file("a.py", "d2")).unwrap();
+        insert_file(&conn, snap, &file("c.py", "d3")).unwrap();
+        insert_symbol(&conn, snap, &sample_symbol(b, "bee")).unwrap();
+        insert_symbol(&conn, snap, &sample_symbol(a, "ay")).unwrap();
+        let mut unnamed = sample_symbol(a, "unused");
+        unnamed.name = None;
+        insert_symbol(&conn, snap, &unnamed).unwrap();
+
+        let grouped =
+            symbols_in_files(&conn, snap, &["b.py", "a.py", "c.py", "missing.py"]).unwrap();
+        assert_eq!(
+            grouped.len(),
+            2,
+            "c.py and missing.py have no named rows: {grouped:?}"
+        );
+        assert_eq!(grouped["b.py"][0].name, "bee");
+        assert_eq!(grouped["a.py"].len(), 1, "the unnamed row is not returned");
+        assert_eq!(grouped["a.py"][0].name, "ay");
+        assert!(symbols_in_files(&conn, snap, &[]).unwrap().is_empty());
     }
 
     #[test]

@@ -23,11 +23,11 @@ the GitHub release, verify the checksum, and then install. To use a local
 archive instead, pass it explicitly:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -ArchivePath .\riltra-0.2.1-windows-x64.zip
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ArchivePath .\riltra-0.3.0-windows-x64.zip
 ```
 
 ```sh
-sh install.sh --archive ./riltra-0.2.1-linux-x64.tar.gz
+sh install.sh --archive ./riltra-0.3.0-linux-x64.tar.gz
 ```
 
 The archive and its `.sha256` must sit together. A missing, malformed, or
@@ -59,16 +59,16 @@ payload and are not removed by reinstalling.
 Check the installed version with `riltra --version`, then review the [published
 releases](https://github.com/terapetralabs/riltra/releases) and their notes for
 the version you want. To update an archive install, run the same installer
-again with that version selected. The scripts currently default to `0.2.1`;
+again with that version selected. The scripts currently default to `0.3.0`;
 pass the version listed on the release page without the leading `v` when
-selecting another release (replace `0.2.1` with the version you selected):
+selecting another release (replace `0.3.0` with the version you selected):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.2.1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.3.0
 ```
 
 ```sh
-sh install.sh --version 0.2.1
+sh install.sh --version 0.3.0
 ```
 
 The installers verify the archive's adjacent SHA-256 file and replace the
@@ -106,9 +106,9 @@ without touching your own registry.
 
 ## Using it from an MCP client such as OpenCode
 
-`riltra mcp` serves twenty-one tools over stdio (twenty read-only ones and the
+`riltra mcp` serves twenty-two tools over stdio (twenty-one read-only ones and the
 provider-backed `riltra_code_semantic`, which stays off until an operator sets
-`RILTRA_LSP_SERVER` to a language server's absolute path). An OpenCode
+`RILTRA_LSP_SERVER` to a language server's absolute path). By default the server lists nine core tools; `riltra mcp --all-tools` lists all twenty-two. An OpenCode
 configuration entry looks like:
 
 ```json

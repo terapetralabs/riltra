@@ -154,6 +154,154 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
     )
 }
 
+// --- grep ------------------------------------------------------------------
+
+fn grep_mode(req: &crate::grep::GrepRequest<'_>) -> &'static str {
+    match (req.regex, req.ignore_case) {
+        (false, false) => "literal",
+        (false, true) => "literal-ignore-case",
+        (true, false) => "regex",
+        (true, true) => "regex-ignore-case",
+    }
+}
+
+fn grep_hit_json(hit: &crate::grep::GrepHit) -> String {
+    let enclosing = match &hit.enclosing {
+        Some(span) => format!(
+            "{{\"name\":\"{}\",\"kind\":\"{}\",\"line\":{}}}",
+            json::escape(&span.name),
+            json::escape(&span.kind),
+            span.start_line
+        ),
+        None => "null".to_string(),
+    };
+    format!(
+        "{{\"line\":{},\"col\":{},\"text\":\"{}\",\"in\":{},\"in_reason\":\"{}\"}}",
+        hit.line,
+        hit.col,
+        json::escape(&hit.text),
+        enclosing,
+        hit.in_reason
+    )
+}
+
+fn grep_file_json(file: &crate::grep::GrepFile) -> String {
+    let hits: Vec<String> = file.hits.iter().map(grep_hit_json).collect();
+    let companions: Vec<String> = file
+        .companions
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"path\":\"{}\",\"why\":\"{}\",\"basis\":\"{}\",\"via\":\"{}\"}}",
+                json::escape(&c.path),
+                c.why,
+                c.basis,
+                json::escape(&c.via)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"path\":\"{}\",\"hit_count\":{},\"hits\":[{}],\"companions\":[{}]}}",
+        json::escape(&file.path),
+        file.hit_count,
+        hits.join(","),
+        companions.join(",")
+    )
+}
+
+fn grep_document(
+    repo: &str,
+    req: &crate::grep::GrepRequest<'_>,
+    result: &crate::grep::GrepResult,
+    files: &[crate::grep::GrepFile],
+    truncated: Option<&str>,
+) -> String {
+    let totals = &result.totals;
+    let file_items: Vec<String> = files.iter().map(grep_file_json).collect();
+    let truncated_json = match truncated {
+        Some(reason) => format!("{{\"reason\":\"{reason}\"}}"),
+        None => "null".to_string(),
+    };
+    let gaps_json = result
+        .caller_gaps
+        .iter()
+        .map(|gap| format!("\"{}\"", json::escape(gap)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let snapshot_json = match &result.snapshot {
+        Some(snapshot) => format!(
+            "{{\"id\":{},\"freshness\":\"{}\",\"reasons\":[{}]}}",
+            snapshot.id,
+            json::escape(&result.freshness),
+            result
+                .reasons
+                .iter()
+                .map(|r| format!("\"{}\"", json::escape(r)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        None => "null".to_string(),
+    };
+    // A search cut short by the read budget did not look everywhere, so it
+    // must not read as "not found".
+    let empty = if totals.hits == 0 && truncated == Some("bytes-read") {
+        format!(
+            ",\"empty\":{{\"searched\":\"text-lines-incomplete\",\"mode\":\"{}\",\"next\":[\"path\",\".riltraignore\"]}}",
+            grep_mode(req)
+        )
+    } else if totals.hits == 0 {
+        format!(
+            ",\"empty\":{{\"searched\":\"text-lines\",\"mode\":\"{}\",\"next\":[\"code_search\",\"code_query\"]}}",
+            grep_mode(req)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{{\"repo\":\"{}\",\"pattern\":\"{}\",\"mode\":\"{}\",\"files\":[{}],\"totals\":{{\"files_scanned\":{},\"files_skipped_binary\":{},\"files_skipped_large\":{},\"files_skipped_unreadable\":{},\"dirs_unreadable\":{},\"dirs_escaped\":{},\"files_matched\":{},\"hits\":{},\"bytes_read\":{}}},\"truncated\":{},\"caller_gaps\":[{}],\"snapshot\":{}{}}}",
+        json::escape(repo),
+        json::escape(req.pattern),
+        grep_mode(req),
+        file_items.join(","),
+        totals.files_scanned,
+        totals.files_skipped_binary,
+        totals.files_skipped_large,
+        totals.files_skipped_unreadable,
+        totals.dirs_unreadable,
+        totals.dirs_escaped,
+        totals.files_matched,
+        totals.hits,
+        totals.bytes_read,
+        truncated_json,
+        gaps_json,
+        snapshot_json,
+        empty
+    )
+}
+
+/// The grep document. When the files do not fit `MAX_RESPONSE_BYTES`, trailing
+/// files are dropped and `truncated` names `response-bytes`, unless the search
+/// already named a reason. The totals always describe the whole search.
+pub(crate) fn grep_response_json(
+    repo: &str,
+    req: &crate::grep::GrepRequest<'_>,
+    result: &crate::grep::GrepResult,
+) -> String {
+    let mut shown = result.files.len();
+    loop {
+        let truncated = match result.truncated {
+            Some(reason) => Some(reason),
+            None if shown < result.files.len() => Some("response-bytes"),
+            None => None,
+        };
+        let body = grep_document(repo, req, result, &result.files[..shown], truncated);
+        if body.len() <= crate::grep::MAX_RESPONSE_BYTES || shown == 0 {
+            return body;
+        }
+        shown -= 1;
+    }
+}
+
 // --- lexical query ---------------------------------------------------------
 
 /// Parameters for one `query` document (PR 9). `reason` is `None` when rows

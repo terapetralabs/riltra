@@ -1,8 +1,48 @@
 # Changelog
 
-All notable changes to Riltra are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, the [stability notes](README.md#stability-pre-10) say what stays fixed within `0.2.x`.
+All notable changes to Riltra are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, the [stability notes](README.md#stability-pre-10) say what stays fixed within `0.3.x`.
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-11-26
+
+### Added
+
+- `riltra grep` and the MCP tool `riltra_code_grep`: text search in the repository's files that
+  names the definition enclosing each hit when the file matches the index (otherwise `in` is
+  `null` and `in_reason` says why). Literal text by default; `--regex` and `--ignore-case`
+  change the match, and `--path` limits the files searched. Files under common dependency and
+  build folders (`node_modules`, `vendor`, `target`, `dist`, `build`, `.venv`, `venv`,
+  `__pycache__`, `third_party`) are read and ranked last; they are never skipped by name, but
+  the read budget can end the search before it reaches them.
+- Companion files for a grep hit, each with an evidence label: `name-pair` (same base name,
+  `path-convention`), `importer` (`import-text-match`: a file whose indexed import text names the
+  hit's file, a guess from text and never a proven import), and `caller` (`CALLS` or
+  `POTENTIAL_CALL`). Companions are named for the first five files of the answer only, at most
+  three per kind; test files are excluded. The grep document carries `caller_gaps`: why an
+  attempted caller lookup could not run (graph proof not current, definition not resolved), or
+  `[]` when none.
+- MCP server instructions: the server tells the client which tool answers which kind of question.
+- `riltra mcp --all-tools`: lists every MCP tool, not only the core set.
+- A macOS ARM64 check and package workflow (`macos-arm64.yml`). It runs on push to `master` and
+  by hand, and keeps its archive as a workflow artifact only. It is not a release, and the
+  installers still refuse macOS ARM64.
+
+### Changed
+
+- MCP `tools/list` shows nine core tools by default. The other tools stay callable by name;
+  `riltra mcp --all-tools` lists all of them.
+- MCP tool descriptions are rewritten. `riltra_health` lists the core tools.
+- The release-candidate package and acceptance jobs run on pinned runner images.
+- The release-candidate workflow runs the installer acceptance suite (`acceptance` job) on each
+  archive it builds.
+
+### Upgrading
+
+- No reindex is needed after upgrading from `0.2.1`: the code-index schema, the parser version
+  and the knowledge store are unchanged.
+- The MCP server exposes twenty-two tools, and nine of them are listed by default. Agent
+  instructions that rely on an unlisted tool need `riltra mcp --all-tools`.
 
 ## [0.2.1] - 2026-11-25
 

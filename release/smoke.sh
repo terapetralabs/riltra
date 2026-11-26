@@ -8,7 +8,8 @@
 # It runs the shipped binary only (no cargo, no source tree) in a scratch
 # directory and an isolated RILTRA_HOME: version, help and status, init and
 # index of a two-file fixture, a symbol search, an occurrence census, a
-# callers query, and the MCP stdio server (initialize, tools/list, a source-
+# callers query, a grep, a knowledge record bound to a symbol, an incremental
+# index after an edit, and the MCP stdio server (initialize, tools/list, a source-
 # grounded call, a classified error, a pure JSON-RPC stdout). An archive is
 # extracted first, so the check covers what a user would unpack. Exit 0 only
 # when every check passes; the first failure stops it with the check's name.
@@ -135,6 +136,19 @@ expect "occurrences" '"binding":"unbound"' "$census"
 expect "occurrence item" '"role":"member-access"' "$census"
 callers="$("$bin" callers --repo smoke --path a.py --line 1 --col 5)"
 expect "callers are candidates" '"kind":"POTENTIAL_CALL"' "$callers"
+grep_doc="$("$bin" grep --repo smoke --pattern 'alpha()')"
+expect "grep names the enclosing definition" '"in":{"name":"beta"' "$grep_doc"
+
+# --- knowledge record, binding and an incremental index ----------------------
+record='{"id":"smoke-record","kind":"decision","title":"Smoke alpha decision","body":"short body","status":"active","author":"smoke","evidence":[]}'
+binding='{"record_id":"smoke-record","record_revision":1,"relation":"documents","author":"smoke","rationale":"smoke check","provenance":"smoke"}'
+expect "knowledge create" '"operation":"create"' "$(printf '%s' "$record" | "$bin" knowledge create --repo smoke --input -)"
+expect "knowledge search finds the title" '"id":"smoke-record"' "$("$bin" knowledge search --repo smoke --query Smoke)"
+expect "knowledge bind to alpha" '"operation":"bind"' "$(printf '%s' "$binding" | "$bin" knowledge bind --repo smoke --path a.py --line 1 --col 5 --input -)"
+expect "knowledge at returns the record" '"record_id":"smoke-record"' "$("$bin" knowledge at --repo smoke --path a.py --line 1 --col 5)"
+printf 'def gamma():\n    return 1\n' >>"$work/repo/a.py"
+expect "index is incremental after a change" '"mode":"incremental"' "$("$bin" index --repo smoke)"
+expect "search finds the function added since the index" '"name":"gamma"' "$("$bin" search --repo smoke --symbol gamma)"
 
 # --- the MCP stdio server ----------------------------------------------------
 init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'
@@ -156,9 +170,18 @@ jsonrpc="$(grep -c '^{"jsonrpc":"2.0"' "$work/mcp.out" || true)"
 [ "$lines" -gt 0 ] && [ "$lines" = "$jsonrpc" ] && pass "stdout carries only JSON-RPC ($lines lines)" \
   || fail "stdout carries only JSON-RPC (lines=$lines jsonrpc=$jsonrpc)"
 tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp.out" | sort -u | wc -l | tr -d ' ')"
-[ "$tools" = "21" ] && pass "twenty-one tools advertised" || fail "twenty-one tools advertised (got $tools)"
+[ "$tools" = "9" ] && pass "nine core tools advertised by default" || fail "nine core tools advertised by default (got $tools)"
 expect "overview tool advertised" '"name":"riltra_project_overview"' "$out"
-expect "packet tool advertised" '"name":"riltra_code_packet"' "$out"
+expect "initialize carries instructions" '"instructions"' "$out"
+{
+  printf '%s\n' "$init"
+  sleep 1
+  printf '%s\n%s\n' "$ready" "$list"
+  sleep 2
+} | "$bin" mcp --all-tools >"$work/mcp-all.out" 2>"$work/mcp-all.err"
+all_tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp-all.out" | sort -u | wc -l | tr -d ' ')"
+[ "$all_tools" = "22" ] && pass "twenty-two tools advertised with --all-tools" || fail "twenty-two tools advertised with --all-tools (got $all_tools)"
+expect "packet tool advertised with --all-tools" '"name":"riltra_code_packet"' "$(cat "$work/mcp-all.out")"
 expect "a source-grounded call" 'alpha' "$out"
 overview_response="$(overview_response_line "$work/mcp.out")"
 overview_response_is_successful "$overview_response" \

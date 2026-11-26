@@ -72,6 +72,7 @@ pub enum Command {
         /// Opt-in expansion along proven edges (`--expand`, a bare flag).
         expand: bool,
     },
+    Grep(GrepArgs),
     Semantic {
         op: SemanticOp,
     },
@@ -99,7 +100,10 @@ pub enum Command {
     Knowledge {
         op: KnowledgeOp,
     },
-    Mcp,
+    /// Serve the MCP stdio interface. `all_tools` lists every tool, not only the core set.
+    Mcp {
+        all_tools: bool,
+    },
     /// Print the agent instruction block (Markdown text, not JSON). No arguments.
     AgentBlock,
 }
@@ -128,6 +132,17 @@ pub struct ContextArgs {
     pub depth: Option<String>,
     pub limit: Option<String>,
     pub max_bytes: Option<String>,
+}
+
+/// `grep` arguments. `limit` is parsed by the handler, as `search` does.
+#[derive(Debug, PartialEq)]
+pub struct GrepArgs {
+    pub repo: String,
+    pub pattern: String,
+    pub regex: bool,
+    pub ignore_case: bool,
+    pub path: Option<String>,
+    pub limit: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -328,7 +343,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "-h" | "--help" | "help" if args.len() == 1 => Ok(Command::Help),
         "-V" | "--version" | "version" if args.len() == 1 => Ok(Command::Version),
         "status" if args.len() == 1 => Ok(Command::Status),
-        "mcp" if args.len() == 1 => Ok(Command::Mcp),
+        "mcp" if args.len() == 1 => Ok(Command::Mcp { all_tools: false }),
+        "mcp" if args.len() == 2 && args[1] == "--all-tools" => {
+            Ok(Command::Mcp { all_tools: true })
+        }
         "overview" => {
             let mut repo = None;
             let mut i = 1;
@@ -527,6 +545,51 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     offset,
                     occurrences,
                 }),
+                _ => Err(crate::usage()),
+            }
+        }
+        "grep" => {
+            let mut repo = None;
+            let mut pattern = None;
+            let mut path = None;
+            let mut limit = None;
+            let mut regex = false;
+            let mut ignore_case = false;
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "--regex" {
+                    if regex {
+                        return Err(crate::usage());
+                    }
+                    regex = true;
+                    i += 1;
+                } else if args[i] == "--ignore-case" {
+                    if ignore_case {
+                        return Err(crate::usage());
+                    }
+                    ignore_case = true;
+                    i += 1;
+                } else if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--pattern") {
+                    pattern = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--path") {
+                    path = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--limit") {
+                    limit = Some(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            match (repo, pattern) {
+                (Some(repo), Some(pattern)) => Ok(Command::Grep(GrepArgs {
+                    repo,
+                    pattern,
+                    regex,
+                    ignore_case,
+                    path,
+                    limit,
+                })),
                 _ => Err(crate::usage()),
             }
         }

@@ -13,6 +13,14 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   C1 controls or line separators) is answered with the JSON document instead. Errors, other tools,
   the CLI and the default MCP answers are unchanged.
 
+### Changed
+
+- `riltra search` and `riltra_code_search` order their results by name before `offset` and
+  `limit` apply: a name equal to the query, then equal ignoring ASCII case, then other matches;
+  within each, files outside tests first; then the previous order (prefix matches before other
+  substring matches, each by path and position). The set of results, `total` and the shape of the
+  answer are unchanged. A reader that relied on path order sees different pages.
+
 ## [0.3.0] - 2026-11-26
 
 ### Added

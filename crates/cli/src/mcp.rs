@@ -536,7 +536,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_search",
-        description = "Search indexed definitions by name (same document as CLI `search`): a prefix match, then a case-insensitive substring match, over definition names only. A zero result adds an `empty` object with the query shape and `next` (`query`, `text-search`). When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take. Not for: text inside strings or comments; use riltra_code_grep. String literals, comments, error messages and names defined outside the repository (imports) are not searched: use `riltra_code_query` for a description in words and text search (`riltra_code_grep`) for literal text. A missing index reports `no-index` without creating storage.",
+        description = "Search indexed definitions by name (same document as CLI `search`): prefix and case-insensitive substring matches over definition names only; exact names come first, then files outside tests. A zero result adds an `empty` object with the query shape and `next` (`query`, `text-search`). When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take. Not for: text inside strings or comments; use riltra_code_grep. String literals, comments, error messages and names defined outside the repository (imports) are not searched: use `riltra_code_query` for a description in words and text search (`riltra_code_grep`) for literal text. A missing index reports `no-index` without creating storage.",
         annotations(
             title = "Search indexed symbols",
             read_only_hint = true,

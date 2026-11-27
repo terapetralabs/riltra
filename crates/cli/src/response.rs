@@ -156,7 +156,7 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
 
 // --- grep ------------------------------------------------------------------
 
-fn grep_mode(req: &crate::grep::GrepRequest<'_>) -> &'static str {
+pub(crate) fn grep_mode(req: &crate::grep::GrepRequest<'_>) -> &'static str {
     match (req.regex, req.ignore_case) {
         (false, false) => "literal",
         (false, true) => "literal-ignore-case",
@@ -242,20 +242,14 @@ fn grep_document(
         ),
         None => "null".to_string(),
     };
-    // A search cut short by the read budget did not look everywhere, so it
-    // must not read as "not found".
-    let empty = if totals.hits == 0 && truncated == Some("bytes-read") {
-        format!(
-            ",\"empty\":{{\"searched\":\"text-lines-incomplete\",\"mode\":\"{}\",\"next\":[\"path\",\".riltraignore\"]}}",
-            grep_mode(req)
-        )
-    } else if totals.hits == 0 {
-        format!(
-            ",\"empty\":{{\"searched\":\"text-lines\",\"mode\":\"{}\",\"next\":[\"code_search\",\"code_query\"]}}",
-            grep_mode(req)
-        )
-    } else {
-        String::new()
+    let empty = match grep_empty(totals.hits, truncated) {
+        Some((searched, next)) => format!(
+            ",\"empty\":{{\"searched\":\"{searched}\",\"mode\":\"{}\",\"next\":[\"{}\",\"{}\"]}}",
+            grep_mode(req),
+            next[0],
+            next[1]
+        ),
+        None => String::new(),
     };
     format!(
         "{{\"repo\":\"{}\",\"pattern\":\"{}\",\"mode\":\"{}\",\"files\":[{}],\"totals\":{{\"files_scanned\":{},\"files_skipped_binary\":{},\"files_skipped_large\":{},\"files_skipped_unreadable\":{},\"dirs_unreadable\":{},\"dirs_escaped\":{},\"files_matched\":{},\"hits\":{},\"bytes_read\":{}}},\"truncated\":{},\"caller_gaps\":[{}],\"snapshot\":{}{}}}",
@@ -279,14 +273,31 @@ fn grep_document(
     )
 }
 
-/// The grep document. When the files do not fit `MAX_RESPONSE_BYTES`, trailing
-/// files are dropped and `truncated` names `response-bytes`, unless the search
-/// already named a reason. The totals always describe the whole search.
-pub(crate) fn grep_response_json(
+/// What a search with no hits looked at and what to try next. A search cut
+/// short by the read budget did not look everywhere, so it must not read as
+/// "not found".
+pub(crate) fn grep_empty(
+    hits: usize,
+    truncated: Option<&str>,
+) -> Option<(&'static str, [&'static str; 2])> {
+    if hits != 0 {
+        None
+    } else if truncated == Some("bytes-read") {
+        Some(("text-lines-incomplete", ["path", ".riltraignore"]))
+    } else {
+        Some(("text-lines", ["code_search", "code_query"]))
+    }
+}
+
+/// How many files of `result` fit `MAX_RESPONSE_BYTES`, the `truncated` reason
+/// that goes with that, and the JSON document. Trailing files are dropped, and
+/// `truncated` names `response-bytes` unless the search already named a reason.
+/// The compact form uses the same selection, so both carry the same evidence.
+pub(crate) fn grep_fit(
     repo: &str,
     req: &crate::grep::GrepRequest<'_>,
     result: &crate::grep::GrepResult,
-) -> String {
+) -> (usize, Option<&'static str>, String) {
     let mut shown = result.files.len();
     loop {
         let truncated = match result.truncated {
@@ -296,10 +307,19 @@ pub(crate) fn grep_response_json(
         };
         let body = grep_document(repo, req, result, &result.files[..shown], truncated);
         if body.len() <= crate::grep::MAX_RESPONSE_BYTES || shown == 0 {
-            return body;
+            return (shown, truncated, body);
         }
         shown -= 1;
     }
+}
+
+/// The grep document. The totals always describe the whole search.
+pub(crate) fn grep_response_json(
+    repo: &str,
+    req: &crate::grep::GrepRequest<'_>,
+    result: &crate::grep::GrepResult,
+) -> String {
+    grep_fit(repo, req, result).2
 }
 
 // --- lexical query ---------------------------------------------------------

@@ -8801,3 +8801,125 @@ fn mcp_grep_refuses_bad_input_and_moved_root() {
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
 }
+
+// --- `riltra mcp --compact` ---------------------------------------------------
+
+fn compact_flag(cmd: &mut Command) {
+    cmd.arg("--compact");
+}
+
+/// The description `tools/list` advertises for `name`.
+fn description_of(s: &mut Session, id: i64, name: &str) -> String {
+    s.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {}}).to_string());
+    let v = s.recv();
+    let tool = v["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap_or_else(|| panic!("{name} is listed: {v}"))
+        .clone();
+    tool["description"]
+        .as_str()
+        .expect("description")
+        .to_string()
+}
+
+#[test]
+fn compact_code_grep_answers_text_only_and_changes_nothing_else() {
+    let cfg = home("compact-cfg");
+    let repo = home("compact-repo");
+    std::fs::write(
+        repo.join("lib.py"),
+        "def helper():
+    return 'ready'
+",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("note.txt"),
+        "call helper() later
+",
+    )
+    .unwrap();
+    indexed_repo(&cfg, &repo, "ws");
+    let args = json!({"repo": "ws", "pattern": "helper"});
+
+    let mut plain = ready(&cfg);
+    let full = doc(&call_tool(&mut plain, 2, "riltra_code_grep", &args));
+    let plain_description = description_of(&mut plain, 3, "riltra_code_grep");
+    let plain_search = call_tool(
+        &mut plain,
+        4,
+        "riltra_code_search",
+        &json!({"repo": "ws", "query": "helper"}),
+    );
+    plain.finish();
+
+    let mut compact = ready_with(&cfg, compact_flag);
+    let result = call_tool(&mut compact, 2, "riltra_code_grep", &args);
+    assert!(!is_error(&result), "{result}");
+    assert!(result.get("structuredContent").is_none(), "{result}");
+    assert_eq!(result["content"].as_array().unwrap().len(), 1, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    for line in [
+        "grep repo=ws mode=literal pattern=helper",
+        "snapshot id=1 freshness=fresh reasons=[]",
+        "truncated=null caller_gaps=[]",
+        "file lib.py hit_count=1",
+        " in function helper line=1",
+        "  1:5: def helper():",
+        "file note.txt hit_count=1",
+        " no-definition in_reason=not-indexed",
+        "  1:6: call helper() later",
+    ] {
+        assert!(
+            text.lines().any(|l| l == line),
+            "missing {line:?} in
+{text}"
+        );
+    }
+    assert!(!text.contains("bytes_read"), "{text}");
+    assert_eq!(full["totals"]["hits"], 2, "same search as the JSON form");
+
+    // Only code_grep changes: its errors stay structured, other tools stay JSON.
+    let refused = call_tool(
+        &mut compact,
+        3,
+        "riltra_code_grep",
+        &json!({"repo": "ws", "pattern": ""}),
+    );
+    assert!(is_error(&refused), "{refused}");
+    assert_eq!(doc(&refused)["kind"], "invalid_input", "{refused}");
+    let search = call_tool(
+        &mut compact,
+        4,
+        "riltra_code_search",
+        &json!({"repo": "ws", "query": "helper"}),
+    );
+    assert_eq!(
+        search["structuredContent"],
+        plain_search["structuredContent"]
+    );
+
+    let description = description_of(&mut compact, 5, "riltra_code_grep");
+    assert!(description.starts_with(&plain_description), "{description}");
+    assert!(
+        description.contains("without structuredContent"),
+        "{description}"
+    );
+    assert!(!plain_description.contains("structuredContent"));
+    compact.finish();
+}
+
+#[test]
+fn compact_combines_with_all_tools_in_either_order() {
+    for flags in [["--compact", "--all-tools"], ["--all-tools", "--compact"]] {
+        let h = home("compact-flags");
+        let mut s = ready_with(&h, |cmd| {
+            cmd.args(flags);
+        });
+        assert!(tool_names(&mut s, 2).len() > CORE_TOOLS.len(), "{flags:?}");
+        s.finish();
+    }
+}

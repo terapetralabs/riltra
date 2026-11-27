@@ -902,10 +902,17 @@ fn opencode_entry(value: &serde_json::Value) -> Result<Option<&serde_json::Value
 }
 
 /// Whether an entry's arguments after the binary start the MCP server: `mcp`,
-/// or `mcp --all-tools`, which lists every tool of the same server.
+/// with `--all-tools` (lists every tool) or `--compact` (text `code_grep`
+/// answers), which are the same server.
 fn serves_mcp(words: &[String]) -> bool {
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    matches!(words.as_slice(), ["mcp"] | ["mcp", "--all-tools"])
+    matches!(
+        words.as_slice(),
+        ["mcp"]
+            | ["mcp", "--all-tools" | "--compact"]
+            | ["mcp", "--all-tools", "--compact"]
+            | ["mcp", "--compact", "--all-tools"]
+    )
 }
 
 fn opencode_matches(entry: &serde_json::Value, binary: &Path, home: &Path) -> bool {
@@ -2446,6 +2453,26 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("exceeded the capture limit"));
+    }
+
+    #[test]
+    fn mcp_flags_in_either_order_are_the_same_server() {
+        let words = |a: &[&str]| a.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        for good in [
+            &["mcp"][..],
+            &["mcp", "--compact"],
+            &["mcp", "--all-tools", "--compact"],
+            &["mcp", "--compact", "--all-tools"],
+        ] {
+            assert!(serves_mcp(&words(good)), "{good:?}");
+        }
+        for other in [
+            &["mcp", "--compact", "--compact"][..],
+            &["mcp", "--other"],
+            &["--compact"],
+        ] {
+            assert!(!serves_mcp(&words(other)), "{other:?}");
+        }
     }
 
     #[test]

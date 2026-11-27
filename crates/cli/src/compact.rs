@@ -3,6 +3,11 @@
 //! `riltra mcp --compact`. It is built from the same `GrepResult`, with the same
 //! file selection, as the JSON document.
 //!
+//! One exception: escaping can make the text longer than the JSON (a C1 control
+//! is 2 bytes in JSON and 6 here, a line separator 3 and 6). When the text would
+//! exceed the response budget, there is no compact form and the server answers
+//! with the JSON document, so no file or hit is dropped to make room.
+//!
 //! ```text
 //! grep repo=<word> mode=<word> pattern=<word>
 //! snapshot id=<n> freshness=<word> reasons=[<word>,...]      | snapshot null
@@ -24,7 +29,7 @@
 //! the answer), and `in_reason` when it is `indexed`, the default.
 
 use crate::companions::Companion;
-use crate::grep::{GrepFile, GrepHit, GrepRequest, GrepResult};
+use crate::grep::{GrepFile, GrepHit, GrepRequest, GrepResult, MAX_RESPONSE_BYTES};
 use crate::{json, response};
 
 /// What a hit sits in (the definition's kind, name and line) and why.
@@ -119,7 +124,9 @@ fn file_lines(file: &GrepFile, lines: &mut Vec<String>) {
     }
 }
 
-pub(crate) fn grep_text(repo: &str, req: &GrepRequest<'_>, result: &GrepResult) -> String {
+/// `None` when the text would exceed `MAX_RESPONSE_BYTES`: the caller answers
+/// with the JSON document instead.
+pub(crate) fn grep_text(repo: &str, req: &GrepRequest<'_>, result: &GrepResult) -> Option<String> {
     // The same files as the JSON document, so the same evidence.
     let (shown, truncated, _) = response::grep_fit(repo, req, result);
     let mode = response::grep_mode(req);
@@ -166,7 +173,8 @@ pub(crate) fn grep_text(repo: &str, req: &GrepRequest<'_>, result: &GrepResult) 
     for file in &result.files[..shown] {
         file_lines(file, &mut lines);
     }
-    lines.join("\n")
+    let text = lines.join("\n");
+    (text.len() <= MAX_RESPONSE_BYTES).then_some(text)
 }
 
 #[cfg(test)]

@@ -8923,3 +8923,35 @@ fn compact_combines_with_all_tools_in_either_order() {
         s.finish();
     }
 }
+
+#[test]
+fn compact_falls_back_to_json_when_the_text_would_exceed_the_budget() {
+    let cfg = home("compact-big-cfg");
+    let repo = home("compact-big-repo");
+    // C1 controls stay raw in JSON (2 bytes each) and are escaped in the text (6).
+    let line = format!("y{}\n", "\u{85}".repeat(99));
+    for n in 0..40 {
+        std::fs::write(repo.join(format!("f{n}.txt")), line.repeat(5)).unwrap();
+    }
+    indexed_repo(&cfg, &repo, "ws");
+    let args = json!({"repo": "ws", "pattern": "y", "limit": 200});
+
+    let mut plain = ready(&cfg);
+    let full = call_tool(&mut plain, 2, "riltra_code_grep", &args);
+    plain.finish();
+    let document = doc(&full);
+    assert_eq!(
+        document["truncated"],
+        Value::Null,
+        "every file fits as JSON"
+    );
+    assert_eq!(document["files"].as_array().unwrap().len(), 40);
+
+    let mut compact = ready_with(&cfg, compact_flag);
+    let result = call_tool(&mut compact, 2, "riltra_code_grep", &args);
+    assert_eq!(result["structuredContent"], full["structuredContent"]);
+    assert_eq!(result["content"], full["content"]);
+    let description = description_of(&mut compact, 3, "riltra_code_grep");
+    assert!(description.contains("usual JSON"), "{description}");
+    compact.finish();
+}

@@ -458,7 +458,7 @@ pub(crate) const CORE_TOOLS: [&str; 9] = [
 const SERVER_INSTRUCTIONS: &str = "Riltra answers code questions from a local index; confirm results against the source. Exact text, an error message or an option: riltra_code_grep (it also gives the enclosing function and paired files; plain grep works too). Symbol name: riltra_code_search. Description in words: riltra_code_query. Before changing code: riltra_code_impact (UNKNOWN or partial means not established, not safe) and riltra_knowledge_at_anchor (notes bound to that code, Unverified). Recorded project decisions: riltra_knowledge_search. The repo argument may be omitted when one repository is registered.";
 
 /// Added to the `riltra_code_grep` description when `--compact` is on.
-const COMPACT_GREP_NOTE: &str = " This server runs with --compact: a successful answer is one plain-text block without structuredContent. It has the repo, mode, pattern, snapshot freshness, totals and `truncated`, then per file its hits as `line:col: text` under `in <kind> <name>` or `no-definition`, and `companions` with their basis. A hit group without `in_reason` is `indexed`; `bytes_read` is left out.";
+const COMPACT_GREP_NOTE: &str = " This server runs with --compact: a successful answer is one plain-text block without structuredContent. It has the repo, mode, pattern, snapshot freshness, totals and `truncated`, then per file its hits as `line:col: text` under `in <kind> <name>` or `no-definition`, and `companions` with their basis. A hit group without `in_reason` is `indexed`; `bytes_read` is left out. An answer whose text would exceed 64 KiB comes as the usual JSON instead.";
 
 struct RiltraMcp {
     all_tools: bool,
@@ -1444,10 +1444,14 @@ fn grep_doc(input: &GrepInput, compact: bool) -> CallToolResult {
         }
     };
     match outcome {
-        Ok(result) if compact => CallToolResult::success(vec![ContentBlock::text(
-            crate::compact::grep_text(&input.repo, &req, &result),
-        )]),
-        Ok(result) => exact_doc(&response::grep_response_json(&input.repo, &req, &result)),
+        Ok(result) => match compact
+            .then(|| crate::compact::grep_text(&input.repo, &req, &result))
+            .flatten()
+        {
+            Some(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+            // Not `--compact`, or the escaped text is over the response budget.
+            None => exact_doc(&response::grep_response_json(&input.repo, &req, &result)),
+        },
         Err(e) => match grep::refusal_message(&e) {
             Some(message) => tool_error("invalid_input", message),
             None => tool_error("store_error", &e),

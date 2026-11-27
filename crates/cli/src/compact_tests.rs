@@ -324,7 +324,7 @@ fn result(files: Vec<GrepFile>) -> GrepResult {
 }
 
 fn assert_round_trip(req: &GrepRequest<'_>, result: &GrepResult) -> String {
-    let text = grep_text("ws", req, result);
+    let text = grep_text("ws", req, result).expect("within the response budget");
     let document = response::grep_response_json("ws", req, result);
     assert_eq!(parse(&text), expected(&document), "\n{text}");
     text
@@ -442,6 +442,37 @@ fn a_cut_response_lists_the_same_files_as_the_json_document() {
     let listed = text.lines().filter(|l| l.starts_with("file ")).count();
     assert!(listed < 200, "the response budget cut files");
     assert!(text.contains("truncated=response-bytes"), "{text:.200}");
+}
+
+/// Source lines of characters that JSON keeps raw and the compact form escapes:
+/// C1 controls (2 bytes become 6) and the line separators (3 become 6).
+fn escape_heavy(unit: char, files: usize) -> GrepResult {
+    let line: String = std::iter::repeat_n(unit, 200 / unit.len_utf8()).collect();
+    result(
+        (0..files)
+            .map(|n| {
+                let hits = (1..=5).map(|l| hit(l, &line, None, "indexed")).collect();
+                file(&format!("f{n}.py"), hits, Vec::new())
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn text_over_the_response_budget_is_not_offered() {
+    for unit in ['\u{85}', '\u{2028}'] {
+        let found = escape_heavy(unit, 40);
+        let document = response::grep_response_json("ws", &request("y"), &found);
+        assert!(document.len() <= crate::grep::MAX_RESPONSE_BYTES);
+        assert!(
+            !document.contains("response-bytes"),
+            "the JSON keeps every file"
+        );
+        assert_eq!(grep_text("ws", &request("y"), &found), None, "{unit:?}");
+
+        // The same lines in fewer files fit, and the text answers.
+        assert_round_trip(&request("y"), &escape_heavy(unit, 5));
+    }
 }
 
 /// Replays captured calls: every `<name>.json` in `RILTRA_COMPACT_PAIRS` is a

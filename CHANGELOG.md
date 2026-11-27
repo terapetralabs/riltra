@@ -9,8 +9,9 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 - `riltra mcp --compact` (opt-in): a successful `riltra_code_grep` answers with one plain-text
   block and no `structuredContent`. It carries the same files, hits, companions, labels,
   freshness and completeness fields as the JSON document, and leaves out `totals.bytes_read` and
-  `in_reason` equal to `indexed`. Errors, other tools, the CLI and the default MCP answers are
-  unchanged.
+  `in_reason` equal to `indexed`. A call whose text would exceed the 64 KiB response budget (many
+  C1 controls or line separators) is answered with the JSON document instead. Errors, other tools,
+  the CLI and the default MCP answers are unchanged.
 
 ## [0.3.0] - 2026-11-26
 

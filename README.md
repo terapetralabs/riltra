@@ -132,6 +132,13 @@ text instead of the JSON document. Errors stay structured, every other tool and
 the CLI are unchanged, and without the flag nothing changes. A client or script
 that reads `structuredContent` from `riltra_code_grep` must not use the flag.
 
+One exception: escaping can make the text longer than the JSON, for source with
+many C1 control characters or Unicode line separators. When the text would
+exceed the 64 KiB response budget, that call is answered with the usual JSON
+document and `structuredContent`; nothing is cut to make the text fit. A reader
+of the answer should therefore tell the two forms apart: the text starts with
+`grep `, the document with `{`.
+
 ```
 grep repo=app mode=literal pattern=helper
 snapshot id=1 freshness=fresh reasons=[]

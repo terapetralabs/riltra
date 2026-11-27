@@ -3,7 +3,7 @@
 //! FTS5 lexical search, and snapshot-scoped facts. Symbol rowids are
 //! per-snapshot only — never permanent cross-revision identities.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -2620,9 +2620,24 @@ fn like_pattern(term: &str) -> String {
     pattern
 }
 
-/// Search definitions by name: FTS5 prefix matches first, then LIKE substring
-/// matches, both ordered by (path, byte_start). Returns the total count plus
-/// the requested page. Calls and imports are never symbol hits.
+/// How well a stored name answers `term`: 0 the same bytes, 1 the same once the
+/// ASCII letters ignore case, 2 any other match.
+fn name_class(name: &str, term: &str) -> u8 {
+    if name == term {
+        0
+    } else if name.eq_ignore_ascii_case(term) {
+        1
+    } else {
+        2
+    }
+}
+
+/// Search definitions by name. The matches are the FTS5 prefix matches and the
+/// LIKE substring matches, and the whole list is ordered before `offset` and
+/// `limit` apply: by [`name_class`], then files outside tests first, then prefix
+/// matches before the other substring matches, each by (path, byte_start).
+/// Returns the total count plus the requested page. Calls and imports are never
+/// symbol hits.
 pub fn search_symbols(
     conn: &Connection,
     snapshot_id: i64,
@@ -2633,45 +2648,55 @@ pub fn search_symbols(
     if term.is_empty() {
         return Ok((0, Vec::new()));
     }
-    let mut ordered_ids: Vec<i64> = Vec::new();
+    // (id, name class, in a test file) of every match. Both passes select the
+    // name and path, so ordering needs no further query.
+    let mut matches: Vec<(i64, u8, bool)> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut keep = |row: &rusqlite::Row<'_>| -> rusqlite::Result<()> {
+        let id: i64 = row.get(0)?;
+        if seen.insert(id) {
+            let name: String = row.get(1)?;
+            let path: String = row.get(2)?;
+            let test = crate::index::is_test_path(&path);
+            matches.push((id, name_class(&name, term), test));
+        }
+        Ok(())
+    };
     // FTS5 prefix search on the whole phrase. Any FTS error (e.g. a term made
     // only of separators) falls back to LIKE alone — never a failure.
     let phrase = format!("\"{}\"*", term.replace('"', "\"\""));
-    let mut fts_ids: Vec<i64> = Vec::new();
     if let Ok(mut statement) = conn.prepare(
-        "SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id JOIN symbols_fts ON symbols_fts.rowid = s.id WHERE s.snapshot_id = ?1 AND symbols_fts MATCH ?2 ORDER BY f.path, s.byte_start",
+        "SELECT s.id, s.name, f.path FROM symbols s JOIN files f ON f.id = s.file_id JOIN symbols_fts ON symbols_fts.rowid = s.id WHERE s.snapshot_id = ?1 AND symbols_fts MATCH ?2 ORDER BY f.path, s.byte_start",
     ) {
         if let Ok(mut rows) = statement.query(params![snapshot_id, phrase]) {
             while let Ok(Some(row)) = rows.next() {
-                if let Ok(id) = row.get::<_, i64>(0) {
-                    fts_ids.push(id);
-                }
+                let _ = keep(row);
             }
         }
     }
     // LIKE pass in (path, byte_start) order.
-    let like_pattern_value = like_pattern(term);
-    let mut like_ids: Vec<i64> = Vec::new();
     {
         let mut statement = conn
             .prepare(
-                "SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.snapshot_id = ?1 AND s.name LIKE ?2 ESCAPE '\\' ORDER BY f.path, s.byte_start",
+                "SELECT s.id, s.name, f.path FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.snapshot_id = ?1 AND s.name LIKE ?2 ESCAPE '\\' ORDER BY f.path, s.byte_start",
             )
             .map_err(|e| e.to_string())?;
         let mut rows = statement
-            .query(params![snapshot_id, like_pattern_value])
+            .query(params![snapshot_id, like_pattern(term)])
             .map_err(|e| e.to_string())?;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            like_ids.push(row.get(0).map_err(|e| e.to_string())?);
+            keep(row).map_err(|e| e.to_string())?;
         }
     }
-    for id in fts_ids.into_iter().chain(like_ids) {
-        if !ordered_ids.contains(&id) {
-            ordered_ids.push(id);
-        }
-    }
-    let total = ordered_ids.len();
-    let page: Vec<i64> = ordered_ids.into_iter().skip(offset).take(limit).collect();
+    let total = matches.len();
+    // Stable: within one class the order of the two passes is kept.
+    matches.sort_by_key(|&(_, class, test)| (class, test));
+    let page: Vec<i64> = matches
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(id, _, _)| id)
+        .collect();
     let mut hits = Vec::with_capacity(page.len());
     for id in page {
         let hit = conn
@@ -3548,6 +3573,149 @@ pub(crate) mod tests {
         let (_, page2) = search_symbols(&conn, snap, "one", 2, 2).unwrap();
         assert_eq!(page2.len(), 1);
         assert_eq!(page2[0].path, "c.py");
+    }
+
+    /// A snapshot holding one definition per `(path, name, byte_start)`.
+    fn search_fixture(rows: &[(&str, &str, usize)]) -> (rusqlite::Connection, i64) {
+        let conn = open_memory().unwrap();
+        let snap = insert_snapshot(&conn, &sample_snapshot()).unwrap();
+        let mut files = std::collections::HashMap::new();
+        for &(path, name, byte_start) in rows {
+            let file_id = *files.entry(path).or_insert_with(|| {
+                let file = FileRow {
+                    path: path.to_string(),
+                    language: "python".to_string(),
+                    bytes: 100,
+                    digest: "d".to_string(),
+                    errors: 0,
+                };
+                insert_file(&conn, snap, &file).unwrap()
+            });
+            let mut symbol = sample_symbol(file_id, name);
+            symbol.byte_start = byte_start;
+            symbol.byte_end = byte_start + 20;
+            insert_symbol(&conn, snap, &symbol).unwrap();
+        }
+        (conn, snap)
+    }
+
+    /// One page of `search_symbols` as the total and the `(path, byte_start)` of each hit.
+    fn search_page(
+        fixture: &(rusqlite::Connection, i64),
+        term: &str,
+        limit: usize,
+        offset: usize,
+    ) -> (usize, Vec<(String, usize)>) {
+        let (total, hits) = search_symbols(&fixture.0, fixture.1, term, limit, offset).unwrap();
+        (
+            total,
+            hits.into_iter().map(|h| (h.path, h.byte_start)).collect(),
+        )
+    }
+
+    fn paths(hits: &[(String, usize)]) -> Vec<&str> {
+        hits.iter().map(|(path, _)| path.as_str()).collect()
+    }
+
+    const NAMED: [(&str, &str, usize); 6] = [
+        ("a.py", "FooBar", 0),
+        ("b.py", "foo", 0),
+        ("c.py", "myFoo", 0),
+        ("d.py", "Foo", 0),
+        ("tests/test_a.py", "Foo", 0),
+        ("tests/test_b.py", "FooTest", 0),
+    ];
+
+    #[test]
+    fn search_orders_by_name_class_then_tests() {
+        let fixture = search_fixture(&NAMED);
+        let (total, hits) = search_page(&fixture, "Foo", 50, 0);
+        assert_eq!(total, 6);
+        assert_eq!(
+            paths(&hits),
+            [
+                "d.py",
+                "tests/test_a.py",
+                "b.py",
+                "a.py",
+                "c.py",
+                "tests/test_b.py"
+            ]
+        );
+        // The same names, with the query written in the other case.
+        let (total, hits) = search_page(&fixture, "foo", 50, 0);
+        assert_eq!(total, 6);
+        assert_eq!(
+            paths(&hits),
+            [
+                "b.py",
+                "d.py",
+                "tests/test_a.py",
+                "a.py",
+                "c.py",
+                "tests/test_b.py"
+            ]
+        );
+    }
+
+    #[test]
+    fn search_pages_after_ordering() {
+        let fixture = search_fixture(&NAMED);
+        let (_, full) = search_page(&fixture, "Foo", 50, 0);
+        let mut joined = Vec::new();
+        for offset in [0, 2, 4] {
+            let (total, page) = search_page(&fixture, "Foo", 2, offset);
+            assert_eq!(total, 6);
+            joined.extend(page);
+        }
+        assert_eq!(joined, full);
+        assert_eq!(paths(&joined[..2]), ["d.py", "tests/test_a.py"]);
+        assert_eq!(search_page(&fixture, "Foo", 2, 6), (6, Vec::new()));
+        assert_eq!(search_page(&fixture, "Foo", 50, 0).1, full, "repeatable");
+    }
+
+    #[test]
+    fn search_ambiguous_names_keep_position_order() {
+        let fixture =
+            search_fixture(&[("0.py", "FooX", 0), ("a.py", "Foo", 40), ("a.py", "Foo", 0)]);
+        let (total, hits) = search_page(&fixture, "Foo", 50, 0);
+        assert_eq!(total, 3);
+        assert_eq!(
+            hits,
+            [
+                ("a.py".to_string(), 0),
+                ("a.py".to_string(), 40),
+                ("0.py".to_string(), 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn search_non_ascii_case_is_not_exact() {
+        // Capital and small E with acute accent: a case pair outside ASCII.
+        let fixture = search_fixture(&[
+            ("a.py", "\u{c9}tat", 0),
+            ("b.py", "etat", 0),
+            ("c.py", "\u{e9}tat", 0),
+        ]);
+        let (total, hits) = search_page(&fixture, "\u{e9}tat", 50, 0);
+        assert_eq!(total, 3);
+        assert_eq!(paths(&hits), ["c.py", "a.py", "b.py"]);
+        // The ASCII letters of a non-ASCII name still compare without case.
+        let fixture = search_fixture(&[("a.py", "\u{e9}tatx_more", 0), ("b.py", "\u{e9}tatX", 0)]);
+        let (total, hits) = search_page(&fixture, "\u{e9}tatx", 50, 0);
+        assert_eq!(total, 2);
+        assert_eq!(paths(&hits), ["b.py", "a.py"]);
+    }
+
+    #[test]
+    fn search_term_without_words_is_still_a_substring_search() {
+        let fixture = search_fixture(&[("a.py", "operator<<", 0), ("b.py", "<<", 0)]);
+        assert_eq!(
+            search_page(&fixture, "<<", 50, 0),
+            (2, vec![("b.py".to_string(), 0), ("a.py".to_string(), 0)])
+        );
+        assert_eq!(search_page(&fixture, "\"", 50, 0), (0, Vec::new()));
     }
 
     #[test]

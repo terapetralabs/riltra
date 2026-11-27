@@ -2654,23 +2654,25 @@ pub fn search_symbols(
     let mut seen = HashSet::new();
     let mut keep = |row: &rusqlite::Row<'_>| -> rusqlite::Result<()> {
         let id: i64 = row.get(0)?;
-        if seen.insert(id) {
+        if !seen.contains(&id) {
             let name: String = row.get(1)?;
             let path: String = row.get(2)?;
             let test = crate::index::is_test_path(&path);
             matches.push((id, name_class(&name, term), test));
+            seen.insert(id);
         }
         Ok(())
     };
-    // FTS5 prefix search on the whole phrase. Any FTS error (e.g. a term made
-    // only of separators) falls back to LIKE alone — never a failure.
+    // FTS5 prefix search on the whole phrase. When FTS cannot prepare, run or
+    // step the query, LIKE alone answers; a candidate it returns that cannot be
+    // read is an error, so no match is dropped in silence.
     let phrase = format!("\"{}\"*", term.replace('"', "\"\""));
     if let Ok(mut statement) = conn.prepare(
         "SELECT s.id, s.name, f.path FROM symbols s JOIN files f ON f.id = s.file_id JOIN symbols_fts ON symbols_fts.rowid = s.id WHERE s.snapshot_id = ?1 AND symbols_fts MATCH ?2 ORDER BY f.path, s.byte_start",
     ) {
         if let Ok(mut rows) = statement.query(params![snapshot_id, phrase]) {
             while let Ok(Some(row)) = rows.next() {
-                let _ = keep(row);
+                keep(row).map_err(|e| e.to_string())?;
             }
         }
     }
@@ -3716,6 +3718,32 @@ pub(crate) mod tests {
             (2, vec![("b.py".to_string(), 0), ("a.py".to_string(), 0)])
         );
         assert_eq!(search_page(&fixture, "\"", 50, 0), (0, Vec::new()));
+    }
+
+    #[test]
+    fn search_reports_an_unreadable_candidate_instead_of_dropping_it() {
+        // A blob in a text column cannot be read as a string, while the FTS index
+        // still holds the word, so the row stays a candidate. "\u{e9}tat" answers
+        // "etat" through FTS alone: FTS drops the accent and LIKE does not.
+        for damage in [
+            "UPDATE symbols SET name = X'FF' WHERE name = ?1",
+            "UPDATE files SET path = X'FF' WHERE id = (SELECT file_id FROM symbols WHERE name = ?1)",
+        ] {
+            for (name, term) in [("alpha", "alpha"), ("\u{e9}tat", "etat")] {
+                let (conn, snap) = search_fixture(&[("a.py", name, 0)]);
+                assert_eq!(search_symbols(&conn, snap, term, 10, 0).unwrap().0, 1);
+                assert_eq!(conn.execute(damage, [name]).unwrap(), 1);
+                let result = search_symbols(&conn, snap, term, 10, 0);
+                assert!(result.is_err(), "{name}: {damage}: {result:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn search_falls_back_to_like_when_fts_fails() {
+        let (conn, snap) = search_fixture(&[("a.py", "alpha", 0)]);
+        conn.execute_batch("DROP TABLE symbols_fts").unwrap();
+        assert_eq!(search_symbols(&conn, snap, "alpha", 10, 0).unwrap().0, 1);
     }
 
     #[test]

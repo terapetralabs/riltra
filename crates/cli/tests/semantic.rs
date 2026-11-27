@@ -2273,3 +2273,82 @@ fn identity_a_failed_import_leaves_no_list() {
         "control: a good import writes one"
     );
 }
+
+/// An anchor that fell back to syntax still lists the calls the identity check
+/// demoted: they are candidates now, never gone.
+#[test]
+fn identity_demoted_calls_stay_listed_as_candidates() {
+    let h = home("identity-listed");
+    let a = "export function setup() {\n  helper();\n}\nexport function helper() {}\nexport function top() {\n  setup();\n}\nsetup();\n";
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/a.ts", a),
+            ("src/b.ts", "export function setup() {}\n"),
+        ],
+    );
+    let payload = index_bytes(
+        &dir,
+        &[
+            document(
+                "src/a.ts",
+                &[
+                    occurrence(DUP, 0x1, 0, 16, 21),
+                    occurrence(HELPER, 0x0, 1, 2, 8),
+                    occurrence(HELPER, 0x1, 3, 16, 22),
+                    occurrence(DUP, 0x0, 5, 2, 7),
+                    occurrence(DUP, 0x0, 7, 0, 5),
+                ],
+                &[symbol_info(DUP, "setup"), symbol_info(HELPER, "helper")],
+                false,
+            ),
+            document(
+                "src/b.ts",
+                &[occurrence(DUP, 0x1, 0, 16, 21)],
+                &[symbol_info(DUP, "setup")],
+                false,
+            ),
+        ],
+        &[],
+    );
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    do_index(&h);
+    do_import(&h, &scip.to_string_lossy());
+    let (code, out) = dup_callers(&h, "1", "17", None);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("\"POTENTIAL_CALL\"") && out.contains("ambiguous:2"),
+        "{out}"
+    );
+    let at = |line: &str| {
+        let (code, out, err) = run(
+            &h,
+            &[
+                "impact", "--repo", "sem", "--path", "src/a.ts", "--line", line, "--col", "17",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        out
+    };
+    assert!(out.contains("\"owner-unproven\""), "ownerless call: {out}");
+    let from_setup = at("1");
+    assert!(from_setup.contains("ambiguous:2"), "{from_setup}");
+    // The walk upwards from `helper` stops at the ambiguous `setup` and says so.
+    let from_helper = at("4");
+    assert!(
+        from_helper.contains("semantic-midpoint-unavailable"),
+        "{from_helper}"
+    );
+    // The same holds for an import that was never checked.
+    let conn = rusqlite::Connection::open(h.join("index").join("sem.db")).unwrap();
+    conn.execute("DELETE FROM meta WHERE key LIKE 'semantic_identity:%'", [])
+        .unwrap();
+    drop(conn);
+    let (code, _, err) = run(&h, &["index", "--repo", "sem", "--full"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out) = dup_callers(&h, "1", "17", None);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("\"identity-unchecked\""), "{out}");
+}

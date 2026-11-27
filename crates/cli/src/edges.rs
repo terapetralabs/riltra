@@ -574,6 +574,8 @@ pub fn upsert_semantic_edges(
     }
     let empty: Vec<&store::CallRow> = Vec::new();
     let mut terminal_occurrence_sites = BTreeSet::new();
+    // Call sites whose callee symbol the identity check does not accept.
+    let mut doubted_sites = BTreeSet::new();
     for fact in &facts {
         if fact.roles & 1 != 0 || fact.symbol_uri.is_none() {
             continue;
@@ -590,6 +592,10 @@ pub fn upsert_semantic_edges(
                         call.byte_start,
                         call.byte_end,
                     ));
+                    let uri = fact.symbol_uri.as_deref().unwrap_or_default();
+                    if !fact.external && doubt(uri, &fact.rel_path).is_some() {
+                        doubted_sites.insert((call.file_id, call.byte_start, call.byte_end));
+                    }
                 }
             }
         }
@@ -723,6 +729,7 @@ pub fn upsert_semantic_edges(
                     ));
                     stats.potential += 1;
                     resolved.insert(site);
+                    doubted_sites.insert(site);
                     continue;
                 }
                 let callee = EdgeEndpoint::Scip {
@@ -927,7 +934,18 @@ pub fn upsert_semantic_edges(
         )
         .map_err(|e| e.to_string())?;
     }
-    for edge in &out {
+    for edge in &mut out {
+        let site = (
+            edge.file_id,
+            edge.caller_span_bytes.0,
+            edge.caller_span_bytes.1,
+        );
+        // A syntax anchor has no import to scope candidates by; this mark is
+        // what lets it list the calls to the symbol it fell back from.
+        if edge.edge_kind == "POTENTIAL_CALL" && doubted_sites.contains(&site) {
+            let end = edge.evidence.len() - 1;
+            edge.evidence.insert_str(end, ",\"doubted\":true");
+        }
         store::insert_edge(conn, edge)?;
     }
     Ok(stats)

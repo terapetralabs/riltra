@@ -1318,7 +1318,7 @@ pub fn semantic_generation(conn: &Connection) -> Result<i64, String> {
 
 // Bump when persisted relationship proof rules change. This is derivation
 // compatibility metadata, independent of the SQLite schema version.
-const GRAPH_PROOF_REVISION: &str = "item5-k1-identity-1";
+const GRAPH_PROOF_REVISION: &str = "item5-k1-identity-2";
 
 fn graph_proof_token(conn: &Connection, snapshot_id: i64) -> Result<String, String> {
     let nonce: String = conn
@@ -2332,7 +2332,9 @@ impl EdgeSelection<'_> {
             ),
             Value::Text(serde_json::to_string(self.candidate_aliases).expect("candidate aliases")),
         ];
-        let predicate = format!("snapshot_id = ?1 AND (({p}_kind = ?2 AND {p}_import_id IS ?3 AND {p}_uri IS ?4 AND {p}_doc IS ?5 AND {p}_path IS ?6 AND {p}_bs IS ?7 AND {p}_be IS ?8) OR (edge_kind = 'POTENTIAL_CALL' AND callee_kind = 'unknown' AND (callee_name = ?9 OR EXISTS (SELECT 1 FROM json_each(?12) a WHERE caller_file = json_extract(a.value, '$[0]') AND callee_name = json_extract(a.value, '$[1]'))) AND (provider = 'syntax' OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND caller_file IN (SELECT value FROM json_each(?10))) OR (caller_kind = 'syntax' AND (provider = 'syntax' OR callee_import_id = ?3 OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND EXISTS (SELECT 1 FROM json_each(?11) a WHERE caller_path = json_extract(a.value, '$[0]') AND caller_bs = json_extract(a.value, '$[1]') AND caller_be = json_extract(a.value, '$[2]'))))");
+        // A syntax endpoint has no import (?3). Rows whose callee symbol the identity
+        // check doubts must still be listed there, or the call would vanish.
+        let predicate = format!("snapshot_id = ?1 AND (({p}_kind = ?2 AND {p}_import_id IS ?3 AND {p}_uri IS ?4 AND {p}_doc IS ?5 AND {p}_path IS ?6 AND {p}_bs IS ?7 AND {p}_be IS ?8) OR (edge_kind = 'POTENTIAL_CALL' AND callee_kind = 'unknown' AND (callee_name = ?9 OR EXISTS (SELECT 1 FROM json_each(?12) a WHERE caller_file = json_extract(a.value, '$[0]') AND callee_name = json_extract(a.value, '$[1]'))) AND (provider = 'syntax' OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3 OR (?3 IS NULL AND CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.doubted') END = 1)) AND caller_file IN (SELECT value FROM json_each(?10))) OR (caller_kind = 'syntax' AND (provider = 'syntax' OR callee_import_id = ?3 OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND EXISTS (SELECT 1 FROM json_each(?11) a WHERE caller_path = json_extract(a.value, '$[0]') AND caller_bs = json_extract(a.value, '$[1]') AND caller_be = json_extract(a.value, '$[2]'))))");
         (predicate, values)
     }
 }

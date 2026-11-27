@@ -2308,3 +2308,32 @@ fn name_selector_rejects_same_span_wrong_uri_or_kind() {
     assert_eq!(restored["total"], 1, "{restored}");
     assert_only_doc_storage(&restored);
 }
+
+/// Item 5 K1: `add` is defined in two files under one symbol, so no section is
+/// bound to that symbol; the unique `sub` is still proposed.
+#[test]
+fn scan_does_not_propose_an_ambiguous_symbol() {
+    let Some(f) = fixture(
+        "ambiguous",
+        &[
+            ("pkg/calc.py", CALC),
+            ("pkg/other.py", "def add(a, b):\n    return a\n"),
+            ("docs/adr/0001.md", DOC),
+        ],
+    ) else {
+        return;
+    };
+    f.index();
+    f.import(&[
+        ("pkg/calc.py", calc_defs()),
+        ("pkg/other.py", vec![(ADD, 0, 4, 7, DEF_ROLE)]),
+    ]);
+    let report = f.scan_json(&[]);
+    let names: Vec<&str> = report["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["target"]["definition"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["sub"], "{report}");
+}

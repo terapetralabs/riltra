@@ -6,6 +6,7 @@
 //! queries (Task 4) build on the `EdgeEndpoint` identity defined in
 //! `store.rs`: endpoints link only through validated evidence, never names.
 
+use crate::identity::{Identity, ImportIdentity};
 use crate::store::{self, EdgeEndpoint, EdgeRow};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -521,6 +522,22 @@ pub fn upsert_semantic_edges(
         path_of.insert(*fid, path.as_str());
         digest_of.insert(*fid, digest.as_str());
     }
+    // Definition spans per (URI, document), over every stored fact.
+    let checked = ImportIdentity::load(conn, &import.1)?;
+    let mut places: BTreeMap<(String, String), BTreeSet<(usize, usize)>> = BTreeMap::new();
+    for fact in facts.iter().filter(|fact| fact.roles & 1 != 0) {
+        if let Some(uri) = &fact.symbol_uri {
+            places
+                .entry((uri.clone(), fact.rel_path.clone()))
+                .or_default()
+                .insert((fact.byte_start, fact.byte_end));
+        }
+    }
+    // Why `uri`, seen from document `rel`, is not one proven definition.
+    let doubt = |uri: &str, rel: &str| -> Option<String> {
+        let here = places.get(&(uri.to_string(), rel.to_string()));
+        checked.of(uri, here.map_or(0, BTreeSet::len)).reason()
+    };
     // A row ID is not a source revision. Contradictory indexed bytes cannot
     // participate in strict reference/definition proof or owner bridging.
     // Unindexed semantic documents retain M5's digest verification lifecycle.
@@ -688,6 +705,26 @@ pub fn upsert_semantic_edges(
                 owner,
                 rust_alias_target(call, fact, path, &facts, &proofs, &fid_of),
             ) {
+                if let Some(reason) = doubt(uri, &fact.rel_path)
+                    .or_else(|| doubt(alias.target_uri, &alias.target.rel_path))
+                {
+                    out.push(potential_row(
+                        (snapshot_id, import_id),
+                        call.file_id,
+                        path,
+                        call,
+                        Some(EdgeEndpoint::SyntaxDef {
+                            path: path.to_string(),
+                            byte_start: o.byte_start,
+                            byte_end: o.byte_end,
+                        }),
+                        terminal_text(call),
+                        &reason,
+                    ));
+                    stats.potential += 1;
+                    resolved.insert(site);
+                    continue;
+                }
                 let callee = EdgeEndpoint::Scip {
                     import_id,
                     symbol_uri: alias.target_uri.to_string(),
@@ -737,7 +774,9 @@ pub fn upsert_semantic_edges(
                 continue;
             }
             match (owner, def, external) {
-                (Some(o), Some(_), false) if callable_target => {
+                (Some(o), Some(_), false)
+                    if callable_target && doubt(uri, &fact.rel_path).is_none() =>
+                {
                     // Proven call: overlapping reference of the resolved
                     // target + proven callable owner. The caller endpoint
                     // unifies to the owner's SCIP identity when the owner
@@ -775,13 +814,16 @@ pub fn upsert_semantic_edges(
                 }
                 _ => {
                     let reason = if external {
-                        "external"
+                        "external".to_string()
                     } else if owner.is_none() {
-                        "owner-unproven"
-                    } else if def.is_some() && !callable_target {
-                        "target-unproven"
+                        "owner-unproven".to_string()
+                    } else if def.is_none() {
+                        "unresolved".to_string()
+                    } else if !callable_target {
+                        "target-unproven".to_string()
                     } else {
-                        "unresolved"
+                        // Proven in every other way: only the identity is not.
+                        doubt(uri, &fact.rel_path).unwrap_or_else(|| "unresolved".to_string())
                     };
                     let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
                         path: path.to_string(),
@@ -796,7 +838,7 @@ pub fn upsert_semantic_edges(
                         call,
                         caller,
                         terminal,
-                        reason,
+                        &reason,
                     ));
                     stats.potential += 1;
                     resolved.insert((call.file_id, call.byte_start, call.byte_end));
@@ -852,7 +894,8 @@ pub fn upsert_semantic_edges(
             // with the occurrence location as evidence; never expanded.
             // Exact needs a proven callee endpoint: a definition of the same
             // symbol in this import. Otherwise only the span is known.
-            let endpoint_proven = def_for(uri, &fact.rel_path).is_some();
+            let endpoint_proven =
+                def_for(uri, &fact.rel_path).is_some() && doubt(uri, &fact.rel_path).is_none();
             let precision = if endpoint_proven {
                 "Exact"
             } else {
@@ -942,7 +985,14 @@ pub(crate) fn owner_scip_checked(
     if uris.len() != 1 {
         return Ok(None);
     }
-    let uri = uris.remove(0);
+    let found = uris.remove(0);
+    // shortcut: decodes the list on every mapping; cache it per query if a
+    // producer ever makes the list large.
+    let checked = ImportIdentity::decode(found.identity.as_deref(), &found.artifact_id);
+    if checked.of(&found.uri, found.places) != Identity::Unique {
+        return Ok(None);
+    }
+    let uri = found.uri;
     Ok(Some(EdgeEndpoint::Scip {
         import_id,
         doc: if crate::scip::is_local_symbol(&uri) {
@@ -2806,6 +2856,7 @@ pub(crate) mod tests {
     }
 
     fn mk_import(conn: &rusqlite::Connection, snap: i64, provider: &str) -> i64 {
+        crate::identity::record(conn, "a", &Default::default()).unwrap();
         store::insert_semantic_import(
             conn,
             &store::SemanticImport {
@@ -3205,6 +3256,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rust_alias_to_an_ambiguous_target_is_not_a_call() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = include_bytes!(
+            "../../../docs/pilots/wiy-caller-precision-2026-10-31/source/src/lib.rs"
+        );
+        let path = "src/lib.rs";
+        ingest_source(&conn, snap, path, src, crate::syntax::Language::Rust);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let a = "rust-analyzer cargo precision_fixture 0.1.0 a/target().";
+        crate::identity::record(&conn, "a", &BTreeMap::from([(a.to_string(), 2)])).unwrap();
+        store::insert_semantic_facts(&conn, &wiy_alias_facts(snap, imp, path, src, "local 0"))
+            .unwrap();
+
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(stats.calls, 1, "only b::target stays proven");
+        let alias_site: (String, String) = conn
+            .query_row(
+                "SELECT edge_kind, unresolved FROM code_edges WHERE snapshot_id = ?1 AND caller_sbs = 171 AND caller_sbe = 174",
+                [snap],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            alias_site,
+            ("POTENTIAL_CALL".to_string(), "ambiguous:2".to_string())
+        );
+    }
+
+    #[test]
     fn rust_alias_does_not_resolve_by_name_when_scip_local_identity_differs() {
         let conn = mem_db();
         let snap = mk_snap(&conn);
@@ -3571,6 +3652,7 @@ pub(crate) mod tests {
         encoding: &str,
         artifact: &str,
     ) -> i64 {
+        crate::identity::record(conn, artifact, &Default::default()).unwrap();
         store::insert_semantic_import(
             conn,
             &store::SemanticImport {
@@ -4404,12 +4486,66 @@ pub(crate) mod tests {
                 .is_some()
         );
 
+        // An ambiguous or unchecked owner identity is never a bridge.
+        for list in [Some(BTreeMap::from([(uri.to_string(), 2)])), None] {
+            match &list {
+                Some(list) => crate::identity::record(&conn, "a", list).unwrap(),
+                None => {
+                    conn.execute("DELETE FROM meta", []).unwrap();
+                }
+            }
+            assert_eq!(
+                owner_scip_checked(&conn, snap, imp, owner, "lib.py", &digest).unwrap(),
+                None,
+                "{list:?}"
+            );
+            assert!(owner_bridges_strict(&conn, snap, &endpoint)
+                .unwrap()
+                .is_empty());
+        }
+        crate::identity::record(&conn, "a", &Default::default()).unwrap();
+
         // Fault: only `semantic_owner_uris` names this index (INDEXED BY).
         conn.execute_batch("DROP INDEX idx_semfacts_span").unwrap();
         assert!(owner_scip_checked(&conn, snap, imp, owner, "lib.py", &digest).is_err());
         assert_eq!(owner_scip(&conn, snap, imp, owner, "lib.py", &digest), None);
         assert!(owner_bridges(&conn, snap, &endpoint).unwrap().is_empty());
         assert!(owner_bridges_strict(&conn, snap, &endpoint).is_err());
+    }
+
+    /// A local owner symbol is counted in its own document.
+    #[test]
+    fn a_local_owner_symbol_defined_twice_is_not_a_bridge() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let lib = b"def target():\n    return 1\n";
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let digest = store::content_digest(lib);
+        let def = |span, bytes| {
+            mk_fact(
+                snap,
+                imp,
+                "lib.py",
+                &digest,
+                Some("local 1"),
+                "target",
+                0x1,
+                span,
+                bytes,
+                false,
+            )
+        };
+        store::insert_semantic_facts(&conn, &[def((1, 5, 1, 11), (4, 10))]).unwrap();
+        let (fid, _) = store::file_identity(&conn, snap, "lib.py")
+            .unwrap()
+            .unwrap();
+        let symbols = store::symbols_at(&conn, snap, "lib.py").unwrap();
+        let owner = owner_of(&symbols, fid, 4).unwrap();
+        let mapped = || owner_scip_checked(&conn, snap, imp, owner, "lib.py", &digest).unwrap();
+        assert!(mapped().is_some(), "control: one definition maps");
+        store::insert_semantic_facts(&conn, &[def((2, 5, 2, 11), (18, 24))]).unwrap();
+        assert_eq!(mapped(), None);
     }
 
     #[test]

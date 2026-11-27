@@ -1399,6 +1399,11 @@ pub fn semantic_query(
         .symbol_uri
         .clone()
         .ok_or_else(|| "occurrence has no symbol identity: unresolved".to_string())?;
+    if let Some(why) =
+        crate::identity::at_document(&tx, anchor.import_id, &uri, &facts)?.refusal(&uri)
+    {
+        return Err(format!("{why}: unresolved"));
+    }
     let local = uri == "local" || uri.starts_with("local ");
     let mut definitions = Vec::new();
     let mut references = Vec::new();
@@ -1723,6 +1728,8 @@ pub(crate) fn resolve_edge_anchor_classified(
         }
         best.retain(|f| f.symbol_uri.as_deref() == Some(want));
     }
+    // Why the definition at the position is answered by syntax, not by symbol.
+    let mut doubt: Option<String> = None;
     if !best.is_empty() {
         let mut uris = BTreeSet::new();
         for fact in &best {
@@ -1757,44 +1764,59 @@ pub(crate) fn resolve_edge_anchor_classified(
             )));
         }
         let import_id = best[0].import_id;
-        let local = uri == "local" || uri.starts_with("local ");
-        return Ok(EdgeAnchor {
-            kind: AnchorKind::Semantic,
-            path: validated.to_string(),
-            line1: line0 + 1,
-            col1: col0 + 1,
-            symbol_uri: Some(uri),
-            import_id: Some(import_id),
-            doc: if local {
-                Some(validated.to_string())
-            } else {
-                None
-            },
-            display: best[0].display_name.clone(),
-            candidate_display: best[0]
-                .display_name
-                .clone()
-                .filter(|name| !name.is_empty())
-                .or_else(|| {
-                    let fact = best[0];
-                    if current_digest.as_deref() != Some(fact.file_digest.as_str()) {
-                        return None;
-                    }
-                    let bytes = source.as_ref()?.get(fact.byte_start..fact.byte_end)?;
-                    let name = std::str::from_utf8(bytes).ok()?;
-                    (!name.is_empty()
-                        && name
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_' || c == '$'))
-                    .then(|| name.to_owned())
-                }),
-            span_bytes: Some((best[0].byte_start, best[0].byte_end)),
-            precision: best[0].precision.clone(),
-            uncertainty: None,
-            data_member: false,
-        });
+        let found = crate::identity::at_document(tx, import_id, &uri, &facts)?;
+        if let Some(why) = found.refusal(&uri) {
+            if !best.iter().any(|f| f.roles & 1 != 0) {
+                // The enclosing definition is another symbol: never move to it.
+                let advice = match found {
+                    crate::identity::Identity::Ambiguous(_) => "; anchor at one definition",
+                    _ => "",
+                };
+                return Err(GraphQueryError::Anchor(format!(
+                    "anchor unresolved: {why}{advice}"
+                )));
+            }
+            doubt = Some(why);
+        } else {
+            let local = uri == "local" || uri.starts_with("local ");
+            return Ok(EdgeAnchor {
+                kind: AnchorKind::Semantic,
+                path: validated.to_string(),
+                line1: line0 + 1,
+                col1: col0 + 1,
+                symbol_uri: Some(uri),
+                import_id: Some(import_id),
+                doc: if local {
+                    Some(validated.to_string())
+                } else {
+                    None
+                },
+                display: best[0].display_name.clone(),
+                candidate_display: best[0]
+                    .display_name
+                    .clone()
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| {
+                        let fact = best[0];
+                        if current_digest.as_deref() != Some(fact.file_digest.as_str()) {
+                            return None;
+                        }
+                        let bytes = source.as_ref()?.get(fact.byte_start..fact.byte_end)?;
+                        let name = std::str::from_utf8(bytes).ok()?;
+                        (!name.is_empty()
+                            && name
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_' || c == '$'))
+                        .then(|| name.to_owned())
+                    }),
+                span_bytes: Some((best[0].byte_start, best[0].byte_end)),
+                precision: best[0].precision.clone(),
+                uncertainty: None,
+                data_member: false,
+            });
+        }
     }
-    if symbol.is_some() {
+    if symbol.is_some() && doubt.is_none() {
         return Err(GraphQueryError::Anchor(
             "anchor unresolved: no semantic occurrence here".to_string(),
         ));
@@ -1863,6 +1885,7 @@ pub(crate) fn resolve_edge_anchor_classified(
         .ok_or_else(|| GraphQueryError::Anchor("no anchor here".to_string()))?;
     let data_member = def.kind == "field";
     let uncertainty = match (&def.name, data_member) {
+        _ if doubt.is_some() => format!("syntax anchor: {}", doubt.unwrap_or_default()),
         (Some(name), true) => format!(
             "syntax-only anchor: data member '{name}' has no call edges; its name occurrences are listed by search --occurrences"
         ),
@@ -7264,6 +7287,7 @@ mod tests {
         let live = super::live_state_for(&conn, &snapshot).unwrap();
         let (file_id, digest) =
             store::file_id_map(&conn, snapshot.id).unwrap()["pkg/mod.py"].clone();
+        crate::identity::record(&conn, "python-alias-target", &Default::default()).unwrap();
         let import_id = store::insert_semantic_import(
             &conn,
             &store::SemanticImport {
@@ -7392,6 +7416,7 @@ mod tests {
     #[test]
     fn edge_anchor_semantic_picks_narrowest() {
         let (conn, snap, dir) = anchor_harness();
+        crate::identity::record(&conn, "a1b2", &Default::default()).unwrap();
         let imp = store::insert_semantic_import(
             &conn,
             &store::SemanticImport {
@@ -7450,6 +7475,7 @@ mod tests {
     #[test]
     fn edge_anchor_ambiguous_distinct_uris() {
         let (conn, snap, dir) = anchor_harness();
+        crate::identity::record(&conn, "a1b2", &Default::default()).unwrap();
         let imp = store::insert_semantic_import(
             &conn,
             &store::SemanticImport {
@@ -7616,6 +7642,7 @@ mod tests {
         let snapshot = store::latest_snapshot(&conn).unwrap().unwrap();
         let live = super::live_state_for(&conn, &snapshot).unwrap();
         let (file_id, digest) = store::file_id_map(&conn, snapshot.id).unwrap()["a.py"].clone();
+        crate::identity::record(&conn, "trace-pin-artifact", &Default::default()).unwrap();
         let import_id = store::insert_semantic_import(
             &conn,
             &store::SemanticImport {

@@ -20,6 +20,21 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   within each, files outside tests first; then the previous order (prefix matches before other
   substring matches, each by path and position). The set of results, `total` and the shape of the
   answer are unchanged. A reader that relied on path order sees different pages.
+- **Re-import SCIP indexes after upgrading.** Graph queries on an index built by an older binary
+  are refused until `riltra index` runs again. After that, an import made by an older binary
+  proves nothing: no `CALLS` and no `Exact` references come from it (`identity-unchecked`) until
+  `riltra semantic import` runs again, which for a large repository can take minutes.
+
+### Fixed
+
+- A SCIP symbol string that names more than one definition (some producers give same-named items
+  in different crates of one package the same string) is no longer treated as one symbol. Calls to
+  it were reported as `CALLS` with precision `Exact`, also from callers of the other definition.
+  Now the call stays a `POTENTIAL_CALL` with the reason `ambiguous:N`, references to it are
+  `Heuristic`, an ambiguous owner keeps its syntax identity, an anchor on such a definition is
+  answered by syntax, and an anchor on a reference to it and `semantic query` are refused. The
+  list is counted over the whole imported file, so reindexing a changed file cannot make a symbol
+  look unique again. Knowledge bindings that stored such a symbol stay stored but no longer match.
 
 ## [0.3.0] - 2026-11-26
 

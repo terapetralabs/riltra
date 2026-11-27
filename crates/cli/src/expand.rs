@@ -775,6 +775,8 @@ mod tests {
     }
 
     fn import(fx: &Fx, provider: &str) -> i64 {
+        let artifact = store::new_nonce();
+        crate::identity::record(&fx.conn, &artifact, &Default::default()).unwrap();
         store::insert_semantic_import(
             &fx.conn,
             &SemanticImport {
@@ -784,7 +786,7 @@ mod tests {
                 capability: "definitions,references".to_string(),
                 project_root: "repo-root".to_string(),
                 text_encoding: "UTF8".to_string(),
-                artifact_id: store::new_nonce(),
+                artifact_id: artifact,
                 source_revision: "r".to_string(),
                 claimed_source_digest: String::new(),
                 content_identity: "ci".to_string(),

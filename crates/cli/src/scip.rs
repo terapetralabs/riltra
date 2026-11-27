@@ -497,6 +497,8 @@ impl<R: Read> Read for HashRead<R> {
     }
 }
 
+type DefinitionRange = Result<(u32, usize, u32, usize), usize>;
+
 struct ImportState<'a> {
     conn: &'a rusqlite::Connection,
     snapshot_id: i64,
@@ -507,6 +509,9 @@ struct ImportState<'a> {
     text_encoding: TextEncoding,
     provider: ProviderId,
     defined_global: BTreeSet<String>,
+    /// Definition occurrences of every global symbol in the whole artifact:
+    /// `(document, range)`, or the occurrence index when the range is unusable.
+    definition_places: BTreeMap<String, BTreeSet<(String, DefinitionRange)>>,
     external_meta: BTreeMap<String, (String, String)>,
     documents: usize,
     definitions: usize,
@@ -622,6 +627,17 @@ enum DocOutcome {
 
 fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome, String> {
     let rel = semantic::validate_doc_path(&state.repo_root, &doc.relative_path)?;
+    // Counted before anything can skip the document: a second definition in a
+    // skipped file still makes the symbol ambiguous.
+    for (index, occ) in doc.occurrences.iter().enumerate() {
+        if occ.symbol_roles & 0x1 != 0 && !occ.symbol.is_empty() && !is_local_symbol(&occ.symbol) {
+            state
+                .definition_places
+                .entry(occ.symbol.clone())
+                .or_default()
+                .insert((rel.clone(), occurrence_span(occ).map_err(|_| index)));
+        }
+    }
     // Conflict check first: contradictory identity fails the whole import.
     let mut symbols: BTreeMap<&str, &SymbolInformation> = BTreeMap::new();
     for info in &doc.symbols {
@@ -876,6 +892,7 @@ pub fn import_file(
             version: String::new(),
         },
         defined_global: BTreeSet::new(),
+        definition_places: BTreeMap::new(),
         external_meta: BTreeMap::new(),
         documents: 0,
         definitions: 0,
@@ -975,6 +992,13 @@ pub fn import_file(
         out
     };
     let artifact_id = hashed.digest();
+    let ambiguous: BTreeMap<String, usize> = state
+        .definition_places
+        .iter()
+        .filter(|(_, places)| places.len() > 1)
+        .map(|(uri, places)| (uri.clone(), places.len()))
+        .collect();
+    crate::identity::record(conn, &artifact_id, &ambiguous)?;
     let text_encoding = match state.text_encoding {
         TextEncoding::UTF8 => "UTF8",
         TextEncoding::UTF16 => "UTF16",

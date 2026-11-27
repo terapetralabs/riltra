@@ -24,6 +24,7 @@ mod edges;
 mod expand;
 mod git;
 mod grep;
+mod identity;
 mod ignore;
 mod index;
 #[cfg(feature = "semantic-knowledge")]

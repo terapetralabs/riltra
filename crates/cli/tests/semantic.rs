@@ -1841,3 +1841,435 @@ fn setup_never_turns_refs_into_calls() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(imports_section(&before), imports_section(&after));
 }
+
+// ---------------------------------------------------------------------------
+// Item 5 K1: one SCIP symbol string that names more than one definition.
+// ---------------------------------------------------------------------------
+
+const DUP: &str = "scip-test test test-pkg 1.0.0 setup().";
+const DUP_A: &str = "export function setup() {}\nexport function first() {\n  setup();\n}\n";
+const DUP_B: &str = "export function setup() {}\nexport function second() {\n  setup();\n}\n";
+
+/// Two files that each define `setup`, and an artifact that names both with
+/// one symbol string, as rust-analyzer does for same-named items in two crates.
+fn dup_repo(h: &Path) -> (PathBuf, String) {
+    let dir = repo_with(h, "sem", &[("src/a.ts", DUP_A), ("src/b.ts", DUP_B)]);
+    let doc = |rel: &str, caller: &str, name: &str| {
+        document(
+            rel,
+            &[
+                occurrence(DUP, 0x1, 0, 16, 21),
+                occurrence(caller, 0x1, 1, 16, 16 + name.len() as i64),
+                occurrence(DUP, 0x0, 2, 2, 7),
+            ],
+            &[symbol_info(DUP, "setup"), symbol_info(caller, name)],
+            false,
+        )
+    };
+    let payload = index_bytes(
+        &dir,
+        &[
+            doc(
+                "src/a.ts",
+                "scip-test test test-pkg 1.0.0 first().",
+                "first",
+            ),
+            doc(
+                "src/b.ts",
+                "scip-test test test-pkg 1.0.0 second().",
+                "second",
+            ),
+        ],
+        &[],
+    );
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    (dir, scip.to_string_lossy().to_string())
+}
+
+fn do_import(h: &Path, scip: &str) {
+    let (code, _, err) = run(h, &["semantic", "import", "--repo", "sem", "--scip", scip]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// `(CALLS rows, POTENTIAL_CALL rows with the reason)` of the call in `src/a.ts`.
+fn dup_rows(h: &Path, reason: &str) -> (i64, i64) {
+    let calls = db_count(
+        h,
+        "sem",
+        "SELECT COUNT(*) FROM code_edges WHERE edge_kind = 'CALLS' AND caller_file = 'src/a.ts'",
+    );
+    let potential = db_count(
+        h,
+        "sem",
+        &format!(
+            "SELECT COUNT(*) FROM code_edges WHERE edge_kind = 'POTENTIAL_CALL' AND provider = 'scip-import' AND caller_file = 'src/a.ts' AND unresolved = '{reason}'"
+        ),
+    );
+    (calls, potential)
+}
+
+#[test]
+fn identity_two_documents_never_prove_calls() {
+    let h = home("identity-two");
+    let (_dir, scip) = dup_repo(&h);
+    do_index(&h);
+    do_import(&h, &scip);
+    assert_eq!(dup_rows(&h, "ambiguous:2"), (0, 1));
+    assert_eq!(
+        db_count(
+            &h,
+            "sem",
+            "SELECT COUNT(*) FROM code_edges WHERE edge_kind = 'REFERENCES' AND precision = 'Exact'",
+        ),
+        0
+    );
+}
+
+#[test]
+fn identity_survives_reindex_that_drops_one_definition() {
+    let h = home("identity-carry");
+    let (dir, scip) = dup_repo(&h);
+    do_index(&h);
+    do_import(&h, &scip);
+    // The changed file's facts are not carried, so only one definition fact is
+    // left; the symbol must stay ambiguous, also on the rebuild after that.
+    std::fs::write(dir.join("src/b.ts"), "export function other() {}\n").unwrap();
+    do_index(&h);
+    assert_eq!(dup_rows(&h, "ambiguous:2"), (0, 1));
+    std::fs::write(dir.join("src/b.ts"), "export function third() {}\n").unwrap();
+    do_index(&h);
+    assert_eq!(dup_rows(&h, "ambiguous:2"), (0, 1));
+    let (code, _, err) = run(&h, &["index", "--repo", "sem", "--full"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(dup_rows(&h, "ambiguous:2"), (0, 1));
+}
+
+#[test]
+fn identity_counts_a_document_the_importer_skips() {
+    let h = home("identity-skip");
+    let (dir, scip) = dup_repo(&h);
+    do_index(&h);
+    std::fs::write(dir.join("src/b.ts"), "export function other() {}\n").unwrap();
+    do_import(&h, &scip);
+    assert_eq!(
+        db_count(
+            &h,
+            "sem",
+            "SELECT COUNT(*) FROM semantic_facts WHERE rel_path = 'src/b.ts'",
+        ),
+        0,
+        "the changed document must be the one the importer skipped"
+    );
+    assert_eq!(dup_rows(&h, "ambiguous:2"), (0, 1));
+}
+
+const HELPER: &str = "scip-test test test-pkg 1.0.0 helper().";
+
+/// `setup` is defined twice; `helper`, which one of them calls, only once.
+fn dup_caller_repo(h: &Path) -> (PathBuf, String) {
+    let a = "export function setup() {\n  helper();\n}\nexport function helper() {}\n";
+    let b = "export function setup() {}\n";
+    let dir = repo_with(h, "sem", &[("src/a.ts", a), ("src/b.ts", b)]);
+    let payload = index_bytes(
+        &dir,
+        &[
+            document(
+                "src/a.ts",
+                &[
+                    occurrence(DUP, 0x1, 0, 16, 21),
+                    occurrence(HELPER, 0x0, 1, 2, 8),
+                    occurrence(HELPER, 0x1, 3, 16, 22),
+                ],
+                &[symbol_info(DUP, "setup"), symbol_info(HELPER, "helper")],
+                false,
+            ),
+            document(
+                "src/b.ts",
+                &[occurrence(DUP, 0x1, 0, 16, 21)],
+                &[symbol_info(DUP, "setup")],
+                false,
+            ),
+        ],
+        &[],
+    );
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    (dir, scip.to_string_lossy().to_string())
+}
+
+const HELPER_CALLS: &str = "SELECT COUNT(*) FROM code_edges WHERE edge_kind = 'CALLS' AND callee_uri = 'scip-test test test-pkg 1.0.0 helper().'";
+
+#[test]
+fn identity_ambiguous_caller_keeps_the_call_with_a_syntax_caller() {
+    let h = home("identity-caller");
+    let (_dir, scip) = dup_caller_repo(&h);
+    do_index(&h);
+    do_import(&h, &scip);
+    assert_eq!(db_count(&h, "sem", HELPER_CALLS), 1);
+    assert_eq!(
+        db_count(&h, "sem", &format!("{HELPER_CALLS} AND caller_uri IS NULL")),
+        1,
+        "an ambiguous owner symbol must not become the caller identity"
+    );
+}
+
+#[test]
+fn identity_an_import_without_a_checked_list_proves_nothing() {
+    let h = home("identity-legacy");
+    let (_dir, scip) = dup_caller_repo(&h);
+    do_index(&h);
+    do_import(&h, &scip);
+    // What an index built by an older binary holds: the facts, but no list.
+    let conn = rusqlite::Connection::open(h.join("index").join("sem.db")).unwrap();
+    assert_eq!(
+        conn.execute("DELETE FROM meta WHERE key LIKE 'semantic_identity:%'", [])
+            .unwrap(),
+        1,
+        "the import writes exactly one list"
+    );
+    drop(conn);
+    let (code, _, err) = run(&h, &["index", "--repo", "sem", "--full"]);
+    assert_eq!(code, 0, "{err}");
+    let proven = "SELECT COUNT(*) FROM code_edges WHERE edge_kind = 'CALLS' OR (edge_kind = 'REFERENCES' AND precision = 'Exact')";
+    assert_eq!(db_count(&h, "sem", proven), 0);
+    assert_eq!(
+        db_count(
+            &h,
+            "sem",
+            "SELECT COUNT(*) FROM code_edges WHERE unresolved = 'identity-unchecked'"
+        ),
+        1
+    );
+    do_import(&h, &scip);
+    assert_eq!(db_count(&h, "sem", HELPER_CALLS), 1, "re-import restores");
+}
+
+#[test]
+fn identity_same_local_symbol_in_two_documents_stays_proven() {
+    let h = home("identity-local");
+    let a = "export function outerA() {\n  function inner() {}\n  inner();\n}\n";
+    let b = "export function outerB() {\n  function inner() {}\n  inner();\n}\n";
+    let dir = repo_with(&h, "sem", &[("src/a.ts", a), ("src/b.ts", b)]);
+    let doc = |rel: &str, uri: &str, name: &str| {
+        document(
+            rel,
+            &[
+                occurrence(uri, 0x1, 0, 16, 22),
+                occurrence("local 0", 0x1, 1, 11, 16),
+                occurrence("local 0", 0x0, 2, 2, 7),
+            ],
+            &[symbol_info(uri, name), symbol_info("local 0", "inner")],
+            false,
+        )
+    };
+    let payload = index_bytes(
+        &dir,
+        &[
+            doc(
+                "src/a.ts",
+                "scip-test test test-pkg 1.0.0 outerA().",
+                "outerA",
+            ),
+            doc(
+                "src/b.ts",
+                "scip-test test test-pkg 1.0.0 outerB().",
+                "outerB",
+            ),
+        ],
+        &[],
+    );
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    do_index(&h);
+    do_import(&h, &scip.to_string_lossy());
+    assert_eq!(
+        db_count(
+            &h,
+            "sem",
+            "SELECT COUNT(*) FROM code_edges WHERE edge_kind = 'CALLS' AND callee_uri = 'local 0'"
+        ),
+        2
+    );
+}
+
+/// `callers` at one 1-based position of `src/a.ts`, optionally with `--symbol`.
+fn dup_callers(h: &Path, line: &str, col: &str, symbol: Option<&str>) -> (i32, String) {
+    let mut args = vec![
+        "callers", "--repo", "sem", "--path", "src/a.ts", "--line", line, "--col", col,
+    ];
+    if let Some(symbol) = symbol {
+        args.extend(["--symbol", symbol]);
+    }
+    let (code, out, err) = run(h, &args);
+    (code, format!("{out}{err}"))
+}
+
+fn dup_query(h: &Path, line: &str, col: &str) -> (i32, String) {
+    let (code, out, err) = run(
+        h,
+        &[
+            "semantic", "query", "--repo", "sem", "--path", "src/a.ts", "--line", line, "--col",
+            col,
+        ],
+    );
+    (code, format!("{out}{err}"))
+}
+
+#[test]
+fn identity_anchor_on_an_ambiguous_symbol() {
+    let h = home("identity-anchor");
+    let (_dir, scip) = dup_repo(&h);
+    do_index(&h);
+    do_import(&h, &scip);
+    // At the definition: that definition, by syntax, and the answer says why.
+    for symbol in [None, Some(DUP)] {
+        let (code, out) = dup_callers(&h, "1", "17", symbol);
+        assert_eq!(code, 0, "{symbol:?}: {out}");
+        assert!(out.contains("syntax-fallback"), "{symbol:?}: {out}");
+        assert!(out.contains("names 2 definitions"), "{symbol:?}: {out}");
+    }
+    // At a reference: refused, never moved to the enclosing function.
+    for symbol in [None, Some(DUP)] {
+        let (code, out) = dup_callers(&h, "3", "3", symbol);
+        assert_ne!(code, 0, "{symbol:?}: {out}");
+        assert!(
+            out.contains("anchor unresolved: identity ")
+                && out.contains("names 2 definitions; anchor at one definition"),
+            "{symbol:?}: {out}"
+        );
+    }
+    let (code, out) = dup_callers(&h, "1", "17", Some("scip-test . . . other()."));
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("--symbol disagrees"), "{out}");
+    for (line, col) in [("1", "17"), ("3", "3")] {
+        let (code, out) = dup_query(&h, line, col);
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("names 2 definitions"), "{out}");
+    }
+}
+
+#[test]
+fn identity_anchor_on_an_unchecked_import() {
+    let h = home("identity-anchor-legacy");
+    let (_dir, scip) = dup_caller_repo(&h);
+    do_index(&h);
+    do_import(&h, &scip);
+    let conn = rusqlite::Connection::open(h.join("index").join("sem.db")).unwrap();
+    conn.execute("DELETE FROM meta WHERE key LIKE 'semantic_identity:%'", [])
+        .unwrap();
+    drop(conn);
+    let (code, _, err) = run(&h, &["index", "--repo", "sem", "--full"]);
+    assert_eq!(code, 0, "{err}");
+    // `helper` is defined once (line 4) and called on line 2.
+    let (code, out) = dup_callers(&h, "4", "17", None);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("syntax-fallback") && out.contains("identity-unchecked"),
+        "{out}"
+    );
+    let (code, out) = dup_callers(&h, "2", "3", None);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("run riltra semantic import again"), "{out}");
+    let (code, out) = dup_query(&h, "2", "3");
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("identity-unchecked"), "{out}");
+}
+
+#[test]
+fn identity_knowledge_bind_on_an_ambiguous_definition_stays_syntax() {
+    use std::io::Write;
+    let h = home("identity-bind");
+    let (_dir, scip) = dup_repo(&h);
+    do_index(&h);
+    do_import(&h, &scip);
+    let stdin = |args: &[&str], input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+            .args(args)
+            .env("RILTRA_HOME", &h)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let done = child.wait_with_output().unwrap();
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        String::from_utf8_lossy(&done.stdout).into_owned()
+    };
+    stdin(
+        &["knowledge", "create", "--repo", "sem", "--input", "-"],
+        r#"{"id":"d1","kind":"decision","title":"T","body":"b","status":"active","author":"a","evidence":[]}"#,
+    );
+    let out = stdin(
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "sem",
+            "--path",
+            "src/a.ts",
+            "--line",
+            "1",
+            "--col",
+            "17",
+            "--input",
+            "-",
+        ],
+        r#"{"record_id":"d1","record_revision":1,"relation":"documents","author":"f","rationale":"f","provenance":"f"}"#,
+    );
+    assert!(!out.contains("\"kind\":\"semantic\""), "{out}");
+}
+
+/// The list is written in the import's own transaction.
+#[test]
+fn identity_a_failed_import_leaves_no_list() {
+    let h = home("identity-failed");
+    let (dir, scip) = dup_repo(&h);
+    let good = std::fs::read(&scip).unwrap();
+    // A second document naming one symbol two ways fails the whole import.
+    let mut bad = good.clone();
+    len_field(
+        2,
+        &document(
+            "src/b.ts",
+            &[],
+            &[symbol_info(DUP, "setup"), symbol_info(DUP, "other")],
+            false,
+        ),
+        &mut bad,
+    );
+    let path = dir.join("bad.scip");
+    std::fs::write(&path, bad).unwrap();
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &path.to_string_lossy(),
+        ],
+    );
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("conflicting duplicate symbol"), "{err}");
+    let lists = "SELECT COUNT(*) FROM meta WHERE key LIKE 'semantic_identity:%'";
+    assert_eq!(db_count(&h, "sem", lists), 0);
+    do_import(&h, &scip);
+    assert_eq!(
+        db_count(&h, "sem", lists),
+        1,
+        "control: a good import writes one"
+    );
+}

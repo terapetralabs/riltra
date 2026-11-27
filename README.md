@@ -218,7 +218,11 @@ parser.
 
 ## Known limitations
 
-Syntax-only graph results are candidates, not resolved relationships. Other
+Syntax-only graph results are candidates, not resolved relationships. A SCIP
+symbol that names more than one definition proves nothing: its calls stay
+candidates (`ambiguous:N`). An import made before this check existed proves
+nothing either (`identity-unchecked`) until you run `riltra index` and then
+`riltra semantic import` again. Other
 coverage limits and unsupported cases are listed in the [capabilities
 guide](docs/guide/capabilities.md#known-limitations).
 

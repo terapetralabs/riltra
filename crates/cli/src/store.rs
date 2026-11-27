@@ -1010,6 +1010,19 @@ pub fn semantic_facts_for(
 
 /// At most two identities: sufficient to prove uniqueness without loading an
 /// import's reference corpus. Source binding predicates match owner bridging.
+#[derive(Debug, PartialEq)]
+pub struct OwnerUri {
+    pub uri: String,
+    /// Distinct definition spans of a local URI in the owner's document; 0 for a
+    /// global one, whose count the import's list already holds.
+    pub places: usize,
+    pub artifact_id: String,
+    /// The import's raw duplicate list, for `ImportIdentity::decode`.
+    pub identity: Option<String>,
+}
+
+/// At most two URIs. One statement, so owner mapping costs no extra query for
+/// the uniqueness check.
 pub fn semantic_owner_uris(
     conn: &Connection,
     snapshot_id: i64,
@@ -1017,9 +1030,23 @@ pub fn semantic_owner_uris(
     owner: &SymbolRow,
     path: &str,
     digest: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<OwnerUri>, String> {
     // Restrict owner lookup to this file instead of scanning the snapshot.
-    let mut stmt=conn.prepare("SELECT DISTINCT symbol_uri FROM semantic_facts INDEXED BY idx_semfacts_span WHERE snapshot_id=?1 AND import_id=?2 AND rel_path=?3 AND display_name=?4 AND (roles & 1)!=0 AND symbol_uri IS NOT NULL AND file_digest=?5 AND (file_id IS NULL OR file_id=?6) AND byte_start>=?7 AND byte_end<=?8 ORDER BY symbol_uri LIMIT 2").map_err(|e|e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT f.symbol_uri,
+               CASE WHEN f.symbol_uri = 'local' OR f.symbol_uri GLOB 'local *' THEN
+                 (SELECT COUNT(DISTINCT d.byte_start || ':' || d.byte_end) FROM semantic_facts AS d
+                   WHERE d.snapshot_id=?1 AND d.symbol_uri=f.symbol_uri AND d.import_id=?2 AND d.rel_path=?3 AND (d.roles & 1)!=0)
+               ELSE 0 END,
+               i.artifact_id,
+               (SELECT value FROM meta WHERE key = ?9 || i.artifact_id)
+             FROM semantic_facts AS f INDEXED BY idx_semfacts_span
+             JOIN semantic_imports AS i ON i.id = f.import_id
+             WHERE f.snapshot_id=?1 AND f.import_id=?2 AND f.rel_path=?3 AND f.display_name=?4 AND (f.roles & 1)!=0 AND f.symbol_uri IS NOT NULL AND f.file_digest=?5 AND (f.file_id IS NULL OR f.file_id=?6) AND f.byte_start>=?7 AND f.byte_end<=?8
+             ORDER BY f.symbol_uri LIMIT 2",
+        )
+        .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(
             params![
@@ -1030,9 +1057,17 @@ pub fn semantic_owner_uris(
                 digest,
                 owner.file_id,
                 owner.byte_start as i64,
-                owner.byte_end as i64
+                owner.byte_end as i64,
+                crate::identity::KEY_PREFIX
             ],
-            |r| r.get(0),
+            |r| {
+                Ok(OwnerUri {
+                    uri: r.get(0)?,
+                    places: r.get::<_, i64>(1)? as usize,
+                    artifact_id: r.get(2)?,
+                    identity: r.get(3)?,
+                })
+            },
         )
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
@@ -1283,7 +1318,7 @@ pub fn semantic_generation(conn: &Connection) -> Result<i64, String> {
 
 // Bump when persisted relationship proof rules change. This is derivation
 // compatibility metadata, independent of the SQLite schema version.
-const GRAPH_PROOF_REVISION: &str = "m6-task7-source-proof-2";
+const GRAPH_PROOF_REVISION: &str = "item5-k1-identity-1";
 
 fn graph_proof_token(conn: &Connection, snapshot_id: i64) -> Result<String, String> {
     let nonce: String = conn
@@ -1706,6 +1741,13 @@ pub fn carry_semantic_facts(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     drop(statement);
+    // The duplicate lists follow their imports: re-derivation runs on staging.
+    staging
+        .execute(
+            "INSERT OR REPLACE INTO meta (key, value) SELECT key, value FROM src.meta WHERE substr(key, 1, length(?1)) = ?1",
+            params![crate::identity::KEY_PREFIX],
+        )
+        .map_err(|e| e.to_string())?;
     staging
         .execute_batch("CREATE TEMP TABLE sem_import_map (old_id INTEGER PRIMARY KEY, new_id INTEGER NOT NULL)")
         .map_err(|e| e.to_string())?;
@@ -2953,7 +2995,7 @@ pub(crate) mod tests {
         unsafe {
             rusqlite::ffi::sqlite3_progress_handler(conn.handle(), 0, None, std::ptr::null_mut())
         };
-        assert_eq!(result.unwrap(), Vec::<String>::new());
+        assert_eq!(result.unwrap(), Vec::new());
     }
 
     #[test]

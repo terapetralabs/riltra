@@ -124,6 +124,46 @@ languages without a parser, gives each hit its enclosing indexed definition, and
 gives companion files (`companions`) with their evidence labels for the first
 five files of the answer only (at most three per kind; test files excluded).
 
+#### Compact text answers (opt-in)
+
+`riltra mcp --compact` answers a successful `riltra_code_grep` with one block of
+plain text and **no `structuredContent`**, so the client shows the model that
+text instead of the JSON document. Errors stay structured, every other tool and
+the CLI are unchanged, and without the flag nothing changes. A client or script
+that reads `structuredContent` from `riltra_code_grep` must not use the flag.
+
+One exception: escaping can make the text longer than the JSON, for source with
+many C1 control characters or Unicode line separators. When the text would
+exceed the 64 KiB response budget, that call is answered with the usual JSON
+document and `structuredContent`; nothing is cut to make the text fit. A reader
+of the answer should therefore tell the two forms apart: the text starts with
+`grep `, the document with `{`.
+
+```
+grep repo=app mode=literal pattern=helper
+snapshot id=1 freshness=fresh reasons=[]
+totals files_scanned=2 files_skipped_binary=0 files_skipped_large=0 files_skipped_unreadable=0 dirs_unreadable=0 dirs_escaped=0 files_matched=2 hits=2
+truncated=null caller_gaps=[]
+file lib.py hit_count=1
+ in function helper line=1
+  1:5: def helper():
+file note.txt hit_count=1
+ no-definition in_reason=not-indexed
+  1:6: call helper() later
+```
+
+The answer holds the same files, hits, companions with their `why`, `basis` and
+`via`, snapshot freshness and reasons, totals, `truncated`, `caller_gaps` and
+`empty` as the JSON document, with two deliberate omissions:
+
+- `totals.bytes_read`, a cost figure for the search;
+- `in_reason` when it is `indexed`, which is what a hit group without it means.
+
+A value is bare when it holds only letters, digits and `_-./+@~`, and a JSON
+string otherwise. A source line follows `line:col: ` verbatim, unless it holds a
+control or line-separator character other than a tab; then it follows
+`line:col= ` as a JSON string. A source line therefore cannot pose as a label.
+
 For tool selection, result labels, and troubleshooting, see the [agent setup
 guide](docs/guide/agent-setup.md).
 

@@ -103,6 +103,8 @@ pub enum Command {
     /// Serve the MCP stdio interface. `all_tools` lists every tool, not only the core set.
     Mcp {
         all_tools: bool,
+        /// `--compact`: successful `code_grep` answers are text only.
+        compact: bool,
     },
     /// Print the agent instruction block (Markdown text, not JSON). No arguments.
     AgentBlock,
@@ -343,9 +345,19 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "-h" | "--help" | "help" if args.len() == 1 => Ok(Command::Help),
         "-V" | "--version" | "version" if args.len() == 1 => Ok(Command::Version),
         "status" if args.len() == 1 => Ok(Command::Status),
-        "mcp" if args.len() == 1 => Ok(Command::Mcp { all_tools: false }),
-        "mcp" if args.len() == 2 && args[1] == "--all-tools" => {
-            Ok(Command::Mcp { all_tools: true })
+        "mcp" => {
+            let (mut all_tools, mut compact) = (false, false);
+            for arg in &args[1..] {
+                let flag = match arg.as_str() {
+                    "--all-tools" => &mut all_tools,
+                    "--compact" => &mut compact,
+                    _ => return Err(crate::usage()),
+                };
+                if std::mem::replace(flag, true) {
+                    return Err(crate::usage());
+                }
+            }
+            Ok(Command::Mcp { all_tools, compact })
         }
         "overview" => {
             let mut repo = None;
@@ -1483,6 +1495,26 @@ mod tests {
         assert!(p(&["query", "--text", "a"]).is_err());
         assert!(p(&["query", "--repo", "r", "--text", "a", "--offset", "1"]).is_err());
         assert!(p(&["query", "--repo", "r", "--text"]).is_err());
+    }
+
+    #[test]
+    fn mcp_flags_are_independent_and_not_repeatable() {
+        assert_eq!(
+            p(&["mcp"]),
+            Ok(Command::Mcp {
+                all_tools: false,
+                compact: false
+            })
+        );
+        assert_eq!(
+            p(&["mcp", "--compact"]),
+            Ok(Command::Mcp {
+                all_tools: false,
+                compact: true
+            })
+        );
+        assert!(p(&["mcp", "--compact", "--compact"]).is_err());
+        assert!(p(&["mcp", "--compat"]).is_err());
     }
 
     #[test]

@@ -457,8 +457,13 @@ pub(crate) const CORE_TOOLS: [&str; 9] = [
 /// Sent as the MCP `instructions` at `initialize`; at most 600 bytes.
 const SERVER_INSTRUCTIONS: &str = "Riltra answers code questions from a local index; confirm results against the source. Exact text, an error message or an option: riltra_code_grep (it also gives the enclosing function and paired files; plain grep works too). Symbol name: riltra_code_search. Description in words: riltra_code_query. Before changing code: riltra_code_impact (UNKNOWN or partial means not established, not safe) and riltra_knowledge_at_anchor (notes bound to that code, Unverified). Recorded project decisions: riltra_knowledge_search. The repo argument may be omitted when one repository is registered.";
 
+/// Added to the `riltra_code_grep` description when `--compact` is on.
+const COMPACT_GREP_NOTE: &str = " This server runs with --compact: a successful answer is one plain-text block without structuredContent. It has the repo, mode, pattern, snapshot freshness, totals and `truncated`, then per file its hits as `line:col: text` under `in <kind> <name>` or `no-definition`, and `companions` with their basis. A hit group without `in_reason` is `indexed`; `bytes_read` is left out. An answer whose text would exceed 64 KiB comes as the usual JSON instead.";
+
 struct RiltraMcp {
     all_tools: bool,
+    /// `--compact`: successful `code_grep` answers are text only.
+    compact: bool,
 }
 
 #[tool_router]
@@ -557,7 +562,8 @@ impl RiltraMcp {
         )
     )]
     async fn riltra_code_grep(&self, Parameters(input): Parameters<GrepInput>) -> CallToolResult {
-        with_repo(input, move |input| grep_doc(&input)).await
+        let compact = self.compact;
+        with_repo(input, move |input| grep_doc(&input, compact)).await
     }
 
     #[tool(
@@ -843,6 +849,15 @@ impl ServerHandler for RiltraMcp {
         let mut tools = sorted_tool_definitions();
         if !self.all_tools {
             tools.retain(|tool| CORE_TOOLS.contains(&tool.name.as_ref()));
+        }
+        if self.compact {
+            for tool in &mut tools {
+                if tool.name == "riltra_code_grep" {
+                    let mut description = tool.description.take().unwrap_or_default().into_owned();
+                    description.push_str(COMPACT_GREP_NOTE);
+                    tool.description = Some(description.into());
+                }
+            }
         }
         let mut result = ListToolsResult::with_all_items(tools);
         if supports_cache_hints {
@@ -1380,7 +1395,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
     }
 }
 
-fn grep_doc(input: &GrepInput) -> CallToolResult {
+fn grep_doc(input: &GrepInput, compact: bool) -> CallToolResult {
     let limit = input.limit.unwrap_or(grep::DEFAULT_LIMIT);
     if limit == 0 || limit > grep::MAX_LIMIT {
         return tool_error(
@@ -1429,7 +1444,14 @@ fn grep_doc(input: &GrepInput) -> CallToolResult {
         }
     };
     match outcome {
-        Ok(result) => exact_doc(&response::grep_response_json(&input.repo, &req, &result)),
+        Ok(result) => match compact
+            .then(|| crate::compact::grep_text(&input.repo, &req, &result))
+            .flatten()
+        {
+            Some(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+            // Not `--compact`, or the escaped text is over the response budget.
+            None => exact_doc(&response::grep_response_json(&input.repo, &req, &result)),
+        },
         Err(e) => match grep::refusal_message(&e) {
             Some(message) => tool_error("invalid_input", message),
             None => tool_error("store_error", &e),
@@ -2725,8 +2747,9 @@ fn health_doc() -> CallToolResult {
 
 /// Run the MCP stdio server to completion. Exit codes follow the CLI:
 /// 0 clean shutdown (client EOF/disconnect), 3 runtime failure. `all_tools`
-/// is `--all-tools`: list every tool instead of the core set.
-pub(crate) fn run(all_tools: bool) -> i32 {
+/// is `--all-tools`: list every tool instead of the core set. `compact` is
+/// `--compact`: successful `code_grep` answers are text only.
+pub(crate) fn run(all_tools: bool, compact: bool) -> i32 {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -2735,14 +2758,18 @@ pub(crate) fn run(all_tools: bool) -> i32 {
         }
     };
     runtime.block_on(async {
-        let service =
-            match serve_server(RiltraMcp { all_tools }, rmcp::transport::io::stdio()).await {
-                Ok(service) => service,
-                Err(e) => {
-                    eprintln!("error: mcp initialize failed: {e}");
-                    return 3;
-                }
-            };
+        let service = match serve_server(
+            RiltraMcp { all_tools, compact },
+            rmcp::transport::io::stdio(),
+        )
+        .await
+        {
+            Ok(service) => service,
+            Err(e) => {
+                eprintln!("error: mcp initialize failed: {e}");
+                return 3;
+            }
+        };
         match service.waiting().await {
             Ok(rmcp::service::QuitReason::JoinError(e)) => {
                 eprintln!("error: mcp task failed: {e}");
@@ -2780,7 +2807,10 @@ fn in_process_self_test_after_startup(
         let (reader, mut writer) = tokio::io::split(client_io);
         let mut reader = BufReader::new(reader);
         let mut server_task = Some(tokio::spawn(serve_server(
-            RiltraMcp { all_tools: false },
+            RiltraMcp {
+                all_tools: false,
+                compact: false,
+            },
             server_io,
         )));
         let operation = async {
@@ -3072,7 +3102,10 @@ mod tests {
         runtime.block_on(async {
             let (server_io, client_io) = tokio::io::duplex(64);
             let startup = tokio::spawn(super::serve_server(
-                super::RiltraMcp { all_tools: false },
+                super::RiltraMcp {
+                    all_tools: false,
+                    compact: false,
+                },
                 server_io,
             ));
             let error =

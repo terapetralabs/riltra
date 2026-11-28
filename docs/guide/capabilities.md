@@ -933,6 +933,14 @@ and client configuration. For the core and provider security details, read the
 - Without semantic evidence, `callers` matches names within related files,
   `trace` cannot follow a resolved target, and impact remains
   `UNKNOWN`/partial when evidence does not establish coverage.
+- A SCIP symbol that names more than one definition proves nothing. An anchor
+  on one of those definitions is answered by syntax and lists candidates from
+  that file and the files found to import it. Calls from other files are not
+  listed even when they reach that definition, for example from Rust modules
+  pulled in with `#[path]`. On a large repository with SCIP imports, `impact`
+  can use up its time budget before it reads those candidates and answer with
+  no paths and `time-budget`; `callers` lists them. None of this is proof that
+  there are no callers.
 - C++ semantic resolution is not available out of the box. A C++ project needs
   a compilation database and an operator-configured language server; the
   current C++ answers remain candidates where identity or coverage is

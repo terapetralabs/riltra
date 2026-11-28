@@ -35,6 +35,10 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   answered by syntax, and an anchor on a reference to it and `semantic query` are refused. The
   list is counted over the whole imported file, so reindexing a changed file cannot make a symbol
   look unique again. Knowledge bindings that stored such a symbol stay stored but no longer match.
+  Known limits of the syntax answer are listed in the
+  [capabilities guide](docs/guide/capabilities.md#known-limitations): candidates come from the
+  file and its importers only (not, for example, from `#[path]` modules), and on a large
+  repository `impact` can run out of time before it lists them.
 
 ## [0.3.0] - 2026-11-26
 

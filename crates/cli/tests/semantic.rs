@@ -2333,8 +2333,18 @@ fn identity_demoted_calls_stay_listed_as_candidates() {
         out
     };
     assert!(out.contains("\"owner-unproven\""), "ownerless call: {out}");
+    // Nothing in the answer may read as proven or complete.
+    assert!(
+        out.contains("\"status\":\"partial\"") && out.contains("\"syntax-anchor-uncertain\""),
+        "{out}"
+    );
+    assert!(!out.contains("\"precision\":\"Exact\""), "{out}");
     let from_setup = at("1");
     assert!(from_setup.contains("ambiguous:2"), "{from_setup}");
+    assert!(
+        from_setup.contains("\"verdict\":\"UNKNOWN\""),
+        "{from_setup}"
+    );
     // The walk upwards from `helper` stops at the ambiguous `setup` and says so.
     let from_helper = at("4");
     assert!(

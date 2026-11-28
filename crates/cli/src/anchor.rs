@@ -5,13 +5,19 @@
 //! Such an occurrence holds every definition in it, so it is not "at" a
 //! position inside one of them: that definition is what was asked about.
 
-use crate::store::{SemanticFact, SymbolRow};
-use std::collections::BTreeSet;
+use crate::store::{self, SemanticFact, SymbolRow};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::rc::Rc;
+
+use crate::syntax::{classify, language_name, parse_source, FileKind};
 
 const DEF_ROLE: u32 = 0x1;
 
 /// A position in source that is byte-identical to the indexed file.
 pub(crate) struct Position<'a> {
+    pub path: &'a str,
     pub source: &'a [u8],
     pub offset: usize,
     pub defs: &'a [SymbolRow],
@@ -33,14 +39,72 @@ pub(crate) fn short_name(definition: &SymbolRow) -> Option<&str> {
     Some(last.rsplit('.').next().unwrap_or(last)).filter(|n| !n.is_empty())
 }
 
-/// The definition occurrences that own `definition`: they cover its name, lie
-/// inside it, and lie in no definition nested in it. The flag says that a
-/// same-named occurrence sits in a nested one. `facts` must belong to `source`.
+/// What `syntax::FileFacts::identifiers` holds for one file.
+type Identifiers = Rc<Vec<(usize, usize, usize, usize)>>;
+
+#[derive(Default)]
+struct Parsed {
+    holders: usize,
+    files: BTreeMap<(&'static str, String), Identifiers>,
+}
+
+thread_local! {
+    static PARSED: RefCell<Parsed> = RefCell::default();
+}
+
+/// Held for one operation, which runs on one thread: a file is parsed once
+/// however many of its anchors the operation looks at. Dropping the last holder
+/// forgets everything, so nothing outlives the operation.
+pub(crate) struct ParseOnce(());
+
+impl ParseOnce {
+    pub(crate) fn hold() -> Self {
+        PARSED.with(|parsed| parsed.borrow_mut().holders += 1);
+        Self(())
+    }
+}
+
+impl Drop for ParseOnce {
+    fn drop(&mut self) {
+        PARSED.with(|parsed| {
+            let mut parsed = parsed.borrow_mut();
+            parsed.holders -= 1;
+            if parsed.holders == 0 {
+                parsed.files.clear();
+            }
+        });
+    }
+}
+
+fn identifiers(path: &str, source: &[u8]) -> Identifiers {
+    let FileKind::Supported(language) = classify(Path::new(path)) else {
+        return Rc::default();
+    };
+    let key = (language_name(language), store::content_digest(source));
+    if let Some(known) = PARSED.with(|parsed| parsed.borrow().files.get(&key).cloned()) {
+        return known;
+    }
+    let found: Identifiers = Rc::new(parse_source(language, source).identifiers);
+    PARSED.with(|parsed| {
+        let mut parsed = parsed.borrow_mut();
+        if parsed.holders > 0 {
+            parsed.files.insert(key, found.clone());
+        }
+    });
+    found
+}
+
+/// The definition occurrences that own `definition`: they stand on the
+/// identifier it declares, and in no definition nested in it. The same text
+/// elsewhere in it (a local, a nested item) proves nothing. The flag says that
+/// a same-named occurrence sits in a nested definition. `facts` and `source`
+/// must be the current bytes of `path`.
 pub(crate) fn owned<'a>(
     facts: impl IntoIterator<Item = &'a SemanticFact>,
     defs: &[SymbolRow],
     definition: &SymbolRow,
     source: &[u8],
+    path: &str,
 ) -> (Vec<&'a SemanticFact>, bool) {
     let mut found = Vec::new();
     let mut nested_same_name = false;
@@ -48,6 +112,7 @@ pub(crate) fn owned<'a>(
         return (found, nested_same_name);
     };
     let width = definition.byte_end.saturating_sub(definition.byte_start);
+    let mut declared: Option<Identifiers> = None;
     for fact in facts {
         let own = fact.roles & DEF_ROLE != 0
             && fact.symbol_uri.is_some()
@@ -66,7 +131,15 @@ pub(crate) fn owned<'a>(
         });
         if nested {
             nested_same_name = true;
-        } else {
+        } else if declared
+            .get_or_insert_with(|| identifiers(path, source))
+            .contains(&(
+                definition.byte_start,
+                definition.byte_end,
+                fact.byte_start,
+                fact.byte_end,
+            ))
+        {
             found.push(fact);
         }
     }
@@ -93,7 +166,7 @@ pub(crate) fn select<'a>(
         if let Some((p, found)) = &at {
             // Overlapping definitions stay for the syntax fallback to refuse.
             if let [only] = found[..] {
-                let (own, _) = owned(usable, p.defs, only, p.source);
+                let (own, _) = owned(usable, p.defs, only, p.source, p.path);
                 let places: BTreeSet<_> = own.iter().map(|f| (f.byte_start, f.byte_end)).collect();
                 if places.len() == 1 {
                     rest = own;
@@ -125,4 +198,29 @@ fn narrowest<T>(items: impl IntoIterator<Item = T>, width: impl Fn(&T) -> usize)
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_parsed_once_per_operation_and_forgotten_after_it() {
+        let source = b"fn f() {}\n";
+        let parsed = || identifiers("a.rs", source);
+        assert!(!Rc::ptr_eq(&parsed(), &parsed()), "nothing is kept outside");
+        let first = {
+            let _outer = ParseOnce::hold();
+            let first = parsed();
+            {
+                let _inner = ParseOnce::hold();
+                assert!(Rc::ptr_eq(&first, &parsed()));
+            }
+            assert!(Rc::ptr_eq(&first, &parsed()), "an inner holder keeps it");
+            first
+        };
+        let _next = ParseOnce::hold();
+        assert!(!Rc::ptr_eq(&first, &parsed()), "the last holder forgets");
+        assert_eq!(*first, vec![(0, 9, 3, 4)]);
+    }
 }

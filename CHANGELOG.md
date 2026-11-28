@@ -42,12 +42,20 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 - With a SCIP import whose producer gives a module a definition as wide as its file, an anchor at
   the start of a definition (the position `search` returns and a name selector uses) answered for
   the module. It now answers for the definition: by its own identity when exactly one definition
-  occurrence of its name belongs to it, else by syntax. The latter includes a definition that
-  holds a local binding of its own name. This applies to `callers`, `callees`, `trace`, `impact`,
-  `context`, `packet`, `knowledge bind`, `docs scan`/`ingest` and `semantic query`; stored edges
-  are unchanged. A `--symbol` naming the module at such a position is refused. A knowledge binding
+  occurrence stands on the identifier it declares, else by syntax (`semantic query` refuses). This
+  applies to `callers`, `callees`, `trace`, `impact`, `context`, `packet`, `knowledge bind`,
+  `docs scan`/`ingest` and `semantic query`; stored edges are unchanged. A `--symbol` naming the module at such a position is refused. A knowledge binding
   made there by an older binary holds the module identity and no longer matches the definition;
   bind it again.
+- A definition's identity is no longer taken from another item that only shares its name. When the
+  producer recorded no occurrence on a definition's identifier, `docs scan`/`ingest` (in 0.3.0 as
+  well) took a local variable or nested item of the same name inside it. **Bindings already written
+  that way stay stored and are not migrated:** in `riltra knowledge export`, look at the code
+  bindings with a `semantic` anchor (those made by `docs ingest` have a provenance starting with
+  `docs-ingest:`); where the stored symbol is not the definition at that position,
+  `riltra knowledge unbind` it and bind again.
+- `semantic query` no longer answers from the first of several occurrences at one place. Two
+  symbols there, or one symbol from two imports, are refused as the graph commands refuse them.
 
 ## [0.3.0] - 2026-11-26
 

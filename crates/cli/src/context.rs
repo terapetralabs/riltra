@@ -182,6 +182,7 @@ pub(crate) fn query_pinned_with_hook(
     request: &ContextRequest<'_>,
     between_resolutions: impl FnOnce(&rusqlite::Transaction<'_>),
 ) -> Result<ContextResult, PinnedContextError> {
+    let _parse_once = crate::anchor::ParseOnce::hold();
     let (canon, rel) = validate_request(root, request).map_err(PinnedContextError::Path)?;
     let (trace, facts, name_occurrence) =
         read_code_tx(tx, repo, &canon, &rel, request, || {}, between_resolutions)?;

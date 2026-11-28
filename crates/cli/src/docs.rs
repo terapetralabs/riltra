@@ -671,7 +671,8 @@ pub(crate) fn prove_anchor(
             accepted.push(fact);
         }
     }
-    let (owned, nested_same_name) = crate::anchor::owned(accepted, &defs, definition, source);
+    let (owned, nested_same_name) =
+        crate::anchor::owned(accepted, &defs, definition, source, validated);
     if owned.len() > 1 {
         return Ok(Proof::Unproven(
             "two or more occurrences own this definition".to_string(),
@@ -1686,6 +1687,7 @@ pub fn scan(
     root: &Path,
     paths_in: &[String],
 ) -> Result<String, (i32, String)> {
+    let _parse_once = crate::anchor::ParseOnce::hold();
     let canon = paths::canonical_root(root).map_err(storage)?;
     let (docs, doc_omitted) = discover(&canon, paths_in)?;
     let mut contents = Vec::with_capacity(docs.len());
@@ -2537,6 +2539,7 @@ fn write_all(
 /// `riltra docs ingest --repo <name> --input -` (D6). Writes candidate records and their
 /// code bindings; nothing is confirmed or verified.
 pub fn ingest(home: &Path, repo: &str, root: &Path, input: &[u8]) -> Result<String, Fail> {
+    let _parse_once = crate::anchor::ParseOnce::hold();
     let items = parse_ingest(input)?;
     let canon = paths::canonical_root(root).map_err(storage)?;
     let entry = registry::RepoEntry {

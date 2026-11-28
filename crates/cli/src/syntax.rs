@@ -128,6 +128,9 @@ pub struct Fact {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileFacts {
+    /// For each definition, `(start, end, name_start, name_end)`: where its own
+    /// identifier stands. Never stored; an anchor proof reads it.
+    pub identifiers: Vec<(usize, usize, usize, usize)>,
     pub language: Language,
     pub bytes: usize,
     pub definitions: Vec<Fact>,
@@ -255,32 +258,37 @@ fn span_of(node: tree_sitter::Node) -> (Span, usize, usize) {
 }
 
 /// Name child via the `name` field, else the first identifier-like child.
-fn def_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+fn def_name_node<'t>(node: tree_sitter::Node<'t>, src: &[u8]) -> Option<tree_sitter::Node<'t>> {
     // `property` names a JS class field (`m = () => {}`).
-    if let Some(n) = node
-        .child_by_field_name("name")
+    node.child_by_field_name("name")
         .or_else(|| node.child_by_field_name("property"))
-    {
-        if let Some(t) = node_text(n, src) {
-            return Some(t.to_string());
-        }
+        .filter(|n| node_text(*n, src).is_some())
+        .or_else(|| {
+            (0..node.named_child_count())
+                .filter_map(|i| node.named_child(i))
+                .find(|child| {
+                    matches!(
+                        child.kind(),
+                        "identifier" | "type_identifier" | "property_identifier"
+                    ) && node_text(*child, src).is_some()
+                })
+        })
+}
+
+fn def_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    def_name_node(node, src).and_then(|n| node_text(n, src).map(str::to_string))
+}
+
+/// Record that the definition spanning `node` declares the identifier `name`.
+fn declares(facts: &mut FileFacts, node: tree_sitter::Node, name: Option<tree_sitter::Node>) {
+    if let Some(name) = name {
+        facts.identifiers.push((
+            node.start_byte(),
+            node.end_byte(),
+            name.start_byte(),
+            name.end_byte(),
+        ));
     }
-    for i in 0..node.named_child_count() {
-        let Some(child) = node.named_child(i) else {
-            continue;
-        };
-        if child.is_named()
-            && matches!(
-                child.kind(),
-                "identifier" | "type_identifier" | "property_identifier"
-            )
-        {
-            if let Some(t) = node_text(child, src) {
-                return Some(t.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// C/C++ declarator chain: `function_declarator`/`pointer`/`parenthesized`
@@ -534,6 +542,7 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
 
 fn push_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, src: &[u8]) {
     let (span, byte_start, byte_end) = span_of(node);
+    declares(facts, node, def_name_node(node, src));
     facts.definitions.push(Fact {
         kind,
         name: def_name(node, src),
@@ -582,6 +591,11 @@ fn macro_headed_tag(node: tree_sitter::Node<'_>) -> Option<&'static str> {
 
 fn push_c_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, src: &[u8]) {
     let (span, byte_start, byte_end) = span_of(node);
+    let mut identifier = c_name_node(node);
+    while let Some(qualified) = identifier.filter(|n| n.kind() == "qualified_identifier") {
+        identifier = qualified.child_by_field_name("name");
+    }
+    declares(facts, node, identifier);
     facts.definitions.push(Fact {
         kind,
         name: c_function_name(node, src),
@@ -645,11 +659,12 @@ fn push_struct(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     if parent.kind() != "type_definition" {
         return;
     }
-    let name = parent
+    let identifier = parent
         .child_by_field_name("declarator")
-        .filter(|d| matches!(d.kind(), "identifier" | "type_identifier"))
-        .and_then(|d| node_text(d, src).map(|s| s.to_string()));
+        .filter(|d| matches!(d.kind(), "identifier" | "type_identifier"));
+    let name = identifier.and_then(|d| node_text(d, src).map(|s| s.to_string()));
     let (span, byte_start, byte_end) = span_of(parent);
+    declares(facts, parent, identifier);
     facts.definitions.push(Fact {
         kind: "struct",
         name,
@@ -690,11 +705,13 @@ fn push_tagged(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Nod
         .filter(|p| p.kind() == "type_definition")
         .and_then(|p| p.child_by_field_name("declarator").map(|d| (p, d)))
         .filter(|(_, d)| node_text(*d, src) == tag);
-    let Some((typedef, _)) = alias_node else {
+    let Some((typedef, alias)) = alias_node else {
         push_def(facts, kind, node, src);
         return;
     };
     let (span, byte_start, byte_end) = span_of(typedef);
+    declares(facts, typedef, node.child_by_field_name("name"));
+    declares(facts, typedef, Some(alias));
     facts.definitions.push(Fact {
         kind,
         name: tag.map(|s| s.to_string()),
@@ -741,6 +758,7 @@ fn push_typedef(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         return;
     }
     let (span, byte_start, byte_end) = span_of(node);
+    declares(facts, node, Some(declarator));
     facts.definitions.push(Fact {
         kind: "type",
         name: node_text(declarator, src).map(|s| s.to_string()),
@@ -767,6 +785,7 @@ fn push_field(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
             continue;
         };
         let (span, byte_start, byte_end) = span_of(name_node);
+        declares(facts, name_node, Some(name_node));
         facts.definitions.push(Fact {
             kind: "field",
             name: node_text(name_node, src).map(str::to_string),
@@ -2083,6 +2102,7 @@ pub fn parse_source(lang: Language, src: &[u8]) -> FileFacts {
         language: lang,
         bytes: src.len(),
         definitions: Vec::new(),
+        identifiers: Vec::new(),
         imports: Vec::new(),
         calls: Vec::new(),
         reference_occurrences: Vec::new(),
@@ -2267,6 +2287,69 @@ mod tests {
                 vec![("function", Some("gen")), ("function", Some("exported"))],
                 "{lang:?}"
             );
+        }
+    }
+
+    /// Every definition a language records names the identifier it declares:
+    /// an occurrence proves the definition only there.
+    #[test]
+    fn every_definition_reports_its_declaration_identifier() {
+        let sources: &[(Language, &str)] = &[
+            (Language::Python, "class A(object):\n    def m(self):\n        pass\n\n@dec\ndef f():\n    pass\n"),
+            (Language::JavaScript, "function f() {}\nfunction* g() {}\nclass A { m() {} x = () => {} }\nconst h = () => {};\n"),
+            (Language::TypeScript, "interface I {}\ntype T = number;\nenum E { A }\nabstract class A { private m(): void {} y = function () {} }\nexport const h = () => {};\n"),
+            (Language::Tsx, "function View() { return <div/>; }\n"),
+            (Language::Rust, "pub struct S;\nenum E { A }\ntrait T { fn s(&self); }\ntype U = u32;\nimpl S { fn r#match(&self) {} }\n"),
+            (Language::Go, "package p\ntype S struct{}\ntype I interface{}\ntype A = int\nfunc F() {}\nfunc (s S) M() {}\n"),
+            (Language::Java, "class A { A() {} void m() {} }\ninterface I {}\nenum E { X }\nrecord R(int a) { R {} }\n@interface N {}\n"),
+            (Language::C, "struct S { int a; };\ntypedef struct { int b; } T;\ntypedef struct U { int c; } U;\nenum E { X };\ntypedef int N;\nint *f(void) { return 0; }\n"),
+            (Language::Cpp, "class C { int member; void m() {} };\nvoid C::n() {}\nenum class E { X };\nusing A = int;\nnamespace ns { struct S {}; }\nint *ptr_fn(int *x) { return x; }\n"),
+        ];
+        let mut sources: Vec<(Language, String)> = sources
+            .iter()
+            .map(|(language, source)| (*language, source.to_string()))
+            .collect();
+        // The multilingual corpus as well, whatever it holds.
+        let inline = sources.len();
+        let mut pending =
+            vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m6")];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            } else if let FileKind::Supported(language) = classify(&path) {
+                sources.push((language, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+        assert!(
+            sources.len() - inline > 20,
+            "corpus files: {}",
+            sources.len() - inline
+        );
+        for (index, (language, source)) in sources.iter().enumerate() {
+            let facts = parse_source(*language, source.as_bytes());
+            assert!(
+                index >= inline || !facts.definitions.is_empty(),
+                "{language:?}"
+            );
+            for def in facts
+                .definitions
+                .iter()
+                .filter(|d| index < inline || d.name.is_some())
+            {
+                let name = def.name.as_deref().unwrap_or_default();
+                let short = name.rsplit("::").next().unwrap_or(name);
+                let found: Vec<&str> = facts
+                    .identifiers
+                    .iter()
+                    .filter(|i| (i.0, i.1) == (def.byte_start, def.byte_end))
+                    .map(|i| &source[i.2..i.3])
+                    .collect();
+                assert!(
+                    !found.is_empty() && found.iter().all(|text| *text == short),
+                    "{language:?} {} {name:?}: {found:?}",
+                    def.kind
+                );
+            }
         }
     }
 

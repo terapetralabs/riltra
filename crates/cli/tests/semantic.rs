@@ -2679,3 +2679,157 @@ fn anchor_a_nested_same_named_definition_keeps_its_occurrence() {
     let anchor = k2_anchor(&h, "18", "3");
     assert!(names_symbol(&anchor, INNER_SAME), "{anchor}");
 }
+
+// ---------------------------------------------------------------------------
+// Item 5 K2 correction: only an occurrence on the declaration's own identifier
+// proves a definition, and a semantic query never picks among two answers.
+// ---------------------------------------------------------------------------
+
+// 1-based: `name` 1..4 (a local of the same name on line 2), `caller` 5..7,
+// `outer` 8..10 holds a non-local item named `outer`, `both` 11..14 has an
+// occurrence on its identifier and a local of the same name.
+const SHADOW: &str = "function name() {\n  const name = 1;\n  return name;\n}\nfunction caller() {\n  name();\n}\nfunction outer() {\n  const outer = 2;\n}\nfunction both() {\n  const both = 3;\n  return both;\n}\n";
+const SHADOW_STATIC: &str = "scip-test test test-pkg 1.0.0 a/outer().outer.";
+const BOTH: &str = "scip-test test test-pkg 1.0.0 a/both().";
+
+fn shadow_repo(h: &Path) {
+    let dir = repo_with(h, "sem", &[("src/a.ts", SHADOW)]);
+    let occurrences = [
+        module_occurrence(MOD, 14),
+        occurrence("local 0", 0x1, 1, 8, 12),
+        occurrence("local 0", 0x0, 2, 9, 13),
+        occurrence(USER, 0x1, 4, 9, 15),
+        occurrence(SHADOW_STATIC, 0x1, 8, 8, 13),
+        occurrence(BOTH, 0x1, 10, 9, 13),
+        occurrence("local 1", 0x1, 11, 8, 12),
+    ];
+    let symbols = [
+        symbol_info(MOD, "a"),
+        symbol_info("local 0", "name"),
+        symbol_info(USER, "caller"),
+        symbol_info(SHADOW_STATIC, "outer"),
+        symbol_info(BOTH, "both"),
+        symbol_info("local 1", "both"),
+    ];
+    let payload = index_bytes(
+        &dir,
+        &[document("src/a.ts", &occurrences, &symbols, false)],
+        &[],
+    );
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    do_index(h);
+    do_import(h, &scip.to_string_lossy());
+}
+
+fn graph_at(h: &Path, command: &str, selector: &[&str]) -> String {
+    let mut args = vec![command, "--repo", "sem"];
+    args.extend_from_slice(selector);
+    let (code, out, err) = run(h, &args);
+    assert_eq!(code, 0, "{command} {selector:?}: {err}");
+    out
+}
+
+#[test]
+fn anchor_a_local_of_the_same_name_is_not_the_definition() {
+    let h = home("anchor-shadow");
+    shadow_repo(&h);
+    // The definition start, its identifier, and the name selector.
+    let selectors: [&[&str]; 3] = [
+        &["--path", "src/a.ts", "--line", "1", "--col", "1"],
+        &["--path", "src/a.ts", "--line", "1", "--col", "10"],
+        &["--target", "name", "--in", "src/a.ts"],
+    ];
+    for selector in selectors {
+        for command in ["callers", "callees", "impact", "trace"] {
+            let out = graph_at(&h, command, selector);
+            assert!(
+                anchor_of(&out).contains("syntax-fallback"),
+                "{command} {selector:?}: {out}"
+            );
+        }
+    }
+    // A non-local item of the same name is no better.
+    let out = graph_at(
+        &h,
+        "callers",
+        &["--path", "src/a.ts", "--line", "8", "--col", "1"],
+    );
+    assert!(anchor_of(&out).contains("syntax-fallback"), "{out}");
+    for (line, col) in [("1", "1"), ("1", "10"), ("8", "1")] {
+        let (code, out) = dup_query(&h, line, col);
+        assert_ne!(code, 0, "{line}:{col}: {out}");
+        assert!(out.contains("no semantic occurrence here"), "{out}");
+    }
+    // The local itself is still answered where it stands.
+    let (code, out) = dup_query(&h, "2", "9");
+    assert_eq!(code, 0, "{out}");
+}
+
+#[test]
+fn anchor_the_occurrence_on_the_identifier_wins_over_a_local() {
+    let h = home("anchor-shadow-both");
+    shadow_repo(&h);
+    let anchor = k2_anchor(&h, "11", "1");
+    assert!(names_symbol(&anchor, BOTH), "{anchor}");
+}
+
+#[test]
+fn anchor_knowledge_bind_never_stores_a_shadowing_local() {
+    let h = home("anchor-shadow-bind");
+    shadow_repo(&h);
+    run_stdin(
+        &h,
+        &["knowledge", "create", "--repo", "sem", "--input", "-"],
+        r#"{"id":"d1","kind":"decision","title":"T","body":"b","status":"active","author":"a","evidence":[]}"#,
+    );
+    let out = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "sem",
+            "--path",
+            "src/a.ts",
+            "--line",
+            "1",
+            "--col",
+            "1",
+            "--input",
+            "-",
+        ],
+        r#"{"record_id":"d1","record_revision":1,"relation":"documents","author":"f","rationale":"f","provenance":"f"}"#,
+    );
+    assert!(
+        !out.contains("local 0") && !out.contains("\"semantic\""),
+        "{out}"
+    );
+}
+
+/// Two imports answer at the same place: the query refuses as the graph does.
+#[test]
+fn anchor_semantic_query_refuses_two_answers_at_one_place() {
+    for (tag, second, reason) in [
+        ("anchor-tie-uris", OUTER, "ambiguous anchor identities"),
+        ("anchor-tie-imports", TARGET, "same identity from 2 imports"),
+    ] {
+        let h = home(tag);
+        let dir = repo_with(&h, "sem", &[("src/a.ts", "function target() {\n}\n")]);
+        do_index(&h);
+        for (tool, uri) in [("tool-one", TARGET), ("tool-two", second)] {
+            let occurrences = [module_occurrence(MOD, 2), occurrence(uri, 0x1, 0, 9, 15)];
+            let symbols = [symbol_info(MOD, "m"), symbol_info(uri, "target")];
+            let doc = document("src/a.ts", &occurrences, &symbols, false);
+            let payload = index_bytes_with_tool(&dir, tool, &[doc], &[]);
+            let scip = dir.join(format!("{tool}.scip"));
+            std::fs::write(&scip, &payload).unwrap();
+            do_import(&h, &scip.to_string_lossy());
+        }
+        for col in ["1", "10"] {
+            let (code, out) = dup_query(&h, "1", col);
+            assert_ne!(code, 0, "{tag} col {col}: {out}");
+            assert!(out.contains(reason), "{tag} col {col}: {out}");
+        }
+    }
+}

@@ -349,6 +349,7 @@ pub(crate) fn query_conn_classified_with_hooks(
     after_anchor: impl FnMut(usize),
     between_resolutions: impl FnMut(usize, &rusqlite::Transaction<'_>),
 ) -> Result<PacketResult, PacketQueryError> {
+    let _parse_once = crate::anchor::ParseOnce::hold();
     query_conn_inner(
         conn,
         home,

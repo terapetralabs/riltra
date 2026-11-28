@@ -2337,3 +2337,43 @@ fn scan_does_not_propose_an_ambiguous_symbol() {
         .collect();
     assert_eq!(names, vec!["sub"], "{report}");
 }
+
+/// Item 5 K2 correction: `add` has no occurrence on its identifier, only a variable
+/// of the same name inside it; neither scan nor ingest may bind that variable.
+#[test]
+fn scan_and_ingest_never_bind_a_shadowing_local() {
+    let Some(f) = fixture(
+        "shadow",
+        &[
+            (
+                "pkg/calc.py",
+                "def add(a, b):\n    add = a + b\n    return add\n",
+            ),
+            ("docs/adr/0001.md", DOC),
+        ],
+    ) else {
+        return;
+    };
+    f.index();
+    // A `local` symbol without symbol information is dropped on import, so the
+    // variable carries a global symbol here.
+    const SHADOW: &str = "scip-kt test pkg 1.0.0 pkg/calc.py/add().add.";
+    f.import(&[(
+        "pkg/calc.py",
+        vec![(SHADOW, 1, 4, 7, DEF_ROLE), (SHADOW, 2, 11, 14, 0)],
+    )]);
+    let report = f.scan_json(&[]);
+    let p = proposal_of(&report, "Storage@1", "add").clone();
+    assert_eq!(p["target"]["anchor"]["kind"], "syntax-fallback", "{p}");
+    assert!(!p["target"].to_string().contains("add()."), "{p}");
+    let input = input_of(vec![item_of(
+        "doc-storage",
+        &p,
+        "decision",
+        vec![binding_of(&p["target"], "documents add")],
+    )]);
+    let out = f.ingest(&input);
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let bound = f.at("pkg/calc.py", "1", "1").to_string();
+    assert!(!bound.contains("add()."), "{bound}");
+}

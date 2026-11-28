@@ -554,6 +554,7 @@ pub(crate) fn callers(
     path: &str,
     defs: &[store::SymbolSpan],
 ) -> Result<CallerFinds, String> {
+    let _parse_once = crate::anchor::ParseOnce::hold();
     let mut finds = CallerFinds {
         companions: Vec::new(),
         gaps: Vec::new(),

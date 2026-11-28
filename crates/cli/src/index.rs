@@ -1352,6 +1352,36 @@ pub(crate) fn import_is_stale(
     Ok(verification == "Stale")
 }
 
+/// The one identity a position's narrowest occurrences name. Two symbols, or one
+/// symbol from two imports, are refused: neither is picked.
+fn one_identity(found: &[&store::SemanticFact]) -> Result<(String, i64), String> {
+    let mut uris = BTreeSet::new();
+    let mut imports = BTreeSet::new();
+    for fact in found {
+        let uri = fact
+            .symbol_uri
+            .as_deref()
+            .ok_or_else(|| "occurrence has no symbol identity: unresolved".to_string())?;
+        uris.insert(uri);
+        imports.insert(fact.import_id);
+    }
+    if uris.len() > 1 {
+        let list: Vec<&str> = uris.into_iter().collect();
+        return Err(format!("ambiguous anchor identities: {}", list.join(", ")));
+    }
+    if imports.len() > 1 {
+        return Err(format!(
+            "ambiguous anchor: same identity from {} imports, resolve with a rebuild",
+            imports.len()
+        ));
+    }
+    uris.into_iter()
+        .next()
+        .zip(imports.into_iter().next())
+        .map(|(uri, import_id)| (uri.to_string(), import_id))
+        .ok_or_else(|| "no semantic occurrence here".to_string())
+}
+
 /// Single-hop semantic query over stored SCIP facts. Go to Definition
 /// resolves the enclosing occurrence to its symbol identity and returns the
 /// Definition-role rows; `--refs` returns the reference-role rows sharing
@@ -1398,6 +1428,7 @@ pub fn semantic_query(
     let defs = store::symbols_at(&tx, snapshot.id, &validated)?;
     let position = source.as_ref().and_then(|source| {
         Some(crate::anchor::Position {
+            path: &validated,
             source,
             offset: byte_offset_of(source, line0, col0)?,
             defs: &defs,
@@ -1408,13 +1439,9 @@ pub fn semantic_query(
             .as_ref()
             .is_some_and(|raw| store::content_digest(raw) == f.file_digest)
     });
-    let anchor = *crate::anchor::select(containing, usable, position.as_ref())
-        .first()
-        .ok_or_else(|| "no semantic occurrence here".to_string())?;
-    let uri = anchor
-        .symbol_uri
-        .clone()
-        .ok_or_else(|| "occurrence has no symbol identity: unresolved".to_string())?;
+    let found = crate::anchor::select(containing, usable, position.as_ref());
+    let (uri, _) = one_identity(&found)?;
+    let anchor = found[0];
     if let Some(why) =
         crate::identity::at_document(&tx, anchor.import_id, &uri, &facts)?.refusal(&uri)
     {
@@ -1739,6 +1766,7 @@ pub(crate) fn resolve_edge_anchor_classified(
         .filter(|_| indexed.is_some_and(|(_, digest)| current_digest.as_ref() == Some(digest)))
         .and_then(|source| {
             Some(crate::anchor::Position {
+                path: validated,
                 source,
                 offset: byte_offset_of(source, line0, col0)?,
                 defs: &defs,
@@ -1756,39 +1784,7 @@ pub(crate) fn resolve_edge_anchor_classified(
     // Why the definition at the position is answered by syntax, not by symbol.
     let mut doubt: Option<String> = None;
     if !best.is_empty() {
-        let mut uris = BTreeSet::new();
-        for fact in &best {
-            match fact.symbol_uri.as_deref() {
-                Some(uri) => {
-                    uris.insert(uri.to_string());
-                }
-                None => {
-                    return Err(GraphQueryError::Anchor(
-                        "occurrence has no symbol identity: unresolved".to_string(),
-                    ));
-                }
-            }
-        }
-        if uris.len() > 1 {
-            let mut list: Vec<&str> = uris.iter().map(String::as_str).collect();
-            list.sort();
-            return Err(GraphQueryError::Anchor(format!(
-                "ambiguous anchor identities: {}",
-                list.join(", ")
-            )));
-        }
-        let uri = uris.into_iter().next().unwrap_or_default();
-        let mut imports = BTreeSet::new();
-        for fact in &best {
-            imports.insert(fact.import_id);
-        }
-        if imports.len() > 1 {
-            return Err(GraphQueryError::Anchor(format!(
-                "ambiguous anchor: same identity from {} imports, resolve with a rebuild",
-                imports.len()
-            )));
-        }
-        let import_id = best[0].import_id;
+        let (uri, import_id) = one_identity(&best).map_err(GraphQueryError::Anchor)?;
         let found = crate::identity::at_document(tx, import_id, &uri, &facts)?;
         if let Some(why) = found.refusal(&uri) {
             if !best.iter().any(|f| f.roles & 1 != 0) {
@@ -3384,6 +3380,7 @@ pub(crate) fn graph_query_tx_classified(
     impact: bool,
     candidates: bool,
 ) -> Result<TraceQueryOut, GraphQueryError> {
+    let _parse_once = crate::anchor::ParseOnce::hold();
     let snapshot = store::latest_snapshot(tx)?.ok_or("no snapshot: index the repository first")?;
     // `pinned` is a test seam that runs with the snapshot already pinned. Its
     // duration is not query work, so it must not consume the traversal budget.

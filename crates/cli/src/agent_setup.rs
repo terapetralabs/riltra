@@ -1855,6 +1855,19 @@ mod tests {
         .is_err());
     }
 
+    // Lets the pipe holder go and waits for it, also when an assertion panics first.
+    struct ReleaseHolder(PathBuf);
+
+    impl Drop for ReleaseHolder {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0.with_extension("release"), b"");
+            let done_by = Instant::now() + Duration::from_secs(3);
+            while !self.0.exists() && Instant::now() < done_by {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
     #[test]
     fn setup_executor_bounds_output_and_reaps_timed_out_stub() {
         let root = crate::testutil::tmpdir("agent-setup-apply-process");
@@ -1895,13 +1908,16 @@ mod tests {
             },
         ];
         let started = std::time::Instant::now();
-        assert!(run_setup_process(
-            &executable,
-            &args,
-            &timed,
-            std::time::Duration::from_millis(100)
-        )
-        .is_err());
+        assert_eq!(
+            run_setup_process(
+                &executable,
+                &args,
+                &timed,
+                std::time::Duration::from_millis(100)
+            )
+            .err(),
+            Some("client process timed out and was stopped")
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
 
         let holder_marker = root.join("holder-finished");
@@ -1919,20 +1935,22 @@ mod tests {
                 value: holder_marker.display().to_string(),
             },
         ];
-        let started = std::time::Instant::now();
-        assert!(run_setup_process(
-            &executable,
-            &args,
-            &held,
-            std::time::Duration::from_millis(200)
-        )
-        .is_err());
-        assert!(started.elapsed() < std::time::Duration::from_millis(500));
-        let done_by = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !holder_marker.exists() && std::time::Instant::now() < done_by {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(holder_marker.exists(), "test descendant exits on its own");
+        let holder = ReleaseHolder(holder_marker.clone());
+        // The timeout only has to cover process startup: the stub must have spawned the
+        // holder and exited for the call to end on the held pipes.
+        assert_eq!(
+            run_setup_process(&executable, &args, &held, std::time::Duration::from_secs(5)).err(),
+            Some("client output pipes did not close before the deadline")
+        );
+        assert!(
+            !holder_marker.exists(),
+            "the call returned while the descendant still held the pipes"
+        );
+        drop(holder);
+        assert!(
+            holder_marker.exists(),
+            "test descendant exits once released"
+        );
     }
 
     #[test]
@@ -1997,8 +2015,12 @@ mod tests {
     #[test]
     fn setup_executor_pipe_holder_stub() {
         if std::env::var("RILTRA_TEST_STUB_MODE").as_deref() == Ok("hold") {
-            std::thread::sleep(std::time::Duration::from_millis(750));
-            let marker = std::env::var_os("RILTRA_TEST_STUB_HOLDER_MARKER").unwrap();
+            let marker = PathBuf::from(std::env::var_os("RILTRA_TEST_STUB_HOLDER_MARKER").unwrap());
+            // Holds the inherited pipes until released; the cap only ends an orphan.
+            let give_up = Instant::now() + Duration::from_secs(30);
+            while !marker.with_extension("release").exists() && Instant::now() < give_up {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             fs::write(marker, b"done").unwrap();
         }
     }

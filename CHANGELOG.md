@@ -27,6 +27,14 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 ### Fixed
 
+- A Rust turbofish call (`row.get::<_, i64>(0)`, `parse::<u32>()`) was recorded under its type
+  argument list, so `callers` of `get` or `parse` did not list it and a SCIP import could not
+  prove it; a reference to a type inside the arguments could instead stand as the callee. The
+  call is now recorded under the called name, and a type argument is only a reference. Candidate
+  lists for functions named like a common generic method (`get`, `collect`, `parse`) get longer,
+  mostly with calls a SCIP import labels `external`; a plain `f::<T>()` is no longer reported as
+  `dynamic`. The parser version changed, so the next `riltra index` rebuilds in full and keeps
+  the SCIP imports it already checked.
 - A SCIP symbol string that names more than one definition (some producers give same-named items
   in different crates of one package the same string) is no longer treated as one symbol. Calls to
   it were reported as `CALLS` with precision `Exact`, also from callers of the other definition.

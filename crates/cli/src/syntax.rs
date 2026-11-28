@@ -1126,7 +1126,9 @@ fn template_name(callee: tree_sitter::Node) -> Option<tree_sitter::Node> {
     }
 }
 
-/// Terminal identifier/property of a callee expression. A callee whose last
+/// Terminal identifier/property of a callee expression. A Rust turbofish
+/// callee (`get::<_, i64>`) is read from its `function` field: the type
+/// arguments are not part of the called name. A callee whose last
 /// name has template arguments takes its terminal from the grammar: the text
 /// after a separator would start inside the arguments (`PatchMatchController>`
 /// for `std::make_shared<mvs::PatchMatchController>`) and the arguments are
@@ -1136,6 +1138,11 @@ fn template_name(callee: tree_sitter::Node) -> Option<tree_sitter::Node> {
 /// ends in a separator or is not valid UTF-8; a plain `foo` is its own
 /// terminal.
 fn terminal_span(src: &[u8], callee: tree_sitter::Node) -> Option<CalleeSpan> {
+    // Only the Rust grammar has this node kind.
+    let callee = match callee.kind() {
+        "generic_function" => callee.child_by_field_name("function")?,
+        _ => callee,
+    };
     if let Some(name) = template_name(callee) {
         return Some(callee_span_of(name));
     }
@@ -2270,6 +2277,45 @@ mod tests {
         let terminal = call.tcallee.as_ref().expect("terminal span recorded");
         assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"process");
         assert!(terminal.byte_start > callee.byte_start);
+    }
+
+    #[test]
+    fn rust_turbofish_terminal_is_the_called_name() {
+        // (call as written, callee as written, called name)
+        let cases = [
+            ("row.get::<_, i64>(0)", "row.get::<_, i64>", "get"),
+            ("parse::<u8>()", "parse::<u8>", "parse"),
+            ("a::b::<u8>()", "a::b::<u8>", "b"),
+            ("<u8 as T>::f::<u8>()", "<u8 as T>::f::<u8>", "f"),
+            (
+                "it\n        .collect::<Vec<_>>()",
+                "it\n        .collect::<Vec<_>>",
+                "collect",
+            ),
+            // Not a generic function: type arguments sit in a scope.
+            ("Vec::<u8>::new()", "Vec::<u8>::new", "new"),
+        ];
+        for (call_text, callee_text, name) in cases {
+            let src = format!("fn host() {{\n    {call_text};\n}}\n");
+            let facts = parse_source(Language::Rust, src.as_bytes());
+            assert_eq!(facts.calls.len(), 1, "{call_text}");
+            let call = &facts.calls[0];
+            let callee = call.callee.as_ref().expect("callee span recorded");
+            assert_eq!(&src[callee.byte_start..callee.byte_end], callee_text);
+            let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+            assert_eq!(
+                &src[terminal.byte_start..terminal.byte_end],
+                name,
+                "{call_text}"
+            );
+            let line_start = src[..terminal.byte_start].rfind('\n').map_or(0, |i| i + 1);
+            let line = src[..terminal.byte_start].matches('\n').count() + 1;
+            assert_eq!(
+                (terminal.start_line as usize, terminal.start_col as usize),
+                (line, terminal.byte_start - line_start + 1),
+                "{call_text}"
+            );
+        }
     }
 
     #[test]

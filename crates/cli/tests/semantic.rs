@@ -2833,3 +2833,218 @@ fn anchor_semantic_query_refuses_two_answers_at_one_place() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Item 5 K3: a Rust turbofish call is recorded under the called name, and a
+// type argument never stands for the callee.
+// ---------------------------------------------------------------------------
+
+const FISH: &str = "pub struct Row;\nimpl Row {\n    pub fn get<T, U>(&self) {}\n}\npub struct Tag;\npub fn parse<T>() {}\npub fn caller(row: Row) {\n    row.get::<Tag, i64>();\n    parse::<Tag>();\n    crate::parse::<Tag>();\n}\n";
+const FISH_GET: &str = "scip-test test test-pkg 1.0.0 Row#get().";
+const FISH_PARSE: &str = "scip-test test test-pkg 1.0.0 parse().";
+const FISH_TAG: &str = "scip-test test test-pkg 1.0.0 Tag#";
+const FISH_CALLER: &str = "scip-test test test-pkg 1.0.0 caller().";
+
+/// An occurrence on the first `needle` of 0-based `line` of `FISH`.
+fn fish_at(symbol: &str, roles: u64, line: usize, needle: &str) -> Vec<u8> {
+    let col = FISH.lines().nth(line).unwrap().find(needle).unwrap() as i64;
+    occurrence(symbol, roles, line as i64, col, col + needle.len() as i64)
+}
+
+/// Index `FISH` and import an artifact for it. `named` puts an occurrence on
+/// each called name; `twice` defines `parse` in a second document too.
+fn fish_repo(h: &Path, named: bool, twice: bool) -> PathBuf {
+    let other = "pub fn parse<T>() {}\n";
+    let mut files = vec![("src/lib.rs", FISH)];
+    if twice {
+        files.push(("src/other.rs", other));
+    }
+    let dir = repo_with(h, "sem", &files);
+    let mut occurrences = vec![
+        fish_at(FISH_GET, 0x1, 2, "get"),
+        fish_at(FISH_TAG, 0x1, 4, "Tag"),
+        fish_at(FISH_PARSE, 0x1, 5, "parse"),
+        fish_at(FISH_CALLER, 0x1, 6, "caller"),
+        fish_at(FISH_TAG, 0x0, 7, "Tag"),
+        fish_at(FISH_TAG, 0x0, 8, "Tag"),
+        fish_at(FISH_TAG, 0x0, 9, "Tag"),
+    ];
+    if named {
+        occurrences.push(fish_at(FISH_GET, 0x0, 7, "get"));
+        occurrences.push(fish_at(FISH_PARSE, 0x0, 8, "parse"));
+        occurrences.push(fish_at(FISH_PARSE, 0x0, 9, "parse"));
+    }
+    let symbols = [
+        symbol_info(FISH_GET, "get"),
+        symbol_info(FISH_TAG, "Tag"),
+        symbol_info(FISH_PARSE, "parse"),
+        symbol_info(FISH_CALLER, "caller"),
+    ];
+    let mut docs = vec![document("src/lib.rs", &occurrences, &symbols, false)];
+    if twice {
+        docs.push(document(
+            "src/other.rs",
+            &[occurrence(FISH_PARSE, 0x1, 0, 7, 12)],
+            &[symbol_info(FISH_PARSE, "parse")],
+            false,
+        ));
+    }
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, index_bytes(&dir, &docs, &[])).unwrap();
+    do_index(h);
+    do_import(h, &scip.to_string_lossy());
+    dir
+}
+
+fn fish_count(h: &Path, filter: &str) -> i64 {
+    db_count(
+        h,
+        "sem",
+        &format!("SELECT COUNT(*) FROM code_edges WHERE {filter}"),
+    )
+}
+
+/// Call sites that carry more than one call row.
+const DOUBLED_SITES: &str = "SELECT COUNT(*) FROM (SELECT 1 FROM code_edges WHERE edge_kind IN ('CALLS','POTENTIAL_CALL') GROUP BY caller_file, caller_sbs, caller_sbe HAVING COUNT(*) > 1)";
+
+/// `callers` of `parse`, anchored on its name.
+fn fish_callers_of_parse(h: &Path) -> String {
+    let (code, out, err) = run(
+        h,
+        &[
+            "callers",
+            "--repo",
+            "sem",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "6",
+            "--col",
+            "8",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    out
+}
+
+#[test]
+fn turbofish_without_scip_is_listed_under_the_called_name() {
+    let h = home("fish-syntax");
+    repo_with(&h, "sem", &[("src/lib.rs", FISH)]);
+    do_index(&h);
+    let named = |name: &str| {
+        fish_count(
+            &h,
+            &format!("edge_kind = 'POTENTIAL_CALL' AND callee_name = '{name}'"),
+        )
+    };
+    assert_eq!((named("get"), named("parse")), (1, 2));
+    assert_eq!(fish_count(&h, "callee_name LIKE '<%'"), 0);
+    let out = fish_callers_of_parse(&h);
+    assert_eq!(out.matches("POTENTIAL_CALL").count(), 2, "{out}");
+}
+
+#[test]
+fn turbofish_calls_are_proven_by_the_occurrence_on_the_name() {
+    let h = home("fish-scip");
+    fish_repo(&h, true, false);
+    let proven =
+        |uri: &str| fish_count(&h, &format!("edge_kind = 'CALLS' AND callee_uri = '{uri}'"));
+    let check = || {
+        assert_eq!((proven(FISH_GET), proven(FISH_PARSE)), (1, 2));
+        assert_eq!(proven(FISH_TAG), 0, "a type argument is not the callee");
+        assert_eq!(db_count(&h, "sem", DOUBLED_SITES), 0);
+        assert_eq!(
+            fish_count(
+                &h,
+                &format!("edge_kind = 'REFERENCES' AND callee_uri = '{FISH_TAG}'"),
+            ),
+            3
+        );
+        let out = fish_callers_of_parse(&h);
+        assert_eq!(out.matches("\"CALLS\"").count(), 2, "{out}");
+    };
+    check();
+    // K1 carry: the rebuild a parser change forces keeps the checked import.
+    let conn = rusqlite::Connection::open(h.join("index").join("sem.db")).unwrap();
+    conn.execute(
+        "UPDATE snapshots SET parser_version = parser_version - 1",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let out = do_index(&h);
+    assert!(out.contains("parser-changed"), "{out}");
+    assert_eq!(
+        db_count(
+            &h,
+            "sem",
+            "SELECT COUNT(*) FROM meta WHERE key LIKE 'semantic_identity:%'"
+        ),
+        1
+    );
+    check();
+}
+
+#[test]
+fn turbofish_to_a_symbol_defined_twice_stays_a_candidate() {
+    let h = home("fish-twice");
+    fish_repo(&h, true, true);
+    assert_eq!(
+        fish_count(
+            &h,
+            "edge_kind = 'POTENTIAL_CALL' AND unresolved = 'ambiguous:2' AND callee_name = 'parse'"
+        ),
+        2
+    );
+    assert_eq!(fish_count(&h, "edge_kind = 'CALLS'"), 1, "only `get`");
+    assert_eq!(db_count(&h, "sem", DOUBLED_SITES), 0);
+}
+
+#[test]
+fn a_type_argument_never_claims_the_call() {
+    // No occurrence on the called names: the syntax candidates stay as they are.
+    let h = home("fish-unnamed");
+    fish_repo(&h, false, false);
+    assert_eq!(fish_count(&h, "edge_kind = 'CALLS'"), 0);
+    assert_eq!(
+        fish_count(
+            &h,
+            "edge_kind = 'POTENTIAL_CALL' AND provider = 'syntax' AND callee_name IN ('get','parse')"
+        ),
+        3
+    );
+    assert_eq!(fish_count(&h, "edge_kind = 'POTENTIAL_CALL'"), 3);
+}
+
+#[test]
+fn a_type_argument_never_claims_an_outer_call_either() {
+    let h = home("fish-chain");
+    let source =
+        "pub struct Tag;\npub fn make<T>() {}\npub fn caller() {\n    make::<Tag>().finish();\n}\n";
+    let dir = repo_with(&h, "sem", &[("src/lib.rs", source)]);
+    let make = "scip-test test test-pkg 1.0.0 make().";
+    // No occurrence for `finish`.
+    let occurrences = [
+        occurrence(FISH_TAG, 0x1, 0, 11, 14),
+        occurrence(make, 0x1, 1, 7, 11),
+        occurrence(make, 0x0, 3, 4, 8),
+        occurrence(FISH_TAG, 0x0, 3, 11, 14),
+    ];
+    let symbols = [symbol_info(FISH_TAG, "Tag"), symbol_info(make, "make")];
+    let doc = document("src/lib.rs", &occurrences, &symbols, false);
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, index_bytes(&dir, &[doc], &[])).unwrap();
+    do_index(&h);
+    do_import(&h, &scip.to_string_lossy());
+    assert_eq!(
+        fish_count(
+            &h,
+            "callee_name = 'finish' AND provider = 'syntax' AND edge_kind = 'POTENTIAL_CALL'"
+        ),
+        1
+    );
+    assert_eq!(fish_count(&h, "unresolved = 'target-mismatch'"), 0);
+    assert_eq!(fish_count(&h, "edge_kind = 'REFERENCES'"), 1, "Tag");
+    assert_eq!(db_count(&h, "sem", DOUBLED_SITES), 0);
+}

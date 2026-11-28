@@ -179,7 +179,7 @@
                 "content_identity": "564596e4b180d905",
                 "id": 1,
                 "provider": "trace",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=dbe2e73f1b0965ab|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=796eb88f05c79380|nonce=<nonce>",
                 "version": "1.0"
               }
             ],
@@ -243,7 +243,7 @@
                 "content_identity": "564596e4b180d905",
                 "id": 1,
                 "provider": "trace",
-                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=dbe2e73f1b0965ab|nonce=<nonce>",
+                "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=796eb88f05c79380|nonce=<nonce>",
                 "version": "1.0"
               }
             ],
@@ -281,7 +281,7 @@
   "snapshot": {
     "id": 1,
     "nonce": "<nonce>",
-    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=dbe2e73f1b0965ab|nonce=<nonce>"
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=796eb88f05c79380|nonce=<nonce>"
   },
   "truncated": false,
   "unresolved": [],

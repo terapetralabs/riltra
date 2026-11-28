@@ -34,7 +34,8 @@ pub const SCHEMA_VERSION: u32 = 6;
 /// 13: C/C++ `class EXPORT Name {...}` (a macro between the keyword and the name)
 /// is a class or struct definition, not a function.
 /// 14: heritage, containment and doc-comment facts are extracted and stored (no document reports them yet).
-pub const PARSER_VERSION: u32 = 14;
+/// 15: a Rust turbofish call (`get::<T>()`) is recorded under the called name.
+pub const PARSER_VERSION: u32 = 15;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.

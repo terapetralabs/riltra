@@ -153,6 +153,26 @@ fn terminal_text(call: &store::CallRow) -> &str {
     name.get(start..end).unwrap_or("")
 }
 
+/// A reference inside a Rust turbofish's type arguments (`get::<Tag>`): the
+/// callee goes on with `::` after the called name, which only a generic
+/// function does. Such a reference is about the type, never about that call or
+/// one whose callee holds it (`make::<Tag>().finish()`).
+fn in_type_arguments(call: &store::CallRow, fact: &store::SemanticFact) -> bool {
+    let (Some(name), Some(callee), Some(terminal)) = (
+        call.name.as_deref(),
+        call.callee.as_ref(),
+        call.tcallee.as_ref(),
+    ) else {
+        return false;
+    };
+    fact.byte_start >= terminal.byte_end
+        && terminal
+            .byte_end
+            .checked_sub(callee.byte_start)
+            .and_then(|at| name.get(at..))
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
 /// A receiver or scope (`obj.`, `ns::`, `ptr->`) precedes the called name
 /// when the terminal starts after the callee does.
 fn has_receiver(call: &store::CallRow) -> bool {
@@ -633,6 +653,9 @@ pub fn upsert_semantic_edges(
                     callee_hits.push(*call);
                 }
             }
+        }
+        if callee_hits.iter().any(|call| in_type_arguments(call, fact)) {
+            callee_hits.clear();
         }
         callee_hits.retain(|call| {
             !(call

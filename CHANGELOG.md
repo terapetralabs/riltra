@@ -39,6 +39,15 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
   [capabilities guide](docs/guide/capabilities.md#known-limitations): candidates come from the
   file and its importers only (not, for example, from `#[path]` modules), and on a large
   repository `impact` can run out of time before it lists them.
+- With a SCIP import whose producer gives a module a definition as wide as its file, an anchor at
+  the start of a definition (the position `search` returns and a name selector uses) answered for
+  the module. It now answers for the definition: by its own identity when exactly one definition
+  occurrence of its name belongs to it, else by syntax. The latter includes a definition that
+  holds a local binding of its own name. This applies to `callers`, `callees`, `trace`, `impact`,
+  `context`, `packet`, `knowledge bind`, `docs scan`/`ingest` and `semantic query`; stored edges
+  are unchanged. A `--symbol` naming the module at such a position is refused. A knowledge binding
+  made there by an older binary holds the module identity and no longer matches the definition;
+  bind it again.
 
 ## [0.3.0] - 2026-11-26
 

@@ -2178,34 +2178,11 @@ fn identity_anchor_on_an_unchecked_import() {
 
 #[test]
 fn identity_knowledge_bind_on_an_ambiguous_definition_stays_syntax() {
-    use std::io::Write;
     let h = home("identity-bind");
     let (_dir, scip) = dup_repo(&h);
     do_index(&h);
     do_import(&h, &scip);
-    let stdin = |args: &[&str], input: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
-            .args(args)
-            .env("RILTRA_HOME", &h)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        let done = child.wait_with_output().unwrap();
-        assert!(
-            done.status.success(),
-            "{}",
-            String::from_utf8_lossy(&done.stderr)
-        );
-        String::from_utf8_lossy(&done.stdout).into_owned()
-    };
+    let stdin = |args: &[&str], input: &str| run_stdin(&h, args, input);
     stdin(
         &["knowledge", "create", "--repo", "sem", "--input", "-"],
         r#"{"id":"d1","kind":"decision","title":"T","body":"b","status":"active","author":"a","evidence":[]}"#,
@@ -2361,4 +2338,344 @@ fn identity_demoted_calls_stay_listed_as_candidates() {
     let (code, out) = dup_callers(&h, "1", "17", None);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("\"identity-unchecked\""), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// Item 5 K2: a position inside a definition answers for that definition, not
+// for the file-wide module occurrence rust-analyzer emits.
+// ---------------------------------------------------------------------------
+
+/// Run a command that reads `input` from stdin; it must succeed.
+fn run_stdin(h: &Path, args: &[&str], input: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+        .args(args)
+        .env("RILTRA_HOME", h)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let done = child.wait_with_output().unwrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    String::from_utf8_lossy(&done.stdout).into_owned()
+}
+
+const MOD: &str = "scip-test test test-pkg 1.0.0 a/";
+const TARGET: &str = "scip-test test test-pkg 1.0.0 a/target().";
+const USER: &str = "scip-test test test-pkg 1.0.0 a/user().";
+const NESTED: &str = "scip-test test test-pkg 1.0.0 a/outer().inner().";
+const OUTER: &str = "scip-test test test-pkg 1.0.0 a/outer().";
+const INNER_SAME: &str = "scip-test test test-pkg 1.0.0 a/same().same().";
+
+// 1-based: target 3..6, user 7..9, outer 10..14 (inner 11), bare 15, same 17..19.
+const K2_SOURCE: &str = "const top = 1;\n\nfunction target() {\n  helper();\n\n}\nfunction user() {\n  target();\n}\nfunction outer() {\n  function inner() {}\n  inner();\n\n}\nfunction bare() {}\nfunction helper() {}\nfunction same() {\n  function same() {}\n}\n";
+
+/// A definition occurrence covering lines 0..`end_line`, as a module has.
+fn module_occurrence(symbol: &str, end_line: u64) -> Vec<u8> {
+    let mut range = Vec::new();
+    for (field, value) in [(1, 0), (2, 0), (3, end_line), (4, 0)] {
+        varint_field(field, value, &mut range);
+    }
+    let mut o = Vec::new();
+    str_field(2, symbol, &mut o);
+    varint_field(3, 0x1, &mut o);
+    len_field(9, &range, &mut o);
+    o
+}
+
+fn k2_repo(h: &Path) -> PathBuf {
+    let dir = repo_with(h, "sem", &[("src/a.ts", K2_SOURCE)]);
+    let helper = "scip-test test test-pkg 1.0.0 a/helper().";
+    let occurrences = [
+        module_occurrence(MOD, 19),
+        occurrence(TARGET, 0x1, 2, 9, 15),
+        occurrence(helper, 0x0, 3, 2, 8),
+        occurrence(USER, 0x1, 6, 9, 13),
+        occurrence(TARGET, 0x0, 7, 2, 8),
+        occurrence(OUTER, 0x1, 9, 9, 14),
+        occurrence(NESTED, 0x1, 10, 11, 16),
+        occurrence(NESTED, 0x0, 11, 2, 7),
+        // `bare` has no occurrence on purpose.
+        occurrence(helper, 0x1, 15, 9, 15),
+        // Only the inner `same` has one.
+        occurrence(INNER_SAME, 0x1, 17, 11, 15),
+    ];
+    let symbols = [
+        symbol_info(MOD, "a"),
+        symbol_info(TARGET, "target"),
+        symbol_info(USER, "user"),
+        symbol_info(OUTER, "outer"),
+        symbol_info(NESTED, "inner"),
+        symbol_info(helper, "helper"),
+        symbol_info(INNER_SAME, "same"),
+    ];
+    let payload = index_bytes(
+        &dir,
+        &[document("src/a.ts", &occurrences, &symbols, false)],
+        &[],
+    );
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    do_index(h);
+    do_import(h, &scip.to_string_lossy());
+    dir
+}
+
+/// The `"anchor":{...}` object of a graph answer.
+fn anchor_of(answer: &str) -> &str {
+    let start = answer
+        .find("\"anchor\":{")
+        .unwrap_or_else(|| panic!("{answer}"));
+    let end = answer[start..].find('}').unwrap();
+    &answer[start..start + end]
+}
+
+fn k2_anchor(h: &Path, line: &str, col: &str) -> String {
+    let (code, out) = dup_callers(h, line, col, None);
+    assert_eq!(code, 0, "{line}:{col}: {out}");
+    anchor_of(&out).to_string()
+}
+
+fn names_symbol(anchor: &str, symbol: &str) -> bool {
+    anchor.contains(&format!("\"{symbol}\""))
+}
+
+#[test]
+fn anchor_definition_start_and_body_answer_the_definition() {
+    let h = home("anchor-start");
+    k2_repo(&h);
+    // Start of the definition, and a blank line in its body.
+    for (line, col, symbol) in [
+        ("3", "1", TARGET),
+        ("5", "1", TARGET),
+        ("10", "1", OUTER),
+        ("11", "3", NESTED),
+        ("13", "1", OUTER),
+    ] {
+        let anchor = k2_anchor(&h, line, col);
+        assert!(names_symbol(&anchor, symbol), "{line}:{col}: {anchor}");
+    }
+    // The start answers the same callers as the name.
+    let rows = |col: &str| {
+        let (code, out) = dup_callers(&h, "3", col, None);
+        assert_eq!(code, 0, "{out}");
+        let at = out.find("\"edges\":").unwrap_or_else(|| panic!("{out}"));
+        out[at..].to_string()
+    };
+    assert_eq!(rows("1"), rows("10"));
+}
+
+#[test]
+fn anchor_occurrences_and_module_lines_answer_as_before() {
+    let h = home("anchor-controls");
+    k2_repo(&h);
+    for (line, col, symbol) in [
+        ("3", "10", TARGET),
+        ("8", "3", TARGET),
+        ("12", "3", NESTED),
+        // No definition holds these positions: the module is the answer.
+        ("1", "1", MOD),
+        ("2", "1", MOD),
+    ] {
+        let anchor = k2_anchor(&h, line, col);
+        assert!(names_symbol(&anchor, symbol), "{line}:{col}: {anchor}");
+    }
+}
+
+#[test]
+fn anchor_definition_without_an_occurrence_falls_back_to_syntax() {
+    let h = home("anchor-bare");
+    k2_repo(&h);
+    let (code, out) = dup_callers(&h, "15", "1", None);
+    assert_eq!(code, 0, "{out}");
+    assert!(anchor_of(&out).contains("syntax-fallback"), "{out}");
+    assert!(!names_symbol(anchor_of(&out), MOD), "{out}");
+    let (code, out) = dup_query(&h, "15", "1");
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("no semantic occurrence here"), "{out}");
+}
+
+#[test]
+fn anchor_symbol_selector_matches_only_the_corrected_identity() {
+    let h = home("anchor-symbol");
+    k2_repo(&h);
+    let (code, out) = dup_callers(&h, "3", "1", Some(TARGET));
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = dup_callers(&h, "3", "1", Some(MOD));
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("--symbol disagrees"), "{out}");
+}
+
+#[test]
+fn anchor_semantic_query_at_a_definition_start() {
+    let h = home("anchor-query");
+    k2_repo(&h);
+    let (code, at_start) = dup_query(&h, "3", "1");
+    assert_eq!(code, 0, "{at_start}");
+    let (code, at_name) = dup_query(&h, "3", "10");
+    assert_eq!(code, 0, "{at_name}");
+    assert_eq!(at_start, at_name);
+}
+
+#[test]
+fn anchor_source_edit_keeps_the_previous_refusal() {
+    let h = home("anchor-edited");
+    let dir = k2_repo(&h);
+    std::fs::write(dir.join("src/a.ts"), format!("{K2_SOURCE}// edit\n")).unwrap();
+    let (code, out) = dup_callers(&h, "3", "1", None);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("source-changed"), "{out}");
+}
+
+/// `setup` is ambiguous (K1): its start is that definition by syntax, with the
+/// doubt, never the module of the file.
+#[test]
+fn anchor_start_of_an_ambiguous_definition_is_syntax_with_the_doubt() {
+    let h = home("anchor-doubt");
+    let source = "function setup() {}\n";
+    let dir = repo_with(&h, "sem", &[("src/a.ts", source), ("src/b.ts", source)]);
+    let doc = |rel: &str, module: &str| {
+        document(
+            rel,
+            &[module_occurrence(module, 1), occurrence(DUP, 0x1, 0, 9, 14)],
+            &[symbol_info(module, "m"), symbol_info(DUP, "setup")],
+            false,
+        )
+    };
+    let payload = index_bytes(
+        &dir,
+        &[
+            doc("src/a.ts", MOD),
+            doc("src/b.ts", "scip-test test test-pkg 1.0.0 b/"),
+        ],
+        &[],
+    );
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    do_index(&h);
+    do_import(&h, &scip.to_string_lossy());
+    let (code, out) = dup_callers(&h, "1", "1", None);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("syntax-fallback") && out.contains("names 2 definitions"),
+        "{out}"
+    );
+}
+
+#[test]
+fn anchor_name_selector_answers_like_the_definition_start() {
+    let h = home("anchor-target");
+    k2_repo(&h);
+    let (code, by_name, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--target", "target", "--in", "src/a.ts",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(names_symbol(anchor_of(&by_name), TARGET), "{by_name}");
+}
+
+/// A binding made at a definition start holds the function's identity; one made
+/// on a module line stays the module's and is not claimed by the function.
+#[test]
+fn anchor_knowledge_bind_at_a_definition_start_holds_the_function() {
+    let h = home("anchor-bind");
+    k2_repo(&h);
+    for id in ["fn", "module"] {
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "sem", "--input", "-"],
+            &format!(
+                r#"{{"id":"{id}","kind":"decision","title":"T","body":"b","status":"active","author":"a","evidence":[]}}"#
+            ),
+        );
+    }
+    for (id, line) in [("fn", "3"), ("module", "1")] {
+        run_stdin(
+            &h,
+            &[
+                "knowledge",
+                "bind",
+                "--repo",
+                "sem",
+                "--path",
+                "src/a.ts",
+                "--line",
+                line,
+                "--col",
+                "1",
+                "--input",
+                "-",
+            ],
+            &format!(
+                r#"{{"record_id":"{id}","record_revision":1,"relation":"documents","author":"f","rationale":"f","provenance":"f"}}"#
+            ),
+        );
+    }
+    let (code, at_function, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "sem",
+            "--path",
+            "src/a.ts",
+            "--line",
+            "3",
+            "--col",
+            "10",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(at_function.contains("\"fn\""), "{at_function}");
+    assert!(!at_function.contains("\"module\""), "{at_function}");
+}
+
+/// The same identity from two imports stays an error at a definition start.
+#[test]
+fn anchor_two_imports_at_a_definition_start_stay_ambiguous() {
+    let h = home("anchor-two-imports");
+    let dir = k2_repo(&h);
+    let occurrences = [
+        module_occurrence(MOD, 16),
+        occurrence(TARGET, 0x1, 2, 9, 15),
+    ];
+    let symbols = [symbol_info(MOD, "a"), symbol_info(TARGET, "target")];
+    let payload = index_bytes_with_tool(
+        &dir,
+        "another-cli",
+        &[document("src/a.ts", &occurrences, &symbols, false)],
+        &[],
+    );
+    let scip = dir.join("second.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    do_import(&h, &scip.to_string_lossy());
+    let (code, out) = dup_callers(&h, "3", "1", None);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("same identity from 2 imports"), "{out}");
+}
+
+#[test]
+fn anchor_a_nested_same_named_definition_keeps_its_occurrence() {
+    let h = home("anchor-nested-name");
+    k2_repo(&h);
+    let (code, out) = dup_callers(&h, "17", "1", None);
+    assert_eq!(code, 0, "{out}");
+    assert!(anchor_of(&out).contains("syntax-fallback"), "{out}");
+    assert!(!names_symbol(anchor_of(&out), INNER_SAME), "{out}");
+    let anchor = k2_anchor(&h, "18", "3");
+    assert!(names_symbol(&anchor, INNER_SAME), "{anchor}");
 }

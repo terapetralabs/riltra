@@ -1379,22 +1379,38 @@ pub fn semantic_query(
     let line0 = query.line1.saturating_sub(1);
     let col0 = query.col1.saturating_sub(1);
     let facts = store::semantic_facts_at(&tx, snapshot.id, &validated)?;
-    // Narrowest enclosing occurrence wins (nested spans resolve inward).
     // Half-open [start, end): the end edge itself is outside the symbol.
-    let mut anchor: Option<&store::SemanticFact> = None;
-    for fact in &facts {
-        let inside = (fact.start_line, fact.start_col) <= (line0, col0)
-            && (line0, col0) < (fact.end_line, fact.end_col);
-        if !inside {
-            continue;
-        }
-        let width = fact.byte_end.saturating_sub(fact.byte_start);
-        match &anchor {
-            Some(a) if a.byte_end.saturating_sub(a.byte_start) <= width => {}
-            _ => anchor = Some(fact),
-        }
-    }
-    let anchor = anchor.ok_or_else(|| "no semantic occurrence here".to_string())?;
+    let containing: Vec<&store::SemanticFact> = facts
+        .iter()
+        .filter(|fact| {
+            (fact.start_line, fact.start_col) <= (line0, col0)
+                && (line0, col0) < (fact.end_line, fact.end_col)
+        })
+        .collect();
+    let source = crate::semantic::confined_read(&canon, &validated, crate::scan::MAX_FILE_BYTES)
+        .ok()
+        .filter(|raw| {
+            store::file_identity(&tx, snapshot.id, &validated)
+                .ok()
+                .flatten()
+                .is_some_and(|(_, digest)| digest == store::content_digest(raw))
+        });
+    let defs = store::symbols_at(&tx, snapshot.id, &validated)?;
+    let position = source.as_ref().and_then(|source| {
+        Some(crate::anchor::Position {
+            source,
+            offset: byte_offset_of(source, line0, col0)?,
+            defs: &defs,
+        })
+    });
+    let usable = facts.iter().filter(|f| {
+        source
+            .as_ref()
+            .is_some_and(|raw| store::content_digest(raw) == f.file_digest)
+    });
+    let anchor = *crate::anchor::select(containing, usable, position.as_ref())
+        .first()
+        .ok_or_else(|| "no semantic occurrence here".to_string())?;
     let uri = anchor
         .symbol_uri
         .clone()
@@ -1669,8 +1685,9 @@ pub(crate) fn resolve_edge_anchor_classified(
         None
     };
     let mut positions = BTreeMap::new();
-    let mut best_width = usize::MAX;
-    let mut best: Vec<&store::SemanticFact> = Vec::new();
+    let mut containing: Vec<&store::SemanticFact> = Vec::new();
+    // Facts of the current file bytes that may stand for a definition.
+    let mut usable: Vec<&store::SemanticFact> = Vec::new();
     let mut provenance: BTreeMap<i64, Option<String>> = BTreeMap::new();
     for fact in &facts {
         let encoding = match provenance.get(&fact.import_id) {
@@ -1707,19 +1724,27 @@ pub(crate) fn resolve_edge_anchor_classified(
         } else {
             None
         };
-        let inside = offset.is_some_and(|off| fact.byte_start <= off && off < fact.byte_end);
-        if !inside {
-            continue;
+        if current_digest.as_deref() == Some(fact.file_digest.as_str()) {
+            usable.push(fact);
         }
-        let width = fact.byte_end.saturating_sub(fact.byte_start);
-        if width < best_width {
-            best_width = width;
-            best.clear();
-        }
-        if width == best_width {
-            best.push(fact);
+        if offset.is_some_and(|off| fact.byte_start <= off && off < fact.byte_end) {
+            containing.push(fact);
         }
     }
+    // Only source that is still the indexed one says which definition holds
+    // the position; changed source keeps the plain narrowest occurrence.
+    let defs = store::symbols_at(tx, snapshot_id, validated)?;
+    let position = source
+        .as_deref()
+        .filter(|_| indexed.is_some_and(|(_, digest)| current_digest.as_ref() == Some(digest)))
+        .and_then(|source| {
+            Some(crate::anchor::Position {
+                source,
+                offset: byte_offset_of(source, line0, col0)?,
+                defs: &defs,
+            })
+        });
+    let mut best = crate::anchor::select(containing, usable, position.as_ref());
     if let Some(want) = symbol {
         if best.is_empty() || !best.iter().any(|f| f.symbol_uri.as_deref() == Some(want)) {
             return Err(GraphQueryError::Anchor(
@@ -1847,24 +1872,10 @@ pub(crate) fn resolve_edge_anchor_classified(
     let off = byte_offset_of(&source, line0, col0).ok_or_else(|| {
         GraphQueryError::Anchor("anchor unresolved: position outside the source".to_string())
     })?;
-    let mut best_width = usize::MAX;
-    let mut best: Vec<&store::SymbolRow> = Vec::new();
-    let defs = store::symbols_at(tx, snapshot_id, validated)?;
-    for def in &defs {
-        // A data member's symbol spans its NAME only, so it is the narrowest
-        // definition exactly when the position is on that name; anywhere else
-        // in the class body the enclosing definition stays the anchor.
-        if def.byte_start <= off && off < def.byte_end {
-            let width = def.byte_end.saturating_sub(def.byte_start);
-            if width < best_width {
-                best_width = width;
-                best.clear();
-            }
-            if width == best_width {
-                best.push(def);
-            }
-        }
-    }
+    // A data member's symbol spans its NAME only, so it is the narrowest
+    // definition exactly when the position is on that name; anywhere else in
+    // the class body the enclosing definition stays the anchor.
+    let best = crate::anchor::definitions_at(&defs, off);
     let mut keys = BTreeSet::new();
     for def in &best {
         keys.insert((

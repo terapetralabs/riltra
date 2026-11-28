@@ -10,6 +10,7 @@
 mod agent_block;
 #[allow(dead_code)] // Task 5 consumes inspection results and plans.
 mod agent_setup;
+mod anchor;
 mod args;
 mod backup;
 mod changes;

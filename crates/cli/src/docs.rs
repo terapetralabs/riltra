@@ -495,7 +495,6 @@ const MAX_PATHS: usize = 20;
 const MAX_REPORT_BYTES: usize = 262_144;
 /// Binding provenance cap (`docs-ingest:<doc>#<section_id>@<digest>`), D4.
 const PROVENANCE_MAX: usize = 4_096;
-const DEF_ROLE: u32 = 1;
 const DISCLAIMER: &str = "Document sections are the author's claims. Proposals come only from explicit links to indexed definitions; riltra wrote nothing, and a proposal or binding is not a verified relationship.";
 const LINK_STATUSES: [&str; 12] = [
     "outside-repo",
@@ -618,12 +617,6 @@ pub(crate) enum Proof {
     Unproven(String),
 }
 
-/// The unqualified part of a stored definition name (after the last `::` or `.`).
-fn unqualified(name: &str) -> &str {
-    let last = name.rsplit("::").next().unwrap_or(name);
-    last.rsplit('.').next().unwrap_or(last)
-}
-
 /// 0-based line and byte column of a byte offset in the live source.
 fn position(source: &[u8], offset: usize) -> (u32, u32) {
     let before = &source[..offset];
@@ -666,51 +659,19 @@ pub(crate) fn prove_anchor(
     definition: &store::SymbolRow,
     source: &[u8],
 ) -> Result<Proof, GraphQueryError> {
-    let Some(name) = definition
-        .name
-        .as_deref()
-        .map(unqualified)
-        .filter(|n| !n.is_empty())
-    else {
+    if crate::anchor::short_name(definition).is_none() {
         return Ok(Proof::Unproven("the definition has no name".to_string()));
-    };
+    }
     let defs = store::symbols_at(conn, snapshot_id, validated)?;
     let facts = store::semantic_facts_at(conn, snapshot_id, validated)?;
-    let width = definition.byte_end.saturating_sub(definition.byte_start);
-    let descendants: Vec<(usize, usize)> = defs
-        .iter()
-        .filter(|d| {
-            d.byte_start >= definition.byte_start
-                && d.byte_end <= definition.byte_end
-                && d.byte_end.saturating_sub(d.byte_start) < width
-        })
-        .map(|d| (d.byte_start, d.byte_end))
-        .collect();
     let mut usable = BTreeMap::new();
-    let mut owned = Vec::new();
-    let mut nested_same_name = false;
+    let mut accepted = Vec::new();
     for fact in &facts {
-        if fact.roles & DEF_ROLE == 0 || fact.symbol_uri.is_none() {
-            continue;
-        }
-        if source.get(fact.byte_start..fact.byte_end) != Some(name.as_bytes()) {
-            continue;
-        }
-        if !(definition.byte_start <= fact.byte_start && fact.byte_end <= definition.byte_end) {
-            continue;
-        }
-        if !import_usable(conn, snapshot_id, fact.import_id, &mut usable)? {
-            continue;
-        }
-        let nested = descendants
-            .iter()
-            .any(|(s, e)| *s <= fact.byte_start && fact.byte_end <= *e);
-        if nested {
-            nested_same_name = true;
-        } else {
-            owned.push(fact);
+        if import_usable(conn, snapshot_id, fact.import_id, &mut usable)? {
+            accepted.push(fact);
         }
     }
+    let (owned, nested_same_name) = crate::anchor::owned(accepted, &defs, definition, source);
     if owned.len() > 1 {
         return Ok(Proof::Unproven(
             "two or more occurrences own this definition".to_string(),
